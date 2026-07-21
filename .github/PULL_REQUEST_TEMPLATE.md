@@ -2,7 +2,7 @@
 
 -
 
-## Related Issue
+## Related Issue Or Ticket
 
 Closes #
 
@@ -10,45 +10,127 @@ Closes #
 
 - [ ] Bug fix
 - [ ] Feature
-- [ ] Technical task
 - [ ] Refactor
 - [ ] Documentation
-- [ ] Other
+- [ ] Infrastructure
+- [ ] AI-agent or prompt update
+- [ ] Other:
 
-## Testing Performed
+## Affected Label OS Domain
 
-- [ ] Formatting check
-- [ ] Frontend lint
-- [ ] Backend lint
-- [ ] Type checking
-- [ ] Frontend tests
-- [ ] Backend tests
-- [ ] Application builds
-- [ ] Not run; reason:
+- [ ] Web app
+- [ ] API
+- [ ] Database
+- [ ] AI agents or prompts
+- [ ] Authentication or authorization
+- [ ] Infrastructure or deployment
+- [ ] Documentation
+- [ ] Other:
 
-## Screenshots
+## Implementation Details
+
+-
+
+## Screenshots Or Recordings
 
 Add screenshots or screen recordings for UI changes. Write `N/A` when not applicable.
 
+## Database Changes
+
+- [ ] No database changes
+- [ ] Schema migration
+- [ ] Data migration
+- [ ] Seed or fixture changes
+- [ ] Other:
+
+Details:
+
+-
+
+## API Changes
+
+- [ ] No API changes
+- [ ] New endpoint
+- [ ] Changed endpoint behavior
+- [ ] Removed or deprecated endpoint
+- [ ] Request or response contract change
+- [ ] Other:
+
+Details:
+
+-
+
+## AI-Agent Or Prompt Changes
+
+- [ ] No AI-agent or prompt changes
+- [ ] Prompt changes
+- [ ] Tool or routing changes
+- [ ] Model, inference, or evaluation changes
+- [ ] Other:
+
+Details:
+
+-
+
 ## Security Considerations
 
-- [ ] This change does not expose secrets, credentials, private keys, or production data.
-- [ ] Authentication, authorization, or data handling changes are described above.
-- [ ] New dependencies or external services are documented above.
+- [ ] This change does not expose secrets, credentials, private keys, or production data
+- [ ] Authentication, authorization, or data handling changes are described above
+- [ ] New dependencies or external services are documented above
 
-## Checklist
+Details:
 
-- [ ] The branch was created from the latest main branch
-- [ ] The change has a clear and limited scope
-- [ ] Formatting and linting pass
-- [ ] Type checking passes
+-
+
+## Testing Performed
+
+- [ ] Linting
+- [ ] Type checking
+- [ ] Unit tests
+- [ ] Integration tests
+- [ ] End-to-end tests
+- [ ] Manual testing
+- [ ] Not run; reason:
+
+Details:
+
+-
+
+## Accessibility Review
+
+- [ ] Not applicable
+- [ ] Keyboard navigation reviewed
+- [ ] Screen reader behavior reviewed
+- [ ] Color contrast reviewed
+- [ ] Focus states reviewed
+- [ ] Other:
+
+Details:
+
+-
+
+## Documentation Updates
+
+- [ ] Documentation was updated
+- [ ] Documentation was not needed
+- [ ] Follow-up documentation task created:
+
+## Deployment Considerations
+
+-
+
+## Rollback Plan
+
+-
+
+## Reviewer Checklist
+
+- [ ] The branch follows the naming convention
+- [ ] The branch was created from the latest `main`
+- [ ] The pull request targets `main`
+- [ ] The change is focused
+- [ ] Linting passes
 - [ ] Tests pass
-- [ ] New behavior includes tests where appropriate
-- [ ] Documentation has been updated
-- [ ] No secrets or credentials were committed
-- [ ] The pull request is ready for review
-- [ ] I called out migrations, rollout risks, or follow-up work
-
-## Notes
-
-Add reviewer context, risks, or follow-up work here.
+- [ ] No secrets are committed
+- [ ] Documentation was updated
+- [ ] Breaking changes are identified
