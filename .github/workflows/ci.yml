@@ -1,0 +1,158 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  format:
+    name: Formatting check
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.13.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: apps/api/pyproject.toml
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install backend formatter
+        working-directory: apps/api
+        run: python -m pip install "black>=25.1.0"
+
+      - name: Check formatting
+        run: pnpm format:check
+
+      - name: Check backend formatting
+        working-directory: apps/api
+        run: python -m black --check .
+
+  frontend:
+    name: Frontend checks
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.13.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Frontend lint
+        run: pnpm lint
+
+      - name: Type checking
+        run: pnpm typecheck
+
+      - name: Frontend tests
+        run: pnpm test:web
+
+      - name: Frontend build
+        run: pnpm build
+
+  backend:
+    name: Backend checks
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: apps/api/pyproject.toml
+
+      - name: Install backend dependencies
+        working-directory: apps/api
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ../../packages/database
+          python -m pip install -e ".[dev]"
+          python -m pip install build
+
+      - name: Backend lint
+        working-directory: apps/api
+        run: python -m ruff check .
+
+      - name: Backend tests
+        working-directory: apps/api
+        run: python -m pytest
+
+      - name: Backend build
+        working-directory: apps/api
+        run: python -m build
+
+  agents:
+    name: Agent service checks
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: apps/agents/pyproject.toml
+
+      - name: Install agent dependencies
+        working-directory: apps/agents
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+          python -m pip install build
+
+      - name: Agent lint
+        working-directory: apps/agents
+        run: python -m ruff check .
+
+      - name: Agent format
+        working-directory: apps/agents
+        run: python -m black --check .
+
+      - name: Agent tests
+        working-directory: apps/agents
+        run: python -m pytest
+
+      - name: Agent build
+        working-directory: apps/agents
+        run: python -m build

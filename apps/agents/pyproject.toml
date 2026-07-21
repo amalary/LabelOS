@@ -1,0 +1,62 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "labelos-agents"
+version = "0.0.0"
+description = "AI agent execution service for Label OS."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.116.1",
+  "pydantic>=2.11.7",
+  "uvicorn[standard]>=0.35.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "black>=25.1.0",
+  "httpx>=0.28.1",
+  "pytest>=8.4.1",
+  "pytest-cov>=7.0.0",
+  "ruff>=0.12.4",
+]
+
+[project.scripts]
+labelos-agents = "labelos_agents.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/labelos_agents"]
+
+[tool.black]
+line-length = 88
+target-version = ["py312"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.coverage.run]
+branch = true
+source = ["labelos_agents"]
+omit = [
+  "*/__init__.py",
+  "*/__pycache__/*",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+exclude_lines = [
+  "pragma: no cover",
+  "if TYPE_CHECKING:",
+]

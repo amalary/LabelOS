@@ -1,0 +1,10 @@
+{
+  "name": "@label-os/config",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./eslint/base": "./eslint/base.mjs",
+    "./typescript/base": "./typescript/base.json"
+  }
+}

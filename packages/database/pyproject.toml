@@ -1,0 +1,18 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "labelos-database"
+version = "0.0.0"
+description = "Database models, migrations, and session utilities for Label OS."
+requires-python = ">=3.12"
+dependencies = [
+  "alembic>=1.16.4",
+  "asyncpg>=0.30.0",
+  "pydantic>=2.11.7",
+  "sqlalchemy[asyncio]>=2.0.41",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/labelos_database"]
