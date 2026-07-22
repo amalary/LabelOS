@@ -1,17 +1,17 @@
-import { NextRequest, NextResponse } from "next/server";
+import { authkitMiddleware } from "@workos-inc/authkit-nextjs";
 
-import { ACCESS_TOKEN_COOKIE } from "./lib/auth-cookies";
+import { PUBLIC_ROUTES } from "./lib/route-protection";
 
-export function middleware(request: NextRequest) {
-  const hasAccessToken = request.cookies.has(ACCESS_TOKEN_COOKIE);
-  if (!hasAccessToken) {
-    const loginUrl = new URL("/login", request.url);
-    loginUrl.searchParams.set("next", request.nextUrl.pathname);
-    return NextResponse.redirect(loginUrl);
-  }
-  return NextResponse.next();
-}
+export default authkitMiddleware({
+  redirectUri: process.env.WORKOS_REDIRECT_URI ?? process.env.NEXT_PUBLIC_WORKOS_REDIRECT_URI,
+  middlewareAuth: {
+    enabled: true,
+    unauthenticatedPaths: [...PUBLIC_ROUTES],
+  },
+});
 
 export const config = {
-  matcher: ["/dashboard/:path*"],
+  matcher: [
+    "/((?!_next/static|_next/image|favicon.ico|robots.txt|sitemap.xml|.*\\.(?:avif|css|gif|ico|jpg|jpeg|js|json|map|otf|png|svg|ttf|txt|webp|woff|woff2|xml)$).*)",
+  ],
 };

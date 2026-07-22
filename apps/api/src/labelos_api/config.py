@@ -16,11 +16,10 @@ class Settings(DatabaseSettings):
     allowed_frontend_origins: list[str] = Field(
         default_factory=lambda: ["http://localhost:3000"],
     )
-    auth_provider: str = "oidc"
-    auth_issuer_url: str | None = None
-    auth_audience: str | None = None
-    auth_jwt_algorithms: list[str] = Field(default_factory=lambda: ["HS256"])
-    auth_token_secret: str | None = None
+    auth_provider: str = "workos"
+    workos_client_id: str | None = None
+    workos_issuer_url: str = "https://api.workos.com"
+    workos_jwks_url: str | None = None
 
     @field_validator("allowed_frontend_origins", mode="before")
     @classmethod
@@ -29,18 +28,44 @@ class Settings(DatabaseSettings):
             return [origin.strip() for origin in value.split(",") if origin.strip()]
         return value
 
-    @field_validator("auth_jwt_algorithms", mode="before")
-    @classmethod
-    def parse_auth_algorithms(cls, value: str | list[str]) -> list[str]:
-        if isinstance(value, str):
-            return [
-                algorithm.strip() for algorithm in value.split(",") if algorithm.strip()
-            ]
-        return value
-
     @property
     def is_development(self) -> bool:
         return self.environment.lower() in {"local", "development", "dev"}
+
+    @property
+    def is_test(self) -> bool:
+        return self.environment.lower() == "test"
+
+    @property
+    def requires_strict_startup_validation(self) -> bool:
+        return not self.is_development and not self.is_test
+
+    @property
+    def resolved_workos_jwks_url(self) -> str:
+        if self.workos_jwks_url:
+            return self.workos_jwks_url
+        if not self.workos_client_id:
+            raise ValueError("WORKOS_CLIENT_ID is required for WorkOS JWT validation")
+        return f"https://api.workos.com/sso/jwks/{self.workos_client_id}"
+
+    def validate_startup_environment(self) -> None:
+        if (
+            not self.requires_strict_startup_validation
+            or self.auth_provider.lower() != "workos"
+        ):
+            return
+
+        missing: list[str] = []
+        if not self.workos_client_id:
+            missing.append("WORKOS_CLIENT_ID")
+        if not self.workos_issuer_url:
+            missing.append("WORKOS_ISSUER_URL")
+
+        if missing:
+            joined = ", ".join(missing)
+            raise RuntimeError(f"Missing required WorkOS API environment: {joined}")
+
+        _ = self.resolved_workos_jwks_url
 
 
 @lru_cache
@@ -56,9 +81,8 @@ def get_settings() -> Settings:
         allowed_frontend_origins=os.getenv(
             "ALLOWED_FRONTEND_ORIGINS", "http://localhost:3000"
         ),
-        auth_provider=os.getenv("AUTH_PROVIDER", "oidc"),
-        auth_issuer_url=os.getenv("AUTH_ISSUER_URL") or None,
-        auth_audience=os.getenv("AUTH_AUDIENCE") or None,
-        auth_jwt_algorithms=os.getenv("AUTH_JWT_ALGORITHMS", "HS256"),
-        auth_token_secret=os.getenv("AUTH_TOKEN_SECRET") or None,
+        auth_provider=os.getenv("AUTH_PROVIDER", "workos"),
+        workos_client_id=os.getenv("WORKOS_CLIENT_ID") or None,
+        workos_issuer_url=os.getenv("WORKOS_ISSUER_URL", "https://api.workos.com"),
+        workos_jwks_url=os.getenv("WORKOS_JWKS_URL") or None,
     )

@@ -1,11 +1,9 @@
-import base64
-import hashlib
-import hmac
-import json
 import time
 from uuid import uuid4
 
+import jwt
 import pytest
+from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from labelos_database.models import MembershipRole, User
@@ -17,53 +15,63 @@ from labelos_api.auth import (
     has_role_at_least,
     principal_from_token,
     require_organization_role,
+    require_permission,
 )
 from labelos_api.config import Settings
 from labelos_api.main import create_app
 
+PRIVATE_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+PUBLIC_KEY = PRIVATE_KEY.public_key()
 
-def _b64url(value: bytes) -> str:
-    return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+class FakeSigningKey:
+    key = PUBLIC_KEY
+
+
+class FakeJwkClient:
+    def __init__(self, url: str) -> None:
+        self.url = url
+
+    def get_signing_key_from_jwt(self, token: str) -> FakeSigningKey:
+        return FakeSigningKey()
 
 
 def make_token(
     *,
-    secret: str = "test-secret",
-    subject: str = "provider-user-1",
-    issuer: str = "https://issuer.example",
-    audience: str = "label-os-api",
+    subject: str = "user_01TEST",
+    session_id: str = "session_01TEST",
+    issuer: str = "https://api.workos.com",
+    audience: str = "client_01TEST",
+    organization_id: str | None = "org_01TEST",
+    role: str = "admin",
+    permissions: list[str] | None = None,
     expires_in: int = 300,
 ) -> str:
-    header = {"alg": "HS256", "typ": "JWT"}
     claims = {
         "iss": issuer,
         "aud": audience,
         "sub": subject,
+        "sid": session_id,
         "email": "person@example.com",
         "name": "Test Person",
+        "role": role,
+        "permissions": permissions or ["artists:read"],
         "exp": int(time.time()) + expires_in,
     }
-    token_head = ".".join(
-        [
-            _b64url(json.dumps(header).encode("utf-8")),
-            _b64url(json.dumps(claims).encode("utf-8")),
-        ]
+    if organization_id is not None:
+        claims["org_id"] = organization_id
+    return jwt.encode(
+        claims, PRIVATE_KEY, algorithm="RS256", headers={"kid": "test-key"}
     )
-    signature = hmac.new(
-        secret.encode("utf-8"),
-        token_head.encode("utf-8"),
-        hashlib.sha256,
-    ).digest()
-    return f"{token_head}.{_b64url(signature)}"
 
 
 def auth_settings() -> Settings:
     return Settings(
         environment="test",
-        auth_provider="test-oidc",
-        auth_issuer_url="https://issuer.example",
-        auth_audience="label-os-api",
-        auth_token_secret="test-secret",
+        auth_provider="workos",
+        workos_client_id="client_01TEST",
+        workos_issuer_url="https://api.workos.com",
+        workos_jwks_url="https://example.test/jwks",
     )
 
 
@@ -81,18 +89,29 @@ def test_me_rejects_invalid_token(client: TestClient) -> None:
     assert response.json() == {"detail": "Invalid authentication token"}
 
 
-def test_valid_token_returns_authenticated_principal() -> None:
+def test_valid_token_returns_authenticated_principal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("labelos_api.auth.PyJWKClient", FakeJwkClient)
+
     principal = principal_from_token(make_token(), auth_settings())
 
     assert principal == AuthenticatedPrincipal(
-        provider="test-oidc",
-        subject="provider-user-1",
+        provider="workos",
+        subject="user_01TEST",
+        session_id="session_01TEST",
         email="person@example.com",
         display_name="Test Person",
+        organization_id="org_01TEST",
+        role="admin",
+        permissions=("artists:read",),
     )
 
 
-def test_authenticated_me_response_uses_current_user_context() -> None:
+def test_authenticated_me_response_uses_current_user_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "test")
     app = create_app()
     organization_id = uuid4()
     user = User(email="person@example.com", display_name="Test Person")
@@ -102,10 +121,13 @@ def test_authenticated_me_response_uses_current_user_context() -> None:
         return CurrentUserContext(
             user=user,
             principal=AuthenticatedPrincipal(
-                provider="test-oidc",
-                subject="provider-user-1",
+                provider="workos",
+                subject="user_01TEST",
+                session_id="session_01TEST",
                 email="person@example.com",
                 display_name="Test Person",
+                organization_id="org_01TEST",
+                role="admin",
             ),
             memberships=(
                 MembershipContext(
@@ -129,8 +151,8 @@ def test_authenticated_me_response_uses_current_user_context() -> None:
         "id": str(user.id),
         "email": "person@example.com",
         "display_name": "Test Person",
-        "auth_provider": "test-oidc",
-        "auth_subject": "provider-user-1",
+        "auth_provider": "workos",
+        "auth_subject": "user_01TEST",
         "memberships": [
             {
                 "organization_id": str(organization_id),
@@ -152,7 +174,11 @@ def test_require_organization_role_rejects_insufficient_role() -> None:
     organization_id = uuid4()
     context = CurrentUserContext(
         user=User(email="person@example.com"),
-        principal=AuthenticatedPrincipal(provider="test-oidc", subject="user-1"),
+        principal=AuthenticatedPrincipal(
+            provider="workos",
+            subject="user_01TEST",
+            session_id="session_01TEST",
+        ),
         memberships=(
             MembershipContext(
                 organization_id=organization_id,
@@ -167,3 +193,49 @@ def test_require_organization_role_rejects_insufficient_role() -> None:
         require_organization_role(organization_id, MembershipRole.admin, context)
 
     assert exc_info.value.status_code == 403
+
+
+def test_require_permission_rejects_missing_permission() -> None:
+    context = CurrentUserContext(
+        user=User(email="person@example.com"),
+        principal=AuthenticatedPrincipal(
+            provider="workos",
+            subject="user_01TEST",
+            session_id="session_01TEST",
+            permissions=("artists:read",),
+        ),
+        memberships=(),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        require_permission("artists:write", context)
+
+    assert exc_info.value.status_code == 403
+
+
+def test_workos_startup_validation_requires_client_id() -> None:
+    settings = Settings(
+        environment="production",
+        auth_provider="workos",
+        workos_client_id=None,
+        workos_issuer_url="https://api.workos.com",
+    )
+
+    with pytest.raises(RuntimeError, match="WORKOS_CLIENT_ID"):
+        settings.validate_startup_environment()
+
+
+def test_workos_jwks_url_defaults_to_client_id() -> None:
+    settings = Settings(
+        environment="production",
+        auth_provider="workos",
+        workos_client_id="client_01TEST",
+        workos_issuer_url="https://api.workos.com",
+        workos_jwks_url=None,
+    )
+
+    settings.validate_startup_environment()
+
+    assert settings.resolved_workos_jwks_url == (
+        "https://api.workos.com/sso/jwks/client_01TEST"
+    )

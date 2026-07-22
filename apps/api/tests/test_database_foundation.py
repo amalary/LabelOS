@@ -33,10 +33,14 @@ def test_foundational_models_are_registered() -> None:
 
 
 def test_memberships_define_organization_boundary_constraints() -> None:
+    organization_constraint_names = {
+        constraint.name for constraint in Organization.__table__.constraints
+    }
     table = OrganizationMembership.__table__
     constraint_names = {constraint.name for constraint in table.constraints}
     index_names = {index.name for index in table.indexes}
 
+    assert "uq_organizations_workos_organization_id" in organization_constraint_names
     assert "uq_organization_memberships_organization_id_user_id" in constraint_names
     assert "ix_organization_memberships_organization_id" in index_names
     assert "ix_organization_memberships_user_id" in index_names
