@@ -27,6 +27,10 @@ services:
       ALLOWED_FRONTEND_ORIGINS: ${ALLOWED_FRONTEND_ORIGINS:-http://localhost:3000}
       DATABASE_URL: ${COMPOSE_DATABASE_URL:-postgresql+asyncpg://labelos:labelos_local_password@postgres:5432/labelos}
       DATABASE_ECHO: ${DATABASE_ECHO:-false}
+      AUTH_PROVIDER: ${AUTH_PROVIDER:-workos}
+      WORKOS_CLIENT_ID: ${WORKOS_CLIENT_ID:-}
+      WORKOS_ISSUER_URL: ${WORKOS_ISSUER_URL:-https://api.workos.com}
+      WORKOS_JWKS_URL: ${WORKOS_JWKS_URL:-}
     ports:
       - "${API_PORT:-4000}:4000"
     depends_on:
@@ -51,10 +55,18 @@ services:
       dockerfile: apps/web/Dockerfile
       args:
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:4000}
+        NEXT_PUBLIC_WORKOS_REDIRECT_URI: ${NEXT_PUBLIC_WORKOS_REDIRECT_URI:-http://localhost:3000/api/auth/callback}
     environment:
       NODE_ENV: production
+      WEB_BASE_URL: ${WEB_BASE_URL:-http://localhost:3000}
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:4000}
+      NEXT_PUBLIC_WORKOS_REDIRECT_URI: ${NEXT_PUBLIC_WORKOS_REDIRECT_URI:-http://localhost:3000/api/auth/callback}
       API_BASE_URL: ${API_BASE_URL:-http://api:4000}
+      WORKOS_CLIENT_ID: ${WORKOS_CLIENT_ID:-}
+      WORKOS_API_KEY: ${WORKOS_API_KEY:-}
+      WORKOS_COOKIE_PASSWORD: ${WORKOS_COOKIE_PASSWORD:-}
+      WORKOS_REDIRECT_URI: ${WORKOS_REDIRECT_URI:-http://localhost:3000/api/auth/callback}
+      WORKOS_WEBHOOK_SECRET: ${WORKOS_WEBHOOK_SECRET:-}
     ports:
       - "${WEB_PORT:-3000}:3000"
     depends_on:

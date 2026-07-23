@@ -9,6 +9,7 @@
   --muted: #64748b;
   --panel: #ffffff;
   --border: #d8dee8;
+  --focus-ring: #0ea5e9;
 }
 
 * {
@@ -29,4 +30,39 @@ body {
 a {
   color: inherit;
   text-decoration: none;
+}
+
+@keyframes auth-shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+.auth-shimmer {
+  background-image: linear-gradient(
+    110deg,
+    rgb(226 232 240 / 0.55) 8%,
+    rgb(255 255 255 / 0.88) 18%,
+    rgb(226 232 240 / 0.55) 33%
+  );
+  background-size: 200% 100%;
+  animation: auth-shimmer 1.8s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+
+  .auth-shimmer {
+    animation: none;
+  }
 }

@@ -1,48 +1,69 @@
 from typing import Annotated
-from uuid import UUID
 
 from fastapi import APIRouter, Depends
-from labelos_database.models import MembershipRole
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from labelos_api.auth import CurrentUserContext, get_current_user_context
+from labelos_api.auth import AuthenticatedPrincipal, get_current_principal
 
 router = APIRouter(tags=["auth"])
 
 
-class MeMembershipResponse(BaseModel):
-    organization_id: UUID
-    organization_name: str
-    organization_slug: str
-    role: MembershipRole
-
-
 class MeResponse(BaseModel):
-    id: UUID
-    email: str
-    display_name: str | None
-    auth_provider: str
-    auth_subject: str
-    memberships: list[MeMembershipResponse]
+    workos_user_id: str = Field(
+        description="WorkOS user identifier from the validated bearer token.",
+        examples=["user_01H9Z5P8K3N7M2Q4R6S8T0V1W2"],
+    )
+    organization_id: str | None = Field(
+        default=None,
+        description="Active WorkOS organization identifier when present on the token.",
+        examples=["org_01H9Z5P8K3N7M2Q4R6S8T0V1W2"],
+    )
+    role: str | None = Field(
+        default=None,
+        description="WorkOS organization role included in the token, if any.",
+        examples=["admin"],
+    )
+    permissions: list[str] = Field(
+        default_factory=list,
+        description="Application permissions included in the validated WorkOS token.",
+        examples=[["artists:read", "artists:write"]],
+    )
 
 
-@router.get("/me", response_model=MeResponse)
+@router.get(
+    "/me",
+    response_model=MeResponse,
+    summary="Get current authenticated user",
+    description=(
+        "Returns the safe application identity from the validated WorkOS bearer token. "
+        "Secrets and raw token values are never returned."
+    ),
+    responses={
+        401: {
+            "description": "Missing, expired, or invalid WorkOS bearer token.",
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "missing_token": {
+                            "summary": "Missing bearer token",
+                            "value": {"detail": "Authentication required"},
+                        },
+                        "invalid_token": {
+                            "summary": "Invalid bearer token",
+                            "value": {"detail": "Invalid authentication token"},
+                        },
+                    }
+                }
+            },
+        }
+    },
+)
 async def read_me(
-    context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
+    principal: Annotated[AuthenticatedPrincipal, Depends(get_current_principal)],
 ) -> MeResponse:
     return MeResponse(
-        id=context.user.id,
-        email=context.user.email,
-        display_name=context.user.display_name,
-        auth_provider=context.principal.provider,
-        auth_subject=context.principal.subject,
-        memberships=[
-            MeMembershipResponse(
-                organization_id=membership.organization_id,
-                organization_name=membership.organization_name,
-                organization_slug=membership.organization_slug,
-                role=membership.role,
-            )
-            for membership in context.memberships
-        ],
+        workos_user_id=principal.subject,
+        organization_id=principal.organization_id,
+        role=principal.role,
+        permissions=list(principal.permissions),
     )

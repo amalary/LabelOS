@@ -11,6 +11,7 @@ from labelos_api.routes.health import router as health_router
 
 def create_app() -> FastAPI:
     settings = get_settings()
+    settings.validate_startup_environment()
     configure_logging(settings.log_level)
 
     app = FastAPI(

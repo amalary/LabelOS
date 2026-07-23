@@ -96,10 +96,13 @@ For local frontend development, set:
 
 ```sh
 NEXT_PUBLIC_API_URL=http://localhost:4000
+NEXT_PUBLIC_WORKOS_REDIRECT_URI=http://localhost:3000/api/auth/callback
 WEB_BASE_URL=http://localhost:3000
 ```
 
-`NEXT_PUBLIC_API_URL` is intentionally public and must not contain secrets. Identity provider client secrets and token settings are read only by server-side route handlers and the API.
+`NEXT_PUBLIC_API_URL` and `NEXT_PUBLIC_WORKOS_REDIRECT_URI` are intentionally
+public and must not contain secrets. WorkOS secrets and access tokens are read
+only by server-side route handlers, server components, and the API.
 
 Run the frontend through the root workspace commands:
 
@@ -114,10 +117,10 @@ The starter frontend currently provides:
 
 - `/` - frontend starter placeholder.
 - `/dashboard` - dashboard placeholder wrapped in the application shell.
-- `/login` - starts the server-side SSO flow.
+- `/login` - starts the server-side WorkOS AuthKit flow.
 
-The `/dashboard` route is protected by Next middleware. Users without the
-HttpOnly session token cookie are redirected to `/login`.
+The `/dashboard` route is protected by AuthKit middleware. Users without a valid
+AuthKit session are redirected into the WorkOS sign-in flow.
 
 Reusable frontend components live in `apps/web/src/components` so they can move into `packages/ui` when shared UI conventions are established.
 
@@ -231,6 +234,13 @@ Organization memberships support these roles:
 - `member`
 - `viewer`
 
+The initial application authorization policy uses Owner, Admin, and Member with
+WorkOS RBAC permission claims such as `artists:view` and `settings:manage`.
+Backend FastAPI dependencies enforce permissions on protected routes; frontend
+helpers only hide or disable unavailable actions. See
+[Authorization](docs/development/authorization.md) for the initial
+role-to-permission mapping and guard examples.
+
 Do not commit real credentials. Keep personal values in `.env`; `.env.example` should remain a safe template.
 
 ## Agent Service Setup
@@ -284,24 +294,42 @@ See `apps/agents/README.md` for the shared contracts and new-agent checklist.
 
 ## Authentication Setup
 
-Authentication is implemented as a provider-agnostic OIDC-style authorization
-code flow with PKCE:
+Authentication is implemented with WorkOS AuthKit:
 
 1. The browser opens `/api/auth/login`.
-2. The Next.js server route redirects to the configured identity provider.
-3. The provider redirects back to `/api/auth/callback`.
-4. The Next.js server route exchanges the code using `AUTH_CLIENT_SECRET`.
-5. The access token is stored in an HttpOnly, SameSite=Lax cookie.
-6. The API validates bearer tokens and resolves the external identity to a
-   local `User` through `auth_identities`.
+2. The Next.js server route redirects to the WorkOS-hosted AuthKit sign-in flow.
+3. WorkOS redirects back to `/api/auth/callback`.
+4. The AuthKit Next.js SDK stores and refreshes the encrypted app session.
+5. Server-side Next.js code obtains the WorkOS access token with AuthKit helpers
+   and forwards it to FastAPI as a bearer token for protected API calls.
+6. FastAPI verifies the WorkOS JWT against the WorkOS JWKS on every protected
+   request.
+7. The API resolves WorkOS user and organization IDs to local `User`,
+   `AuthIdentity`, `Organization`, and `OrganizationMembership` records.
 
-Required local callback URL:
+### WorkOS Dashboard Setup
+
+In the WorkOS dashboard:
+
+1. Create or select the Label OS environment.
+2. Enable AuthKit and copy the Client ID and API Key into local or production
+   secret storage.
+3. Configure RBAC roles with these initial slugs: `owner`, `admin`, `member`,
+   and `viewer`.
+4. Configure permission slugs to match the application permissions documented in
+   [Authorization](docs/development/authorization.md), including
+   `organization:manage`, `members:manage`, `artists:view`, `artists:manage`,
+   `settings:manage`, and the other resource permissions listed there.
+5. Configure the webhook endpoint and copy the signing secret into
+   `WORKOS_WEBHOOK_SECRET`.
+
+Required local redirect URI:
 
 ```text
 http://localhost:3000/api/auth/callback
 ```
 
-Required production callback URL:
+Required production redirect URI:
 
 ```text
 https://<your-web-domain>/api/auth/callback
@@ -310,24 +338,115 @@ https://<your-web-domain>/api/auth/callback
 Required auth environment variables:
 
 ```sh
-AUTH_PROVIDER=oidc
-AUTH_ISSUER_URL=https://your-provider.example
-AUTH_AUDIENCE=label-os-api
-AUTH_JWT_ALGORITHMS=HS256
-AUTH_TOKEN_SECRET=replace-with-api-token-validation-secret
-AUTH_AUTHORIZATION_URL=https://your-provider.example/oauth2/v1/authorize
-AUTH_TOKEN_URL=https://your-provider.example/oauth2/v1/token
-AUTH_CLIENT_ID=replace-with-client-id
-AUTH_CLIENT_SECRET=replace-with-client-secret
-AUTH_CALLBACK_URL=http://localhost:3000/api/auth/callback
-AUTH_SCOPE=openid email profile
+AUTH_PROVIDER=workos
+WORKOS_CLIENT_ID=client_replace_with_workos_client_id
+WORKOS_API_KEY=sk_replace_with_workos_api_key
+WORKOS_COOKIE_PASSWORD=replace-with-at-least-32-characters
+WORKOS_REDIRECT_URI=http://localhost:3000/api/auth/callback
+NEXT_PUBLIC_WORKOS_REDIRECT_URI=http://localhost:3000/api/auth/callback
+WORKOS_ISSUER_URL=https://api.workos.com
+WORKOS_JWKS_URL=
+WORKOS_WEBHOOK_SECRET=whsec_replace_when_webhooks_are_enabled
 ```
 
-`AUTH_CLIENT_SECRET` and `AUTH_TOKEN_SECRET` must never be exposed through
-`NEXT_PUBLIC_*` variables. External provider credentials are not included in
-this repository, so the live provider redirect and token exchange cannot be
-verified locally until those values are supplied. The local API tests verify
-the token validation structure with signed test JWTs.
+`WORKOS_API_KEY`, `WORKOS_COOKIE_PASSWORD`, `WORKOS_WEBHOOK_SECRET`, database
+passwords, and WorkOS access tokens must never be exposed through
+`NEXT_PUBLIC_*` variables. External WorkOS credentials are not included in this
+repository, so the live AuthKit redirect and token exchange cannot be verified
+locally until those values are supplied. The local API tests verify the token
+validation structure with signed WorkOS-shaped test JWTs and a mocked JWKS
+client. See [WorkOS Environment Setup](docs/development/workos-environment.md)
+for the full local, test, and production environment structure.
+
+### Authentication Local Startup
+
+Use the root `.env.example` as the local template, fill in WorkOS values from
+the dashboard, then start the stack:
+
+```sh
+pnpm install
+pnpm db:start
+pnpm db:migrate
+pnpm api:dev
+pnpm dev
+```
+
+The local AuthKit sign-in entrypoint is:
+
+```text
+http://localhost:3000/api/auth/login
+```
+
+### Authentication Test Commands
+
+Run the authentication validation commands from the repository root:
+
+```sh
+pnpm format:check
+pnpm lint
+pnpm typecheck
+pnpm test
+pnpm api:lint
+pnpm build
+pnpm compose -- build api
+```
+
+`pnpm test` covers frontend AuthKit routes, protected-route behavior,
+access-token forwarding and refresh, FastAPI JWT validation, the current-user
+endpoint, organization onboarding, role and permission enforcement,
+cross-organization isolation, and WorkOS webhook verification. The Docker build
+requires a running Docker daemon.
+
+### Authentication Security Model
+
+AuthKit owns the browser session cookie. Label OS does not set authentication
+cookies directly; production deployments must use `NODE_ENV=production`, HTTPS
+`WEB_BASE_URL` and `WORKOS_REDIRECT_URI` values, and a generated
+`WORKOS_COOKIE_PASSWORD` of at least 32 characters.
+
+The Next.js server is the only frontend layer that reads the WorkOS access
+token. It forwards the token to FastAPI as a bearer token and retries once after
+an unauthorized response by refreshing the AuthKit session. Raw token values are
+not returned to React components or API responses.
+
+FastAPI validates WorkOS JWTs with RS256, the configured issuer, required
+`exp`, `iss`, `sub`, and `sid` claims, and the WorkOS JWKS URL. When
+`WORKOS_AUDIENCE` is configured, audience validation is enabled.
+
+Redirects from login and logout are constrained to same-origin application paths
+and reject control characters and backslashes, preventing open redirects. CORS
+uses the explicit `ALLOWED_FRONTEND_ORIGINS` allowlist. Error responses use
+generic authentication, authorization, validation, webhook, and internal-error
+messages and do not include raw tokens or provider secrets.
+
+### Role, Permission, and Organization Model
+
+WorkOS is the source of session role and permission claims. FastAPI route
+dependencies are the enforcement point:
+
+- Missing or invalid bearer token: `401`.
+- Authenticated user without an active organization: `403`.
+- Authenticated user without the required role or permission: `403`.
+- Organization-scoped data queries always include the active local organization
+  ID resolved from the WorkOS `org_id` claim.
+
+The initial role hierarchy is `owner` > `admin` > `member` > `viewer`.
+Permission checks use WorkOS permission slugs, and frontend helpers only hide or
+disable unavailable actions.
+
+### WorkOS Webhooks
+
+Configure WorkOS to send webhook events to:
+
+```text
+https://<your-api-domain>/api/v1/webhooks/workos
+```
+
+The API verifies the `workos-signature` header with the configured
+`WORKOS_WEBHOOK_SECRET`, enforces a five-minute timestamp tolerance, records
+processed event IDs for idempotency, ignores unsupported event types, and skips
+older out-of-order events for the same resource. Supported events synchronize
+users, organizations, and organization memberships into local tables.
 
 ## Docker Local Development
 
@@ -347,6 +466,7 @@ APP_ENV=local
 API_PORT=4000
 WEB_PORT=3000
 NEXT_PUBLIC_API_URL=http://localhost:4000
+NEXT_PUBLIC_WORKOS_REDIRECT_URI=http://localhost:3000/api/auth/callback
 API_BASE_URL=http://api:4000
 ALLOWED_FRONTEND_ORIGINS=http://localhost:3000
 LOG_LEVEL=INFO
@@ -355,6 +475,14 @@ POSTGRES_USER=labelos
 POSTGRES_PASSWORD=replace-with-local-db-password
 DATABASE_URL=postgresql+asyncpg://labelos:replace-with-local-db-password@localhost:5432/labelos
 COMPOSE_DATABASE_URL=postgresql+asyncpg://labelos:replace-with-local-db-password@postgres:5432/labelos
+AUTH_PROVIDER=workos
+WORKOS_CLIENT_ID=client_replace_with_workos_client_id
+WORKOS_API_KEY=sk_replace_with_workos_api_key
+WORKOS_COOKIE_PASSWORD=replace-with-at-least-32-characters
+WORKOS_REDIRECT_URI=http://localhost:3000/api/auth/callback
+NEXT_PUBLIC_WORKOS_REDIRECT_URI=http://localhost:3000/api/auth/callback
+WORKOS_ISSUER_URL=https://api.workos.com
+WORKOS_WEBHOOK_SECRET=whsec_replace_when_webhooks_are_enabled
 ```
 
 `NEXT_PUBLIC_API_URL` is passed as a web image build argument because public

@@ -1,9 +1,12 @@
-import { NextRequest, NextResponse } from "next/server";
+import { signOut } from "@workos-inc/authkit-nextjs";
+import { NextRequest } from "next/server";
 
-import { ACCESS_TOKEN_COOKIE } from "../../../../lib/auth";
+import { safeLogoutUrl } from "../../../../lib/auth-redirects";
+import { validateWebServerEnv } from "../../../../lib/env";
 
-export function POST(request: NextRequest) {
-  const response = NextResponse.redirect(new URL("/login", request.url));
-  response.cookies.delete(ACCESS_TOKEN_COOKIE);
-  return response;
+export async function POST(request: NextRequest) {
+  validateWebServerEnv();
+  const returnTo =
+    request.nextUrl.searchParams.get("returnTo") ?? request.nextUrl.searchParams.get("next");
+  await signOut({ returnTo: safeLogoutUrl(request.url, returnTo) });
 }
