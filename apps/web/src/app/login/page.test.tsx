@@ -4,14 +4,13 @@ import { describe, expect, it } from "vitest";
 import LoginPage from "./page";
 
 describe("LoginPage", () => {
-  it("renders the login form without enabling external auth calls", async () => {
+  it("renders the WorkOS-only unauthenticated state without external auth calls", async () => {
     render(await LoginPage({}));
 
-    expect(screen.getByRole("heading", { level: 1, name: "Login" })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Continue with WorkOS" })).toHaveAttribute(
-      "href",
-      "/api/auth/login",
-    );
+    expect(
+      screen.getByRole("heading", { level: 1, name: "Welcome to your labeling workspace" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sign In" })).toBeInTheDocument();
     expect(screen.getByText("API URL: not configured")).toBeInTheDocument();
   });
 
@@ -23,7 +22,7 @@ describe("LoginPage", () => {
     );
 
     expect(
-      screen.getByText("We could not complete sign-in. Please try again."),
+      screen.getByRole("heading", { name: "We could not complete sign-in" }),
     ).toBeInTheDocument();
   });
 });

@@ -20,6 +20,8 @@ class Settings(DatabaseSettings):
     workos_client_id: str | None = None
     workos_issuer_url: str = "https://api.workos.com"
     workos_jwks_url: str | None = None
+    workos_audience: str | None = None
+    workos_webhook_secret: str | None = None
 
     @field_validator("allowed_frontend_origins", mode="before")
     @classmethod
@@ -60,6 +62,8 @@ class Settings(DatabaseSettings):
             missing.append("WORKOS_CLIENT_ID")
         if not self.workos_issuer_url:
             missing.append("WORKOS_ISSUER_URL")
+        if not self.workos_webhook_secret:
+            missing.append("WORKOS_WEBHOOK_SECRET")
 
         if missing:
             joined = ", ".join(missing)
@@ -85,4 +89,6 @@ def get_settings() -> Settings:
         workos_client_id=os.getenv("WORKOS_CLIENT_ID") or None,
         workos_issuer_url=os.getenv("WORKOS_ISSUER_URL", "https://api.workos.com"),
         workos_jwks_url=os.getenv("WORKOS_JWKS_URL") or None,
+        workos_audience=os.getenv("WORKOS_AUDIENCE") or None,
+        workos_webhook_secret=os.getenv("WORKOS_WEBHOOK_SECRET") or None,
     )

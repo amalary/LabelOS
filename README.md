@@ -234,6 +234,13 @@ Organization memberships support these roles:
 - `member`
 - `viewer`
 
+The initial application authorization policy uses Owner, Admin, and Member with
+WorkOS RBAC permission claims such as `artists:view` and `settings:manage`.
+Backend FastAPI dependencies enforce permissions on protected routes; frontend
+helpers only hide or disable unavailable actions. See
+[Authorization](docs/development/authorization.md) for the initial
+role-to-permission mapping and guard examples.
+
 Do not commit real credentials. Keep personal values in `.env`; `.env.example` should remain a safe template.
 
 ## Agent Service Setup
@@ -300,6 +307,22 @@ Authentication is implemented with WorkOS AuthKit:
 7. The API resolves WorkOS user and organization IDs to local `User`,
    `AuthIdentity`, `Organization`, and `OrganizationMembership` records.
 
+### WorkOS Dashboard Setup
+
+In the WorkOS dashboard:
+
+1. Create or select the Label OS environment.
+2. Enable AuthKit and copy the Client ID and API Key into local or production
+   secret storage.
+3. Configure RBAC roles with these initial slugs: `owner`, `admin`, `member`,
+   and `viewer`.
+4. Configure permission slugs to match the application permissions documented in
+   [Authorization](docs/development/authorization.md), including
+   `organization:manage`, `members:manage`, `artists:view`, `artists:manage`,
+   `settings:manage`, and the other resource permissions listed there.
+5. Configure the webhook endpoint and copy the signing secret into
+   `WORKOS_WEBHOOK_SECRET`.
+
 Required local redirect URI:
 
 ```text
@@ -334,6 +357,96 @@ locally until those values are supplied. The local API tests verify the token
 validation structure with signed WorkOS-shaped test JWTs and a mocked JWKS
 client. See [WorkOS Environment Setup](docs/development/workos-environment.md)
 for the full local, test, and production environment structure.
+
+### Authentication Local Startup
+
+Use the root `.env.example` as the local template, fill in WorkOS values from
+the dashboard, then start the stack:
+
+```sh
+pnpm install
+pnpm db:start
+pnpm db:migrate
+pnpm api:dev
+pnpm dev
+```
+
+The local AuthKit sign-in entrypoint is:
+
+```text
+http://localhost:3000/api/auth/login
+```
+
+### Authentication Test Commands
+
+Run the authentication validation commands from the repository root:
+
+```sh
+pnpm format:check
+pnpm lint
+pnpm typecheck
+pnpm test
+pnpm api:lint
+pnpm build
+pnpm compose -- build api
+```
+
+`pnpm test` covers frontend AuthKit routes, protected-route behavior,
+access-token forwarding and refresh, FastAPI JWT validation, the current-user
+endpoint, organization onboarding, role and permission enforcement,
+cross-organization isolation, and WorkOS webhook verification. The Docker build
+requires a running Docker daemon.
+
+### Authentication Security Model
+
+AuthKit owns the browser session cookie. Label OS does not set authentication
+cookies directly; production deployments must use `NODE_ENV=production`, HTTPS
+`WEB_BASE_URL` and `WORKOS_REDIRECT_URI` values, and a generated
+`WORKOS_COOKIE_PASSWORD` of at least 32 characters.
+
+The Next.js server is the only frontend layer that reads the WorkOS access
+token. It forwards the token to FastAPI as a bearer token and retries once after
+an unauthorized response by refreshing the AuthKit session. Raw token values are
+not returned to React components or API responses.
+
+FastAPI validates WorkOS JWTs with RS256, the configured issuer, required
+`exp`, `iss`, `sub`, and `sid` claims, and the WorkOS JWKS URL. When
+`WORKOS_AUDIENCE` is configured, audience validation is enabled.
+
+Redirects from login and logout are constrained to same-origin application paths
+and reject control characters and backslashes, preventing open redirects. CORS
+uses the explicit `ALLOWED_FRONTEND_ORIGINS` allowlist. Error responses use
+generic authentication, authorization, validation, webhook, and internal-error
+messages and do not include raw tokens or provider secrets.
+
+### Role, Permission, and Organization Model
+
+WorkOS is the source of session role and permission claims. FastAPI route
+dependencies are the enforcement point:
+
+- Missing or invalid bearer token: `401`.
+- Authenticated user without an active organization: `403`.
+- Authenticated user without the required role or permission: `403`.
+- Organization-scoped data queries always include the active local organization
+  ID resolved from the WorkOS `org_id` claim.
+
+The initial role hierarchy is `owner` > `admin` > `member` > `viewer`.
+Permission checks use WorkOS permission slugs, and frontend helpers only hide or
+disable unavailable actions.
+
+### WorkOS Webhooks
+
+Configure WorkOS to send webhook events to:
+
+```text
+https://<your-api-domain>/api/v1/webhooks/workos
+```
+
+The API verifies the `workos-signature` header with the configured
+`WORKOS_WEBHOOK_SECRET`, enforces a five-minute timestamp tolerance, records
+processed event IDs for idempotency, ignores unsupported event types, and skips
+older out-of-order events for the same resource. Supported events synchronize
+users, organizations, and organization memberships into local tables.
 
 ## Docker Local Development
 

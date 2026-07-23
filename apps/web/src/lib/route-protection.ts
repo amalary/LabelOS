@@ -10,6 +10,7 @@ export const PUBLIC_ROUTES = [
 
 export const PROTECTED_APPLICATION_ROUTES = [
   "/dashboard",
+  "/onboarding/workspace",
   "/artists",
   "/releases",
   "/campaigns",
