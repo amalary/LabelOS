@@ -22,6 +22,8 @@ describe("LoginPage", () => {
       }),
     );
 
-    expect(screen.getByText("We could not complete sign-in. Please try again.")).toBeInTheDocument();
+    expect(
+      screen.getByText("We could not complete sign-in. Please try again."),
+    ).toBeInTheDocument();
   });
 });

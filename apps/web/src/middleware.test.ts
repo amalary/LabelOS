@@ -36,7 +36,9 @@ import {
   ROUTE_PROTECTION_MATCHER,
 } from "./lib/route-protection";
 
-const runMiddleware = middleware as unknown as (request: ReturnType<typeof createRequest>) => Response;
+const runMiddleware = middleware as unknown as (
+  request: ReturnType<typeof createRequest>,
+) => Response;
 
 function createRequest(pathname: string, authenticated = false) {
   return {

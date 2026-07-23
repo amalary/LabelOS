@@ -10,24 +10,20 @@ describe("auth redirect validation", () => {
   });
 
   it("normalizes same-origin absolute URLs to app paths", () => {
-    expect(
-      safeAppPath("https://app.test/dashboard#top", "/dashboard", "https://app.test"),
-    ).toBe("/dashboard#top");
+    expect(safeAppPath("https://app.test/dashboard#top", "/dashboard", "https://app.test")).toBe(
+      "/dashboard#top",
+    );
   });
 
   it("rejects external and protocol-relative URLs", () => {
     expect(safeAppPath("https://evil.test/phish", "/dashboard", "https://app.test")).toBe(
       "/dashboard",
     );
-    expect(safeAppPath("//evil.test/phish", "/dashboard", "https://app.test")).toBe(
-      "/dashboard",
-    );
+    expect(safeAppPath("//evil.test/phish", "/dashboard", "https://app.test")).toBe("/dashboard");
   });
 
   it("rejects redirect values with unsafe characters", () => {
-    expect(safeAppPath("/\\evil.test", "/dashboard", "https://app.test")).toBe(
-      "/dashboard",
-    );
+    expect(safeAppPath("/\\evil.test", "/dashboard", "https://app.test")).toBe("/dashboard");
   });
 
   it("builds a same-origin absolute logout URL", () => {
