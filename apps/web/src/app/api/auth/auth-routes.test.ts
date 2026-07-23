@@ -46,9 +46,11 @@ describe("WorkOS auth routes", () => {
   });
 
   it("configures callback handling with a safe success path and safe error redirect", async () => {
-    authkit.handleAuth.mockImplementation((options: { onError: (params: { request: NextRequest }) => Response }) => {
-      return (callbackRequest: NextRequest) => options.onError({ request: callbackRequest });
-    });
+    authkit.handleAuth.mockImplementation(
+      (options: { onError: (params: { request: NextRequest }) => Response }) => {
+        return (callbackRequest: NextRequest) => options.onError({ request: callbackRequest });
+      },
+    );
     const { GET } = await import("./callback/route");
 
     const response = await GET(
