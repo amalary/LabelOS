@@ -1,15 +1,11 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Annotated
 from uuid import UUID
 
-import jwt
 from fastapi import Depends, HTTPException, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from jwt import PyJWKClient
-from jwt.exceptions import PyJWTError
 from labelos_database.models import (
     AuthIdentity,
     MembershipRole,
@@ -23,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from labelos_api.config import Settings, get_settings
+from labelos_api.workos_jwt import WorkOSJWTError, validate_workos_jwt
 
 bearer_scheme = HTTPBearer(auto_error=False)
 SettingsDep = Annotated[Settings, Depends(get_settings)]
@@ -45,7 +42,12 @@ class AuthenticatedPrincipal:
     display_name: str | None = None
     organization_id: str | None = None
     role: str | None = None
+    roles: tuple[str, ...] = ()
     permissions: tuple[str, ...] = ()
+
+    @property
+    def membership_roles(self) -> tuple[MembershipRole, ...]:
+        return tuple(_workos_role_to_membership_role(role) for role in self.roles)
 
 
 @dataclass(frozen=True)
@@ -53,6 +55,7 @@ class MembershipContext:
     organization_id: UUID
     organization_name: str
     organization_slug: str
+    workos_organization_id: str | None
     role: MembershipRole
 
 
@@ -61,6 +64,15 @@ class CurrentUserContext:
     user: User
     principal: AuthenticatedPrincipal
     memberships: tuple[MembershipContext, ...]
+
+    @property
+    def active_organization_id(self) -> UUID | None:
+        if self.principal.organization_id is None:
+            return None
+        for membership in self.memberships:
+            if membership.workos_organization_id == self.principal.organization_id:
+                return membership.organization_id
+        return None
 
 
 ROLE_ORDER: dict[MembershipRole, int] = {
@@ -82,72 +94,41 @@ def has_role_at_least(actual: MembershipRole, required: MembershipRole) -> bool:
     return ROLE_ORDER[actual] >= ROLE_ORDER[required]
 
 
-def _normalize_issuer(issuer: str) -> str:
-    return issuer.rstrip("/")
-
-
-def _accepted_issuers(issuer: str) -> tuple[str, str]:
-    normalized = _normalize_issuer(issuer)
-    return (normalized, f"{normalized}/")
-
-
 def _workos_role_to_membership_role(role: str | None) -> MembershipRole:
     if role is None:
         return MembershipRole.member
     return WORKOS_ROLE_MAP.get(role.lower(), MembershipRole.member)
 
 
+def _normalized_workos_roles(
+    role: str | None,
+    roles: tuple[str, ...],
+) -> tuple[str, ...]:
+    normalized = tuple(item for item in roles if item)
+    if role is not None and role not in normalized:
+        return (role, *normalized)
+    return normalized
+
+
 def _slug_from_workos_organization_id(workos_organization_id: str) -> str:
     return workos_organization_id.lower().replace("_", "-")[:120]
 
 
-def _string_tuple_claim(value: object) -> tuple[str, ...]:
-    if isinstance(value, str):
-        return (value,)
-    if isinstance(value, Sequence):
-        return tuple(item for item in value if isinstance(item, str))
-    return ()
-
-
 def principal_from_token(token: str, settings: Settings) -> AuthenticatedPrincipal:
-    if not settings.workos_client_id:
-        raise AuthTokenError("WORKOS_CLIENT_ID is required for WorkOS JWT validation")
-
     try:
-        signing_key = PyJWKClient(
-            settings.resolved_workos_jwks_url
-        ).get_signing_key_from_jwt(token)
-        claims = jwt.decode(
-            token,
-            signing_key.key,
-            algorithms=["RS256"],
-            audience=settings.workos_client_id,
-            issuer=_accepted_issuers(settings.workos_issuer_url),
-        )
-    except (PyJWTError, ValueError) as exc:
+        user = validate_workos_jwt(token, settings)
+    except WorkOSJWTError as exc:
         raise AuthTokenError("Token is invalid") from exc
-
-    subject = claims.get("sub")
-    if not isinstance(subject, str) or not subject:
-        raise AuthTokenError("Token subject is missing")
-
-    session_id = claims.get("sid")
-    if not isinstance(session_id, str) or not session_id:
-        raise AuthTokenError("Token session is missing")
-
-    email = claims.get("email")
-    name = claims.get("name")
-    organization_id = claims.get("org_id")
-    role = claims.get("role")
     return AuthenticatedPrincipal(
         provider=settings.auth_provider,
-        subject=subject,
-        session_id=session_id,
-        email=email if isinstance(email, str) else None,
-        display_name=name if isinstance(name, str) else None,
-        organization_id=organization_id if isinstance(organization_id, str) else None,
-        role=role if isinstance(role, str) else None,
-        permissions=_string_tuple_claim(claims.get("permissions")),
+        subject=user.workos_user_id,
+        session_id=user.session_id,
+        email=user.email,
+        display_name=user.display_name,
+        organization_id=user.organization_id,
+        role=user.role,
+        roles=_normalized_workos_roles(user.role, user.roles),
+        permissions=user.permissions,
     )
 
 
@@ -235,7 +216,11 @@ async def resolve_current_user(
             .where(OrganizationMembership.organization_id == organization.id)
             .where(OrganizationMembership.user_id == user.id)
         )
-        membership_role = _workos_role_to_membership_role(principal.role)
+        membership_role = max(
+            principal.membership_roles,
+            key=lambda role: ROLE_ORDER[role],
+            default=MembershipRole.member,
+        )
         if membership is None:
             session.add(
                 OrganizationMembership(
@@ -259,6 +244,7 @@ async def resolve_current_user(
             organization_id=organization.id,
             organization_name=organization.name,
             organization_slug=organization.slug,
+            workos_organization_id=organization.workos_organization_id,
             role=membership.role,
         )
         for membership, organization in rows.all()
@@ -287,6 +273,16 @@ def require_organization_role(
         status_code=status.HTTP_403_FORBIDDEN,
         detail="Insufficient organization role",
     )
+
+
+def require_active_organization_id(context: CurrentUserContext) -> UUID:
+    organization_id = context.active_organization_id
+    if organization_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Organization context required",
+        )
+    return organization_id
 
 
 def require_permission(permission: str, context: CurrentUserContext) -> None:

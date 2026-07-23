@@ -56,6 +56,7 @@ AUTH_PROVIDER=workos
 WORKOS_CLIENT_ID=client_replace_with_workos_client_id
 WORKOS_ISSUER_URL=https://api.workos.com
 WORKOS_JWKS_URL=
+WORKOS_AUDIENCE=
 ```
 
 Leave `WORKOS_JWKS_URL` empty unless you need an override. The API derives the
@@ -64,6 +65,9 @@ default JWKS URL as:
 ```text
 https://api.workos.com/sso/jwks/<WORKOS_CLIENT_ID>
 ```
+
+Leave `WORKOS_AUDIENCE` empty unless the WorkOS token shape for the configured
+application requires audience validation.
 
 ## Cookie Password
 
