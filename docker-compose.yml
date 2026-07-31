@@ -24,6 +24,10 @@ services:
       API_HOST: 0.0.0.0
       API_PORT: 4000
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+      SERVICE_NAME: ${API_SERVICE_NAME:-labelos-api}
+      GCP_PROJECT_ID: ${GCP_PROJECT_ID:-}
+      GOOGLE_CLOUD_PROJECT: ${GOOGLE_CLOUD_PROJECT:-}
       ALLOWED_FRONTEND_ORIGINS: ${ALLOWED_FRONTEND_ORIGINS:-http://localhost:3000}
       DATABASE_URL: ${COMPOSE_DATABASE_URL:-postgresql+asyncpg://labelos:labelos_local_password@postgres:5432/labelos}
       DATABASE_ECHO: ${DATABASE_ECHO:-false}
@@ -61,6 +65,11 @@ services:
       WEB_BASE_URL: ${WEB_BASE_URL:-http://localhost:3000}
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:4000}
       NEXT_PUBLIC_WORKOS_REDIRECT_URI: ${NEXT_PUBLIC_WORKOS_REDIRECT_URI:-http://localhost:3000/api/auth/callback}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      SERVICE_NAME: ${WEB_SERVICE_NAME:-labelos-web}
+      GCP_PROJECT_ID: ${GCP_PROJECT_ID:-}
+      GOOGLE_CLOUD_PROJECT: ${GOOGLE_CLOUD_PROJECT:-}
+      NEXT_RUNTIME_LOG_LEVEL: ${NEXT_RUNTIME_LOG_LEVEL:-INFO}
       API_BASE_URL: ${API_BASE_URL:-http://api:4000}
       WORKOS_CLIENT_ID: ${WORKOS_CLIENT_ID:-}
       WORKOS_API_KEY: ${WORKOS_API_KEY:-}

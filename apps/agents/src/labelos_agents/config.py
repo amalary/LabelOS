@@ -11,6 +11,8 @@ class Settings(BaseModel):
     host: str = "0.0.0.0"
     port: int = 4100
     log_level: str = "INFO"
+    log_format: str = "json"
+    service_name: str = "labelos-agents"
     api_v1_prefix: str = "/api/v1"
     model_provider: str = "mock"
     model_name: str = "mock-deterministic"
@@ -38,9 +40,15 @@ def _get_bool(name: str, default: bool) -> bool:
 def get_settings() -> Settings:
     return Settings(
         environment=os.getenv("APP_ENV", "local"),
+        app_version=os.getenv("APP_VERSION", "0.0.0"),
         host=os.getenv("AGENTS_HOST", "0.0.0.0"),
         port=int(os.getenv("AGENTS_PORT", "4100")),
         log_level=os.getenv("AGENTS_LOG_LEVEL", os.getenv("LOG_LEVEL", "INFO")),
+        log_format=os.getenv("LOG_FORMAT", "json"),
+        service_name=os.getenv(
+            "AGENTS_SERVICE_NAME",
+            os.getenv("SERVICE_NAME", "labelos-agents"),
+        ),
         model_provider=os.getenv("AGENTS_MODEL_PROVIDER", "mock"),
         model_name=os.getenv("AGENTS_MODEL_NAME", "mock-deterministic"),
         model_timeout_seconds=int(os.getenv("AGENTS_MODEL_TIMEOUT_SECONDS", "30")),

@@ -68,6 +68,9 @@ async function fetchWithToken(
 ): Promise<Response> {
   const headers = new Headers(init.headers);
   headers.set("Authorization", `Bearer ${accessToken}`);
+  if (!headers.has("X-Request-ID")) {
+    headers.set("X-Request-ID", crypto.randomUUID());
+  }
 
   try {
     return await fetch(url, {
