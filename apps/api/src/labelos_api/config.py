@@ -12,6 +12,8 @@ class Settings(DatabaseSettings):
     api_host: str = "0.0.0.0"
     api_port: int = 4000
     log_level: str = "INFO"
+    log_format: str = "json"
+    service_name: str = "labelos-api"
     api_v1_prefix: str = "/api/v1"
     allowed_frontend_origins: list[str] = Field(
         default_factory=lambda: ["http://localhost:3000"],
@@ -76,9 +78,12 @@ class Settings(DatabaseSettings):
 def get_settings() -> Settings:
     return Settings(
         environment=os.getenv("APP_ENV", "local"),
+        app_version=os.getenv("APP_VERSION", "0.0.0"),
         api_host=os.getenv("API_HOST", "0.0.0.0"),
         api_port=int(os.getenv("API_PORT", "4000")),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
+        log_format=os.getenv("LOG_FORMAT", "json"),
+        service_name=os.getenv("SERVICE_NAME", "labelos-api"),
         database_url=os.getenv("DATABASE_URL", DatabaseSettings().database_url),
         database_echo=os.getenv("DATABASE_ECHO", "false").lower()
         in {"1", "true", "yes", "on"},

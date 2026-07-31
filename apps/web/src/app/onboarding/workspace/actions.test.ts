@@ -25,6 +25,10 @@ const navigation = vi.hoisted(() => ({
   }),
 }));
 
+const serverLogging = vi.hoisted(() => ({
+  logServerError: vi.fn(),
+}));
+
 const workos = vi.hoisted(() => ({
   organizations: {
     createOrganization: vi.fn(),
@@ -38,6 +42,7 @@ const workos = vi.hoisted(() => ({
 vi.mock("@workos-inc/authkit-nextjs", () => authkit);
 vi.mock("next/navigation", () => navigation);
 vi.mock("../../../lib/api-client", () => apiClient);
+vi.mock("../../../lib/server-logging", () => serverLogging);
 vi.mock("../../../lib/workos", () => ({
   getWorkOSClient: () => workos,
 }));
@@ -61,6 +66,7 @@ describe("workspace onboarding action", () => {
     authkit.withAuth.mockReset();
     authkit.refreshSession.mockReset();
     apiClient.apiFetch.mockReset();
+    serverLogging.logServerError.mockReset();
     navigation.redirect.mockClear();
     workos.organizations.createOrganization.mockReset();
     workos.userManagement.createOrganizationMembership.mockReset();
@@ -155,5 +161,10 @@ describe("workspace onboarding action", () => {
     });
     expect(apiClient.apiFetch).not.toHaveBeenCalled();
     expect(authkit.refreshSession).not.toHaveBeenCalled();
+    expect(serverLogging.logServerError).toHaveBeenCalledWith(
+      "Workspace onboarding failed",
+      expect.any(Error),
+      { operation: "workspace_onboarding" },
+    );
   });
 });

@@ -27,6 +27,7 @@ function request(url: string) {
 describe("WorkOS auth routes", () => {
   beforeEach(() => {
     vi.resetModules();
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
     authkit.getSignInUrl.mockReset();
     authkit.handleAuth.mockReset();
     authkit.signOut.mockReset();
@@ -64,6 +65,13 @@ describe("WorkOS auth routes", () => {
     expect(response.headers.get("location")).toBe(
       "https://app.test/login?auth_error=sign_in_failed",
     );
+    expect(console.warn).toHaveBeenCalledTimes(1);
+    const payload = JSON.parse(vi.mocked(console.warn).mock.calls[0]?.[0] as string);
+    expect(payload).toMatchObject({
+      message: "WorkOS authentication callback failed",
+      route: "/api/auth/callback",
+      severity: "WARNING",
+    });
   });
 
   it("clears the WorkOS session and passes only a same-origin logout return URL", async () => {

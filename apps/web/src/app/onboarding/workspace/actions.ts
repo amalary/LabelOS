@@ -4,6 +4,7 @@ import { refreshSession, withAuth } from "@workos-inc/authkit-nextjs";
 import { redirect } from "next/navigation";
 
 import { apiFetch, ApiClientError } from "../../../lib/api-client";
+import { logServerError } from "../../../lib/server-logging";
 import { getWorkOSClient } from "../../../lib/workos";
 
 export type WorkspaceOnboardingState = {
@@ -134,8 +135,10 @@ export async function onboardWorkspace(
     });
 
     await refreshSession({ organizationId, ensureSignedIn: true });
-  } catch {
-    console.error("Workspace onboarding failed");
+  } catch (error) {
+    logServerError("Workspace onboarding failed", error, {
+      operation: "workspace_onboarding",
+    });
     return {
       error:
         "We could not create the workspace. No local workspace records were saved unless WorkOS confirmed the organization and membership.",

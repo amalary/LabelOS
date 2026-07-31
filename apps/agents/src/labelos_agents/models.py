@@ -17,3 +17,7 @@ class StatusResponse(BaseModel):
     environment: str
     version: str
     model_provider: str
+
+
+class ErrorResponse(BaseModel):
+    detail: str
