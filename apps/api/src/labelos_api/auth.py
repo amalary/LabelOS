@@ -57,6 +57,7 @@ class MembershipContext:
     organization_slug: str
     workos_organization_id: str | None
     role: MembershipRole
+    status: str = "active"
 
 
 @dataclass(frozen=True)
@@ -70,7 +71,10 @@ class CurrentUserContext:
         if self.principal.organization_id is None:
             return None
         for membership in self.memberships:
-            if membership.workos_organization_id == self.principal.organization_id:
+            if (
+                membership.status == "active"
+                and membership.workos_organization_id == self.principal.organization_id
+            ):
                 return membership.organization_id
         return None
 
@@ -246,6 +250,7 @@ async def resolve_current_user(
             organization_slug=organization.slug,
             workos_organization_id=organization.workos_organization_id,
             role=membership.role,
+            status=membership.status,
         )
         for membership, organization in rows.all()
     )

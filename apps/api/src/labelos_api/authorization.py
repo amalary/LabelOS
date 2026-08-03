@@ -90,7 +90,7 @@ def require_organization() -> Callable[..., CurrentUserContext]:
     async def dependency(
         context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
     ) -> CurrentUserContext:
-        if context.principal.organization_id is None:
+        if context.active_organization_id is None:
             raise _forbidden("Organization context required")
         return context
 

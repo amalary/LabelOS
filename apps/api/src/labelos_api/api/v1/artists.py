@@ -11,6 +11,7 @@ from labelos_api.auth import (
     require_active_organization_id,
 )
 from labelos_api.authorization import Permission, require_permission
+from labelos_api.realtime import RealtimeEventType, RealtimePublisher
 from labelos_api.repositories import label_resources
 
 router = APIRouter(prefix="/artists", tags=["artists"])
@@ -29,8 +30,18 @@ class ArtistResponse(BaseModel):
     name: str
 
 
+class ReleaseResponse(BaseModel):
+    id: UUID
+    title: str
+    artist_id: UUID | None
+
+
 class ArtistsListResponse(BaseModel):
     artists: list[ArtistResponse]
+
+
+class ArtistReleasesListResponse(BaseModel):
+    releases: list[ReleaseResponse]
 
 
 def _not_found() -> HTTPException:
@@ -41,6 +52,14 @@ def _response_from_artist(artist) -> ArtistResponse:
     return ArtistResponse(id=artist.id, name=artist.name)
 
 
+def _response_from_release(release) -> ReleaseResponse:
+    return ReleaseResponse(
+        id=release.id,
+        title=release.title,
+        artist_id=release.artist_id,
+    )
+
+
 @router.get("", response_model=ArtistsListResponse)
 async def list_artists(
     session: SessionDep,
@@ -48,9 +67,14 @@ async def list_artists(
         CurrentUserContext,
         Depends(require_permission(Permission.artists_view)),
     ],
+    search: str | None = None,
 ) -> ArtistsListResponse:
     organization_id = require_active_organization_id(context)
-    artists = await label_resources.list_artists(session, organization_id)
+    artists = await label_resources.list_artists(
+        session,
+        organization_id,
+        search=search,
+    )
     return ArtistsListResponse(
         artists=[_response_from_artist(artist) for artist in artists]
     )
@@ -82,6 +106,15 @@ async def create_artist(
             status_code=status.HTTP_409_CONFLICT,
             detail="Artist conflicts with an existing organization record",
         ) from exc
+    await RealtimePublisher(session).publish(
+        organization_id=organization_id,
+        event_type=RealtimeEventType.artist_created,
+        actor=context.user,
+        entity_type="artist",
+        entity_id=artist.id,
+        payload={"artist": _response_from_artist(artist).model_dump(mode="json")},
+    )
+    await session.commit()
     return _response_from_artist(artist)
 
 
@@ -102,6 +135,7 @@ async def get_artist(
 
 
 @router.put("/{artist_id}", response_model=ArtistResponse)
+@router.patch("/{artist_id}", response_model=ArtistResponse)
 async def update_artist(
     artist_id: UUID,
     payload: ArtistUpdateRequest,
@@ -120,7 +154,38 @@ async def update_artist(
     )
     if artist is None:
         raise _not_found()
+    await RealtimePublisher(session).publish(
+        organization_id=organization_id,
+        event_type=RealtimeEventType.artist_updated,
+        actor=context.user,
+        entity_type="artist",
+        entity_id=artist.id,
+        payload={"artist": _response_from_artist(artist).model_dump(mode="json")},
+    )
+    await session.commit()
     return _response_from_artist(artist)
+
+
+@router.get("/{artist_id}/releases", response_model=ArtistReleasesListResponse)
+async def list_artist_releases(
+    artist_id: UUID,
+    session: SessionDep,
+    context: Annotated[
+        CurrentUserContext,
+        Depends(require_permission(Permission.releases_view)),
+    ],
+) -> ArtistReleasesListResponse:
+    organization_id = require_active_organization_id(context)
+    releases = await label_resources.list_artist_releases(
+        session,
+        organization_id,
+        artist_id,
+    )
+    if releases is None:
+        raise _not_found()
+    return ArtistReleasesListResponse(
+        releases=[_response_from_release(release) for release in releases]
+    )
 
 
 @router.delete("/{artist_id}", status_code=status.HTTP_204_NO_CONTENT)

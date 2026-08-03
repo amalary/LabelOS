@@ -224,6 +224,39 @@ class WebhookEvent(Base, TimestampMixin):
     )
 
 
+class RealtimeEvent(Base, TimestampMixin):
+    __tablename__ = "realtime_events"
+
+    id: Mapped[UUIDPrimaryKey]
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    channel: Mapped[str] = mapped_column(String(180), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(120), nullable=False)
+    schema_version: Mapped[int] = mapped_column(nullable=False, default=1)
+    entity_type: Mapped[str | None] = mapped_column(String(80))
+    entity_id: Mapped[str | None] = mapped_column(String(120))
+    operation_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    actor_user_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    actor_display_name: Mapped[str | None] = mapped_column(String(200))
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+
+    organization: Mapped[Organization] = relationship()
+    actor: Mapped[User | None] = relationship()
+
+    __table_args__ = (
+        Index(
+            "ix_realtime_events_organization_created", "organization_id", "created_at"
+        ),
+        Index("ix_realtime_events_channel_created", "channel", "created_at"),
+        UniqueConstraint("operation_id", name="uq_realtime_events_operation_id"),
+    )
+
+
 class OrganizationOwnedMixin:
     organization_id: Mapped[UUID] = mapped_column(
         ForeignKey("organizations.id", ondelete="CASCADE"),
