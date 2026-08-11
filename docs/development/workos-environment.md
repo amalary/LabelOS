@@ -79,3 +79,37 @@ openssl rand -base64 24
 
 The resulting value is 32 characters and satisfies the WorkOS minimum. Store it
 only in `.env`, deployment secrets, or your password manager.
+
+## Organization Acceptance Preflight
+
+Run this before the Dashboard implementation depends on live organization
+authentication:
+
+```sh
+pnpm org:preflight
+```
+
+The preflight reads the root `.env` file and fails if required WorkOS, database,
+web, or API values are missing or still use placeholder values. It prints only
+presence status, never secret values.
+
+When the API and web app are running against the intended environment, run:
+
+```sh
+pnpm org:preflight:live
+```
+
+The live variant also probes API health, database health, web health, and the
+WorkOS login redirect. It does not enter a user's WorkOS credentials or accept
+invitations automatically; those remain a browser smoke test using a real test
+user in the configured WorkOS environment.
+
+## AuthKit Middleware Build Warning
+
+The Next.js production build may print Edge Runtime warnings for Node API
+references inside the WorkOS SDK import trace. The app uses the documented
+`authkitMiddleware` entry point for Next.js 15 middleware and also keeps
+route-level `withAuth({ ensureSignedIn: true })` checks on protected server
+routes as defense in depth. Treat these warnings as non-blocking while the build
+continues to compile successfully, but re-check them whenever upgrading
+`@workos-inc/authkit-nextjs`, `@workos-inc/node`, or Next.js.

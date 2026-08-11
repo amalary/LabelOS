@@ -1,6 +1,7 @@
 from labelos_database.base import Base
 from labelos_database.models import (
     AIAgent,
+    ActivityEvent,
     AnalyticsEvent,
     Artist,
     Campaign,
@@ -23,6 +24,7 @@ from labelos_database.session import (
 __all__ = [
     "Base",
     "AIAgent",
+    "ActivityEvent",
     "AnalyticsEvent",
     "Artist",
     "Campaign",

@@ -20,6 +20,7 @@ class Settings(DatabaseSettings):
     )
     auth_provider: str = "workos"
     workos_client_id: str | None = None
+    workos_api_key: str | None = None
     workos_issuer_url: str = "https://api.workos.com"
     workos_jwks_url: str | None = None
     workos_audience: str | None = None
@@ -62,6 +63,8 @@ class Settings(DatabaseSettings):
         missing: list[str] = []
         if not self.workos_client_id:
             missing.append("WORKOS_CLIENT_ID")
+        if not self.workos_api_key:
+            missing.append("WORKOS_API_KEY")
         if not self.workos_issuer_url:
             missing.append("WORKOS_ISSUER_URL")
         if not self.workos_webhook_secret:
@@ -92,6 +95,7 @@ def get_settings() -> Settings:
         ),
         auth_provider=os.getenv("AUTH_PROVIDER", "workos"),
         workos_client_id=os.getenv("WORKOS_CLIENT_ID") or None,
+        workos_api_key=os.getenv("WORKOS_API_KEY") or None,
         workos_issuer_url=os.getenv("WORKOS_ISSUER_URL", "https://api.workos.com"),
         workos_jwks_url=os.getenv("WORKOS_JWKS_URL") or None,
         workos_audience=os.getenv("WORKOS_AUDIENCE") or None,

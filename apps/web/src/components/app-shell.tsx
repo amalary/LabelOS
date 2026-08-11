@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import Link from "next/link";
 
 import { AuthNavigation } from "./auth/auth-navigation";
 import { getNavigationAuthState } from "./auth/auth-session";
@@ -43,6 +44,20 @@ export async function AppShell({ children }: AppShellProps) {
               <div className="text-xs text-slate-500">Operations</div>
             </div>
           </div>
+          <nav aria-label="Workspace navigation" className="mt-5 grid gap-1">
+            <Link
+              className="rounded-md px-3 py-2 text-sm font-medium text-slate-700 transition-colors hover:bg-white/70 hover:text-slate-950 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-950"
+              href="/dashboard"
+            >
+              Dashboard
+            </Link>
+            <Link
+              className="rounded-md px-3 py-2 text-sm font-medium text-slate-700 transition-colors hover:bg-white/70 hover:text-slate-950 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-950"
+              href="/dashboard/settings"
+            >
+              Organization settings
+            </Link>
+          </nav>
         </aside>
         <div className="flex min-w-0 flex-col">
           <header className="border-b border-white/70 bg-white/45 px-6 py-4 backdrop-blur-2xl">

@@ -225,7 +225,7 @@ async def resolve_current_user(
             key=lambda role: ROLE_ORDER[role],
             default=MembershipRole.member,
         )
-        if membership is None:
+        if membership is None and organization.owner_user_id == user.id:
             session.add(
                 OrganizationMembership(
                     organization_id=organization.id,
@@ -233,9 +233,6 @@ async def resolve_current_user(
                     role=membership_role,
                 )
             )
-            await session.commit()
-        elif membership.role != membership_role:
-            membership.role = membership_role
             await session.commit()
 
     rows = await session.execute(

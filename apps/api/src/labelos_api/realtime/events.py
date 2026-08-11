@@ -17,6 +17,7 @@ logger = logging.getLogger("labelos_api.realtime")
 class RealtimeEventType(StrEnum):
     organization_updated = "organization.updated"
     member_joined = "member.joined"
+    member_updated = "member.updated"
     member_removed = "member.removed"
     artist_created = "artist.created"
     artist_updated = "artist.updated"
@@ -125,9 +126,16 @@ class RealtimePublisher:
                 "event_id": str(event.id),
                 "event_type": event.event_type,
                 "organization_id": str(event.organization_id),
+                "operation": "publish_realtime_event",
+                "result": "queued",
                 "channel": event.channel,
                 "entity_type": event.entity_type,
                 "entity_id": event.entity_id,
+                "user_id": (
+                    str(event.actor_user_id)
+                    if event.actor_user_id is not None
+                    else None
+                ),
                 "actor_user_id": (
                     str(event.actor_user_id)
                     if event.actor_user_id is not None

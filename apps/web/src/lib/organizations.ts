@@ -12,13 +12,47 @@ export type OrganizationSummary = {
   can_switch: boolean;
 };
 
+export type OrganizationMemberRole = "owner" | "admin" | "member" | "viewer";
+
+export type OrganizationMember = {
+  id: string;
+  user_id: string;
+  email: string;
+  display_name: string | null;
+  role: OrganizationMemberRole;
+  status: string;
+};
+
+export type OrganizationInvitation = {
+  id: string;
+  email: string;
+  role: Exclude<OrganizationMemberRole, "owner">;
+  state: string;
+  expires_at: string | null;
+  created_at: string | null;
+};
+
 export type OrganizationSelection = {
   activeOrganization: OrganizationSummary | null;
   organizations: OrganizationSummary[];
 };
 
+export type OrganizationSettings = {
+  organization: OrganizationSummary;
+  members: OrganizationMember[];
+  invitations: OrganizationInvitation[];
+};
+
 type OrganizationsListResponse = {
   organizations: OrganizationSummary[];
+  limit: number;
+  offset: number;
+  total: number;
+};
+
+type OrganizationMembersListResponse = {
+  members: OrganizationMember[];
+  invitations: OrganizationInvitation[];
   limit: number;
   offset: number;
   total: number;
@@ -44,6 +78,10 @@ async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
       "The backend returned an unexpected response.",
       response.status,
     );
+  }
+
+  if (response.status === 204) {
+    return undefined as T;
   }
 
   return (await response.json()) as T;
@@ -83,4 +121,80 @@ export async function verifyOrganizationActivation(
   return apiJson<OrganizationActivationResponse>(`/api/v1/organizations/${organizationId}/activate`, {
     method: "POST",
   });
+}
+
+export async function listOrganizationMembers(
+  organizationId: string,
+): Promise<OrganizationMembersListResponse> {
+  const response = await apiJson<OrganizationMembersListResponse>(
+    `/api/v1/organizations/${organizationId}/members?limit=100`,
+  );
+  return response;
+}
+
+export async function getOrganizationSettings(): Promise<OrganizationSettings | null> {
+  const organization = await getActiveOrganization();
+  if (organization === null) {
+    return null;
+  }
+
+  return {
+    organization,
+    ...(await listOrganizationMembers(organization.id)),
+  };
+}
+
+export async function inviteOrganizationMember(
+  organizationId: string,
+  payload: { email: string; role: Exclude<OrganizationMemberRole, "owner"> },
+): Promise<OrganizationInvitation> {
+  return apiJson<OrganizationInvitation>(`/api/v1/organizations/${organizationId}/invitations`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+    headers: {
+      "Content-Type": "application/json",
+    },
+  });
+}
+
+export async function updateOrganization(
+  organizationId: string,
+  payload: { name: string; slug: string },
+): Promise<OrganizationSummary> {
+  return apiJson<OrganizationSummary>(`/api/v1/organizations/${organizationId}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+    headers: {
+      "Content-Type": "application/json",
+    },
+  });
+}
+
+export async function updateOrganizationMemberRole(
+  organizationId: string,
+  membershipId: string,
+  role: Exclude<OrganizationMemberRole, "owner">,
+): Promise<OrganizationMember> {
+  return apiJson<OrganizationMember>(
+    `/api/v1/organizations/${organizationId}/members/${membershipId}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ role }),
+      headers: {
+        "Content-Type": "application/json",
+      },
+    },
+  );
+}
+
+export async function removeOrganizationMember(
+  organizationId: string,
+  membershipId: string,
+): Promise<void> {
+  await apiJson<Record<string, never>>(
+    `/api/v1/organizations/${organizationId}/members/${membershipId}`,
+    {
+      method: "DELETE",
+    },
+  );
 }

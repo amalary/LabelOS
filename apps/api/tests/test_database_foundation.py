@@ -1,5 +1,6 @@
 from labelos_database.config import DatabaseSettings
 from labelos_database.models import (
+    ActivityEvent,
     AIAgent,
     AnalyticsEvent,
     Artist,
@@ -40,6 +41,7 @@ def test_foundational_models_are_registered() -> None:
         AIAgent.__tablename__,
         TeamSetting.__tablename__,
         WebhookEvent.__tablename__,
+        ActivityEvent.__tablename__,
     }
 
     assert tables == {
@@ -56,6 +58,7 @@ def test_foundational_models_are_registered() -> None:
         "ai_agents",
         "team_settings",
         "webhook_events",
+        "activity_events",
     }
 
 
@@ -135,6 +138,33 @@ def test_webhook_events_define_idempotency_and_ordering_indexes() -> None:
     assert "uq_webhook_events_provider_id" in constraint_names
     assert "ix_webhook_events_provider_event_id" in index_names
     assert "ix_webhook_events_resource_created_at" in index_names
+
+
+def test_activity_events_define_persistent_activity_feed_shape() -> None:
+    table = ActivityEvent.__table__
+    index_names = {index.name for index in table.indexes}
+    foreign_key_deletions = {
+        foreign_key.parent.name: foreign_key.ondelete
+        for foreign_key in table.foreign_keys
+    }
+
+    assert "event_type" in table.columns
+    assert "operation" in table.columns
+    assert "result" in table.columns
+    assert "actor_user_id" in table.columns
+    assert "target_user_id" in table.columns
+    assert "entity_type" in table.columns
+    assert "entity_id" in table.columns
+    assert "changes" in table.columns
+    assert "event_metadata" in table.columns
+    assert foreign_key_deletions == {
+        "organization_id": "CASCADE",
+        "actor_user_id": "SET NULL",
+        "target_user_id": "SET NULL",
+    }
+    assert "ix_activity_events_organization_created" in index_names
+    assert "ix_activity_events_event_type_created" in index_names
+    assert "ix_activity_events_actor_created" in index_names
 
 
 def test_label_owned_resources_define_organization_boundary() -> None:

@@ -1,5 +1,6 @@
 import asyncio
 import os
+import sys
 from logging.config import fileConfig
 
 from alembic import context
@@ -21,6 +22,9 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 target_metadata = Base.metadata
+
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 
 def get_database_url() -> str:

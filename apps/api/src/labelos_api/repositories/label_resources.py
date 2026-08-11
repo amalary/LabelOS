@@ -37,7 +37,7 @@ async def create_artist(
 ) -> Artist:
     artist = Artist(organization_id=organization_id, name=name)
     session.add(artist)
-    await session.commit()
+    await session.flush()
     await session.refresh(artist)
     return artist
 
@@ -53,7 +53,7 @@ async def update_artist(
     if artist is None:
         return None
     artist.name = name
-    await session.commit()
+    await session.flush()
     await session.refresh(artist)
     return artist
 
