@@ -308,9 +308,7 @@ def test_activate_organization_rejects_inaccessible_organizations(
 ) -> None:
     client, _sessionmaker, seeded = organizations_client
     _set_context(client, seeded)
-    organization_id = (
-        seeded.org_c_id if target == "outside" else seeded.inactive_org_id
-    )
+    organization_id = seeded.org_c_id if target == "outside" else seeded.inactive_org_id
 
     response = client.post(f"/api/v1/organizations/{organization_id}/activate")
 
