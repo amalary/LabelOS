@@ -12,10 +12,7 @@ import {
 
 import { Button, cn } from "@label-os/ui";
 
-import {
-  switchOrganization,
-  type SwitchOrganizationState,
-} from "../app/dashboard/actions";
+import { switchOrganization, type SwitchOrganizationState } from "../app/dashboard/actions";
 import { clearOrganizationScopedBrowserCaches } from "../lib/browser-cache";
 import type { OrganizationSummary } from "../lib/organizations";
 
@@ -94,7 +91,9 @@ export function OrganizationSwitcher({
   const buttonId = useId();
   const listboxId = useId();
   const [isOpen, setIsOpen] = useState(false);
-  const [selectedId, setSelectedId] = useState(activeOrganization?.id ?? organizations[0]?.id ?? "");
+  const [selectedId, setSelectedId] = useState(
+    activeOrganization?.id ?? organizations[0]?.id ?? "",
+  );
   const previousActiveId = useRef(activeOrganization?.id ?? null);
   const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
@@ -221,7 +220,10 @@ export function OrganizationSwitcher({
           <>
             <OrganizationAvatar organization={displayedOrganization} />
             <span className="min-w-0 flex-1">
-              <span className="block truncate text-sm font-semibold text-slate-950" id={`${buttonId}-name`}>
+              <span
+                className="block truncate text-sm font-semibold text-slate-950"
+                id={`${buttonId}-name`}
+              >
                 {displayedOrganization.name}
               </span>
               <span className="block truncate text-xs font-normal text-slate-500">

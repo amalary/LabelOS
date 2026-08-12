@@ -7,6 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 from labelos_database.base import Base
 from labelos_database.models import (
+    ActivityEvent,
     Artist,
     MembershipRole,
     Organization,
@@ -170,6 +171,19 @@ async def _realtime_events(
         return list(rows.all())
 
 
+async def _activity_events(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    organization_id: UUID,
+) -> list[ActivityEvent]:
+    async with sessionmaker() as session:
+        rows = await session.scalars(
+            select(ActivityEvent)
+            .where(ActivityEvent.organization_id == organization_id)
+            .order_by(ActivityEvent.created_at.asc())
+        )
+        return list(rows.all())
+
+
 def test_artist_mutation_publishes_committed_organization_event(
     realtime_client: tuple[TestClient, async_sessionmaker[AsyncSession], RealtimeSeed],
 ) -> None:
@@ -192,6 +206,16 @@ def test_artist_mutation_publishes_committed_organization_event(
     assert event.actor_user_id == seeded.user_id
     assert event.actor_display_name == "Owner"
     assert event.payload["artist"]["name"] == "Renamed Artist"
+    activity_events = asyncio.run(
+        _activity_events(sessionmaker, seeded.organization_id)
+    )
+    assert len(activity_events) == 1
+    assert activity_events[0].event_type == "artist.updated"
+    assert activity_events[0].operation == "update_artist"
+    assert activity_events[0].actor_user_id == seeded.user_id
+    assert activity_events[0].changes == {
+        "name": {"from": "Artist A", "to": "Renamed Artist"}
+    }
 
 
 def test_realtime_subscription_requires_database_membership(

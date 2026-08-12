@@ -546,6 +546,7 @@ def test_workos_jwks_url_defaults_to_client_id() -> None:
         environment="production",
         auth_provider="workos",
         workos_client_id="client_01TEST",
+        workos_api_key="sk_test_placeholder",
         workos_issuer_url="https://api.workos.com",
         workos_jwks_url=None,
         workos_webhook_secret="whsec_01TEST",

@@ -10,6 +10,7 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects import postgresql
 
 revision: str = "202607171300"
 down_revision: str | None = None
@@ -71,11 +72,12 @@ def upgrade() -> None:
         ["owner_user_id"],
         unique=False,
     )
-    organization_membership_role = sa.Enum(
+    organization_membership_role = postgresql.ENUM(
         "owner",
         "admin",
         "member",
         name="organization_membership_role",
+        create_type=False,
     )
     organization_membership_role.create(op.get_bind(), checkfirst=True)
     op.create_table(

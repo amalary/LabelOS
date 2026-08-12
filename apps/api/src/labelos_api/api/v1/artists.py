@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 
+from labelos_api.activity import ActivityEventType, record_activity_event
 from labelos_api.auth import (
     CurrentUserContext,
     SessionDep,
@@ -106,6 +107,16 @@ async def create_artist(
             status_code=status.HTTP_409_CONFLICT,
             detail="Artist conflicts with an existing organization record",
         ) from exc
+    await record_activity_event(
+        session,
+        event_type=ActivityEventType.artist_created,
+        operation="create_artist",
+        organization_id=organization_id,
+        actor=context.user,
+        entity_type="artist",
+        entity_id=artist.id,
+        changes={"name": {"from": None, "to": artist.name}},
+    )
     await RealtimePublisher(session).publish(
         organization_id=organization_id,
         event_type=RealtimeEventType.artist_created,
@@ -146,6 +157,14 @@ async def update_artist(
     ],
 ) -> ArtistResponse:
     organization_id = require_active_organization_id(context)
+    existing_artist = await label_resources.get_artist(
+        session,
+        organization_id,
+        artist_id,
+    )
+    if existing_artist is None:
+        raise _not_found()
+    previous_name = existing_artist.name
     artist = await label_resources.update_artist(
         session,
         organization_id,
@@ -154,6 +173,16 @@ async def update_artist(
     )
     if artist is None:
         raise _not_found()
+    await record_activity_event(
+        session,
+        event_type=ActivityEventType.artist_updated,
+        operation="update_artist",
+        organization_id=organization_id,
+        actor=context.user,
+        entity_type="artist",
+        entity_id=artist.id,
+        changes={"name": {"from": previous_name, "to": artist.name}},
+    )
     await RealtimePublisher(session).publish(
         organization_id=organization_id,
         event_type=RealtimeEventType.artist_updated,

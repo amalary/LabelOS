@@ -257,6 +257,50 @@ class RealtimeEvent(Base, TimestampMixin):
     )
 
 
+class ActivityEvent(Base, TimestampMixin):
+    __tablename__ = "activity_events"
+
+    id: Mapped[UUIDPrimaryKey]
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    event_type: Mapped[str] = mapped_column(String(120), nullable=False)
+    operation: Mapped[str] = mapped_column(String(120), nullable=False)
+    result: Mapped[str] = mapped_column(
+        String(60),
+        nullable=False,
+        default="success",
+        server_default="success",
+    )
+    actor_user_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    target_user_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    entity_type: Mapped[str | None] = mapped_column(String(80))
+    entity_id: Mapped[str | None] = mapped_column(String(120))
+    changes: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    event_metadata: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+
+    organization: Mapped[Organization] = relationship()
+    actor: Mapped[User | None] = relationship(foreign_keys=[actor_user_id])
+    target_user: Mapped[User | None] = relationship(foreign_keys=[target_user_id])
+
+    __table_args__ = (
+        Index(
+            "ix_activity_events_organization_created",
+            "organization_id",
+            "created_at",
+        ),
+        Index("ix_activity_events_event_type_created", "event_type", "created_at"),
+        Index("ix_activity_events_actor_created", "actor_user_id", "created_at"),
+    )
+
+
 class OrganizationOwnedMixin:
     organization_id: Mapped[UUID] = mapped_column(
         ForeignKey("organizations.id", ondelete="CASCADE"),

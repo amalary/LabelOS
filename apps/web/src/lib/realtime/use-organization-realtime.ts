@@ -6,7 +6,8 @@ import { useRouter } from "next/navigation";
 import { clearOrganizationScopedBrowserCaches } from "../browser-cache";
 import { refetchEventTypes, type RealtimeEventEnvelope } from "./events";
 
-export type RealtimeConnectionState = "idle" | "connecting" | "connected" | "reconnecting" | "closed";
+export type RealtimeConnectionState =
+  "idle" | "connecting" | "connected" | "reconnecting" | "closed";
 
 export type PresenceMember = {
   userId: string;
