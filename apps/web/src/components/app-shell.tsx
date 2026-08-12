@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 
 import { AuthNavigation } from "./auth/auth-navigation";
 import { getNavigationAuthState } from "./auth/auth-session";
+import { DashboardShellHeader } from "./dashboard-shell-header";
 import { OrganizationSwitcher } from "./organization-switcher";
 import { RealtimeWorkspaceSync } from "./realtime-workspace-sync";
 import { ApiClientError } from "../lib/api-client";
@@ -45,25 +46,24 @@ export async function AppShell({ children }: AppShellProps) {
           </div>
         </aside>
         <div className="flex min-w-0 flex-col">
-          <header className="border-b border-white/70 bg-white/45 px-6 py-4 backdrop-blur-2xl">
-            <div className="flex items-center justify-between gap-4">
-              <div className="min-w-0">
-                <div className="text-sm font-semibold text-slate-950">Workspace</div>
-                <div className="text-xs text-slate-500">
-                  {organizationSelection.activeOrganization?.name ?? "Label operations dashboard"}
-                </div>
-              </div>
+          <DashboardShellHeader
+            activeOrganization={organizationSelection.activeOrganization}
+            authNavigation={<AuthNavigation {...authState} />}
+            isLoading={authState.isLoading}
+            organizationSwitcher={
               <OrganizationSwitcher
                 {...organizationSelection}
                 error={organizationSelectionError}
                 isLoading={authState.isLoading}
               />
+            }
+            realtimeStatus={
               <RealtimeWorkspaceSync
                 organizationId={organizationSelection.activeOrganization?.id ?? null}
               />
-              <AuthNavigation {...authState} />
-            </div>
-          </header>
+            }
+            user={authState.user}
+          />
           <main className="flex-1 px-6 py-6">{children}</main>
         </div>
       </div>
