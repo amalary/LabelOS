@@ -26,8 +26,7 @@ async def main() -> None:
 
     print(f"Seeded {summary.organization_name} ({summary.organization_id})")
     print(
-        "Users: "
-        f"{summary.users_created} created, {summary.users_existing} existing"
+        "Users: " f"{summary.users_created} created, {summary.users_existing} existing"
     )
     print(
         "Memberships: "
