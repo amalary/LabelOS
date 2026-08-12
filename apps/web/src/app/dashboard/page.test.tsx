@@ -25,9 +25,14 @@ const navigation = vi.hoisted(() => ({
   }),
 }));
 
+const organizations = vi.hoisted(() => ({
+  getOrganizationSelection: vi.fn(),
+}));
+
 vi.mock("@workos-inc/authkit-nextjs", () => authkit);
 vi.mock("next/navigation", () => navigation);
 vi.mock("../../lib/api-client", () => apiClient);
+vi.mock("../../lib/organizations", () => organizations);
 vi.mock("../../components/app-shell", () => ({
   AppShell: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
 }));
@@ -52,11 +57,30 @@ describe("DashboardPage", () => {
     authkit.withAuth.mockReset();
     apiClient.getCurrentApiUser.mockReset();
     navigation.redirect.mockClear();
+    organizations.getOrganizationSelection.mockReset();
     apiClient.getCurrentApiUser.mockResolvedValue({
       workos_user_id: "user_01SECRET",
       organization_id: "org_01LABEL",
       role: "admin",
       permissions: ["artists:read"],
+    });
+    organizations.getOrganizationSelection.mockResolvedValue({
+      activeOrganization: {
+        id: "local_org_01LABEL",
+        name: "Northstar Audio",
+        slug: "northstar-audio",
+        role: "owner",
+        can_switch: true,
+      },
+      organizations: [
+        {
+          id: "local_org_01LABEL",
+          name: "Northstar Audio",
+          slug: "northstar-audio",
+          role: "owner",
+          can_switch: true,
+        },
+      ],
     });
   });
 
@@ -70,7 +94,8 @@ describe("DashboardPage", () => {
     expect(screen.getByRole("heading", { level: 1, name: "Dashboard" })).toBeInTheDocument();
     expect(screen.getAllByText("Mara Chen").length).toBeGreaterThan(0);
     expect(screen.getAllByText("mara@example.com").length).toBeGreaterThan(0);
-    expect(screen.getByText("org_01LABEL")).toBeInTheDocument();
+    expect(screen.getByText("Northstar Audio")).toBeInTheDocument();
+    expect(screen.getByText("northstar-audio")).toBeInTheDocument();
     expect(screen.getByText("admin")).toBeInTheDocument();
     expect(screen.getByText("artists:read")).toBeInTheDocument();
     expect(apiClient.getCurrentApiUser).toHaveBeenCalledTimes(1);
@@ -87,6 +112,10 @@ describe("DashboardPage", () => {
       ...authenticatedSession,
       organizationId: undefined,
     });
+    organizations.getOrganizationSelection.mockResolvedValue({
+      activeOrganization: null,
+      organizations: [],
+    });
     apiClient.getCurrentApiUser.mockResolvedValue({
       workos_user_id: "user_01SECRET",
       organization_id: null,
@@ -97,6 +126,28 @@ describe("DashboardPage", () => {
     const { default: DashboardPage } = await import("./page");
 
     await expect(DashboardPage()).rejects.toThrow("NEXT_REDIRECT:/onboarding/workspace");
+  });
+
+  it("does not trust a stale active organization claim when backend access is gone", async () => {
+    authkit.withAuth.mockResolvedValue(authenticatedSession);
+    organizations.getOrganizationSelection.mockResolvedValue({
+      activeOrganization: null,
+      organizations: [
+        {
+          id: "local_org_02LABEL",
+          name: "Backup Label",
+          slug: "backup-label",
+          role: "member",
+          can_switch: true,
+        },
+      ],
+    });
+
+    const { default: DashboardPage } = await import("./page");
+    render(await DashboardPage());
+
+    expect(screen.getByText("Selection needs attention")).toBeInTheDocument();
+    expect(screen.getByText(/previous organization is no longer available/i)).toBeInTheDocument();
   });
 
   it("renders a safe error state when the backend rejects the session", async () => {

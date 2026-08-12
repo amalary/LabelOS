@@ -423,6 +423,8 @@ def _override_current_user_context(
 ) -> None:
     from labelos_api.auth import get_current_user_context
 
+    active_organization_id = uuid4()
+
     async def fake_current_user_context() -> CurrentUserContext:
         return CurrentUserContext(
             user=User(email="person@example.com"),
@@ -435,7 +437,19 @@ def _override_current_user_context(
                 roles=roles or ((role,) if role else ()),
                 permissions=permissions,
             ),
-            memberships=(),
+            memberships=(
+                (
+                    MembershipContext(
+                        organization_id=active_organization_id,
+                        organization_name="Example Label",
+                        organization_slug="example-label",
+                        workos_organization_id=organization_id,
+                        role=MembershipRole.admin,
+                    ),
+                )
+                if organization_id is not None
+                else ()
+            ),
         )
 
     app.dependency_overrides[get_current_user_context] = fake_current_user_context

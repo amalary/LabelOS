@@ -4,6 +4,7 @@ import { AppShell } from "../../components/app-shell";
 import { StatusIndicator } from "../../components/status-indicator";
 import { ApiClientError, getCurrentApiUser, type CurrentApiUser } from "../../lib/api-client";
 import { requireDashboardSession } from "../../lib/dashboard-session";
+import { getOrganizationSelection } from "../../lib/organizations";
 
 function displayName({
   email,
@@ -19,7 +20,8 @@ function displayName({
 
 export default async function DashboardPage() {
   const session = await requireDashboardSession();
-  if (!session.organizationId) {
+  const organizationSelection = await getOrganizationSelection();
+  if (!session.organizationId && organizationSelection.organizations.length === 0) {
     redirect("/onboarding/workspace");
   }
 
@@ -37,7 +39,8 @@ export default async function DashboardPage() {
   }
 
   const name = displayName(session.user);
-  const organizationId = backendUser?.organization_id ?? session.organizationId;
+  const organization = organizationSelection.activeOrganization;
+  const organizationId = organization?.id ?? backendUser?.organization_id ?? session.organizationId;
 
   return (
     <AppShell>
@@ -79,8 +82,19 @@ export default async function DashboardPage() {
             <p className="text-xs font-semibold uppercase tracking-normal text-slate-500">
               Active organization
             </p>
-            {organizationId ? (
-              <p className="mt-2 break-all font-mono text-sm text-slate-950">{organizationId}</p>
+            {organization ? (
+              <div className="mt-2">
+                <p className="text-sm font-semibold text-slate-950">{organization.name}</p>
+                <p className="text-xs text-slate-500">{organization.slug}</p>
+              </div>
+            ) : organizationId ? (
+              <div className="mt-2">
+                <p className="text-sm font-semibold text-amber-900">Selection needs attention</p>
+                <p className="mt-1 text-sm leading-6 text-amber-800">
+                  Your previous organization is no longer available. Choose another organization
+                  from the selector.
+                </p>
+              </div>
             ) : (
               <p className="mt-2 text-sm leading-6 text-slate-600">
                 No active organization is selected. Complete workspace onboarding to attach this

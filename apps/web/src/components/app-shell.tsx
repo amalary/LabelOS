@@ -2,6 +2,10 @@ import type { ReactNode } from "react";
 
 import { AuthNavigation } from "./auth/auth-navigation";
 import { getNavigationAuthState } from "./auth/auth-session";
+import { OrganizationSwitcher } from "./organization-switcher";
+import { RealtimeWorkspaceSync } from "./realtime-workspace-sync";
+import { ApiClientError } from "../lib/api-client";
+import { getOrganizationSelection, type OrganizationSelection } from "../lib/organizations";
 
 type AppShellProps = {
   children: ReactNode;
@@ -9,6 +13,22 @@ type AppShellProps = {
 
 export async function AppShell({ children }: AppShellProps) {
   const authState = await getNavigationAuthState();
+  let organizationSelection: OrganizationSelection = {
+    activeOrganization: null,
+    organizations: [],
+  };
+  let organizationSelectionError: string | null = null;
+
+  if (authState.isAuthenticated) {
+    try {
+      organizationSelection = await getOrganizationSelection();
+    } catch (error) {
+      if (!(error instanceof ApiClientError)) {
+        throw error;
+      }
+      organizationSelectionError = "Workspaces unavailable";
+    }
+  }
 
   return (
     <div className="min-h-screen bg-[linear-gradient(135deg,#f8fafc_0%,#eef2f7_48%,#f8fafc_100%)] text-slate-950">
@@ -29,8 +49,18 @@ export async function AppShell({ children }: AppShellProps) {
             <div className="flex items-center justify-between gap-4">
               <div className="min-w-0">
                 <div className="text-sm font-semibold text-slate-950">Workspace</div>
-                <div className="text-xs text-slate-500">Label operations dashboard</div>
+                <div className="text-xs text-slate-500">
+                  {organizationSelection.activeOrganization?.name ?? "Label operations dashboard"}
+                </div>
               </div>
+              <OrganizationSwitcher
+                {...organizationSelection}
+                error={organizationSelectionError}
+                isLoading={authState.isLoading}
+              />
+              <RealtimeWorkspaceSync
+                organizationId={organizationSelection.activeOrganization?.id ?? null}
+              />
               <AuthNavigation {...authState} />
             </div>
           </header>

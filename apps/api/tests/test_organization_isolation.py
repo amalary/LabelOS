@@ -6,7 +6,7 @@ from uuid import UUID
 import pytest
 from fastapi.testclient import TestClient
 from labelos_database.base import Base
-from labelos_database.models import Artist, MembershipRole, Organization, User
+from labelos_database.models import Artist, MembershipRole, Organization, Release, User
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
@@ -27,6 +27,8 @@ class SeededTenants:
     org_b_id: UUID
     artist_a_id: UUID
     artist_b_id: UUID
+    release_a_id: UUID
+    release_b_id: UUID
 
 
 @pytest.fixture
@@ -61,13 +63,27 @@ def isolated_client(
             )
             artist_a = Artist(name="Artist A", organization=org_a)
             artist_b = Artist(name="Artist B", organization=org_b)
-            session.add_all([owner, org_a, org_b, artist_a, artist_b])
+            release_a = Release(
+                title="Release A",
+                artist=artist_a,
+                organization=org_a,
+            )
+            release_b = Release(
+                title="Release B",
+                artist=artist_b,
+                organization=org_b,
+            )
+            session.add_all(
+                [owner, org_a, org_b, artist_a, artist_b, release_a, release_b]
+            )
             await session.commit()
             return SeededTenants(
                 org_a_id=org_a.id,
                 org_b_id=org_b.id,
                 artist_a_id=artist_a.id,
                 artist_b_id=artist_b.id,
+                release_a_id=release_a.id,
+                release_b_id=release_b.id,
             )
 
     seeded = asyncio.run(prepare_database())
@@ -165,6 +181,23 @@ def test_artist_list_is_scoped_to_active_organization(
     assert str(seeded.artist_b_id) not in artist_ids
 
 
+def test_artist_search_is_scoped_to_active_organization(
+    isolated_client: tuple[TestClient, async_sessionmaker[AsyncSession], SeededTenants],
+) -> None:
+    client, _sessionmaker, seeded = isolated_client
+    _set_active_organization(
+        client,
+        local_organization_id=seeded.org_a_id,
+        workos_organization_id="org_A",
+    )
+
+    response = client.get("/api/v1/artists", params={"search": "Artist"})
+
+    assert response.status_code == 200
+    artist_ids = {artist["id"] for artist in response.json()["artists"]}
+    assert artist_ids == {str(seeded.artist_a_id)}
+
+
 def test_artist_create_ignores_client_supplied_organization_id(
     isolated_client: tuple[TestClient, async_sessionmaker[AsyncSession], SeededTenants],
 ) -> None:
@@ -210,7 +243,9 @@ def test_cross_organization_read_returns_404(
     assert response.json() == {"detail": "Not found"}
 
 
+@pytest.mark.parametrize("method", ["put", "patch"])
 def test_cross_organization_update_returns_404_and_does_not_mutate(
+    method: str,
     isolated_client: tuple[TestClient, async_sessionmaker[AsyncSession], SeededTenants],
 ) -> None:
     client, sessionmaker, seeded = isolated_client
@@ -220,13 +255,49 @@ def test_cross_organization_update_returns_404_and_does_not_mutate(
         workos_organization_id="org_A",
     )
 
-    response = client.put(
+    response = getattr(client, method)(
         f"/api/v1/artists/{seeded.artist_b_id}",
         json={"name": "Leaked Update"},
     )
 
     assert response.status_code == 404
     assert asyncio.run(_artist_name(sessionmaker, seeded.artist_b_id)) == "Artist B"
+
+
+def test_nested_artist_releases_are_scoped_to_active_organization(
+    isolated_client: tuple[TestClient, async_sessionmaker[AsyncSession], SeededTenants],
+) -> None:
+    client, _sessionmaker, seeded = isolated_client
+    _set_active_organization(
+        client,
+        local_organization_id=seeded.org_a_id,
+        workos_organization_id="org_A",
+        permissions=("artists:view", "artists:manage", "releases:view"),
+    )
+
+    response = client.get(f"/api/v1/artists/{seeded.artist_a_id}/releases")
+
+    assert response.status_code == 200
+    release_ids = {release["id"] for release in response.json()["releases"]}
+    assert release_ids == {str(seeded.release_a_id)}
+    assert str(seeded.release_b_id) not in release_ids
+
+
+def test_cross_organization_nested_artist_releases_return_404(
+    isolated_client: tuple[TestClient, async_sessionmaker[AsyncSession], SeededTenants],
+) -> None:
+    client, _sessionmaker, seeded = isolated_client
+    _set_active_organization(
+        client,
+        local_organization_id=seeded.org_a_id,
+        workos_organization_id="org_A",
+        permissions=("artists:view", "artists:manage", "releases:view"),
+    )
+
+    response = client.get(f"/api/v1/artists/{seeded.artist_b_id}/releases")
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Not found"}
 
 
 def test_cross_organization_delete_returns_404_and_does_not_delete(
