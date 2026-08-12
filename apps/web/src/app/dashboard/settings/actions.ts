@@ -131,10 +131,10 @@ export async function inviteMember(
   }
 
   try {
-    await inviteOrganizationMember(
-      organizationId,
-      { email, role: role as Exclude<OrganizationMemberRole, "owner"> },
-    );
+    await inviteOrganizationMember(organizationId, {
+      email,
+      role: role as Exclude<OrganizationMemberRole, "owner">,
+    });
   } catch (error) {
     return actionError(error, "We could not send that invitation.");
   }

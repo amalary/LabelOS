@@ -169,8 +169,6 @@ describe("OrganizationSettingsPage", () => {
 
     const { default: OrganizationSettingsPage } = await import("./page");
 
-    await expect(OrganizationSettingsPage()).rejects.toThrow(
-      "NEXT_REDIRECT:/onboarding/workspace",
-    );
+    await expect(OrganizationSettingsPage()).rejects.toThrow("NEXT_REDIRECT:/onboarding/workspace");
   });
 });

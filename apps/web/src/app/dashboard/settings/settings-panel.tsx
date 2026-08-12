@@ -118,17 +118,15 @@ function RoleForm({
   );
 }
 
-function InviteForm({
-  organizationId,
-  canInvite,
-}: {
-  organizationId: string;
-  canInvite: boolean;
-}) {
+function InviteForm({ organizationId, canInvite }: { organizationId: string; canInvite: boolean }) {
   const [state, formAction, pending] = useActionState(inviteMember, initialState);
 
   return (
-    <form action={formAction} aria-label="Invite member" className="mt-5 grid gap-3 lg:grid-cols-[minmax(14rem,1fr)_12rem_auto]">
+    <form
+      action={formAction}
+      aria-label="Invite member"
+      className="mt-5 grid gap-3 lg:grid-cols-[minmax(14rem,1fr)_12rem_auto]"
+    >
       <input name="organizationId" type="hidden" value={organizationId} />
       <div>
         <label className="text-sm font-medium text-slate-900" htmlFor="invite-email">
@@ -371,7 +369,9 @@ export function SettingsPanel({
                         organizationId={organization.id}
                       />
                       <RemoveForm
-                        canRemove={canEditRoles && member.role !== "owner" && member.status === "active"}
+                        canRemove={
+                          canEditRoles && member.role !== "owner" && member.status === "active"
+                        }
                         member={member}
                         organizationId={organization.id}
                       />

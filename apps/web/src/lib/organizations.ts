@@ -118,9 +118,12 @@ export async function getOrganizationSelection(): Promise<OrganizationSelection>
 export async function verifyOrganizationActivation(
   organizationId: string,
 ): Promise<OrganizationActivationResponse> {
-  return apiJson<OrganizationActivationResponse>(`/api/v1/organizations/${organizationId}/activate`, {
-    method: "POST",
-  });
+  return apiJson<OrganizationActivationResponse>(
+    `/api/v1/organizations/${organizationId}/activate`,
+    {
+      method: "POST",
+    },
+  );
 }
 
 export async function listOrganizationMembers(

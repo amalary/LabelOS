@@ -169,10 +169,7 @@ describe("organization settings actions", () => {
     );
 
     expect(response).toEqual({ error: null, success: "Member removed." });
-    expect(organizations.removeOrganizationMember).toHaveBeenCalledWith(
-      "org_1",
-      "membership_1",
-    );
+    expect(organizations.removeOrganizationMember).toHaveBeenCalledWith("org_1", "membership_1");
     expect(cache.revalidatePath).toHaveBeenCalledWith("/dashboard/settings");
     expect(cache.revalidatePath).toHaveBeenCalledWith("/dashboard");
   });

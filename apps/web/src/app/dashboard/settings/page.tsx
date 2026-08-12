@@ -41,7 +41,8 @@ export default async function OrganizationSettingsPage() {
   const canEditProfile =
     organization.role === "owner" && hasPermission(backendUser, permissions.organizationManage);
   const canViewMembers =
-    roleAtLeast(organization.role, "admin") && hasPermission(backendUser, permissions.membersManage);
+    roleAtLeast(organization.role, "admin") &&
+    hasPermission(backendUser, permissions.membersManage);
   const canEditRoles =
     organization.role === "owner" && hasPermission(backendUser, permissions.membersManage);
 
