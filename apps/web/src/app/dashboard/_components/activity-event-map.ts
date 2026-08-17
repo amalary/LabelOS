@@ -1,6 +1,7 @@
 import type { ActivityEvent, ActivityEventPayload, ActivityEventType } from "./dashboard.types";
 
-export type ActivityEventTone = "organization" | "team" | "artist" | "release" | "campaign" | "approval" | "agent" | "default";
+export type ActivityEventTone =
+  "organization" | "team" | "artist" | "release" | "campaign" | "approval" | "agent" | "default";
 
 export type ActivityEventViewModel = {
   id: string;
@@ -11,7 +12,9 @@ export type ActivityEventViewModel = {
   rawType: string;
 };
 
-type ActivityEventMapper = (event: ActivityEvent) => Omit<ActivityEventViewModel, "id" | "timestamp" | "rawType">;
+type ActivityEventMapper = (
+  event: ActivityEvent,
+) => Omit<ActivityEventViewModel, "id" | "timestamp" | "rawType">;
 
 const fallbackActor = "Someone";
 
@@ -31,13 +34,15 @@ function actorName(event: ActivityEvent) {
 }
 
 function entityName(event: ActivityEvent, fallback: string) {
-  return textValue(event.payload, ["name", "displayName", "title", "artistName", "organizationName"], fallback);
+  return textValue(
+    event.payload,
+    ["name", "displayName", "title", "artistName", "organizationName"],
+    fallback,
+  );
 }
 
 function humanizeType(type: string) {
-  return type
-    .replace(/[._-]+/g, " ")
-    .replace(/\b\w/g, (character) => character.toUpperCase());
+  return type.replace(/[._-]+/g, " ").replace(/\b\w/g, (character) => character.toUpperCase());
 }
 
 export function formatActivityTimestamp(createdAt: string, now: Date = new Date()) {

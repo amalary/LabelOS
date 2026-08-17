@@ -7,7 +7,6 @@ import { OrganizationSwitcher } from "./organization-switcher";
 import { RealtimeWorkspaceSync } from "./realtime-workspace-sync";
 import { ApiClientError } from "../lib/api-client";
 import { getOrganizationSelection, type OrganizationSelection } from "../lib/organizations";
-import { OrganizationRealtimeProvider } from "../lib/realtime/use-organization-realtime";
 
 type AppShellProps = {
   children: ReactNode;
@@ -52,29 +51,29 @@ export async function AppShell({ children }: AppShellProps) {
             </div>
           </div>
         </aside>
-        <OrganizationRealtimeProvider
-          organizationId={organizationSelection.activeOrganization?.id ?? null}
-        >
-          <div className="flex min-w-0 flex-col">
-            <DashboardShellHeader
-              activeOrganization={organizationSelection.activeOrganization}
-              authNavigation={<AuthNavigation {...authState} />}
-              isLoading={authState.isLoading}
-              organizationSwitcher={
-                <OrganizationSwitcher
-                  {...organizationSelection}
-                  error={organizationSelectionError}
-                  isLoading={authState.isLoading}
-                />
-              }
-              realtimeStatus={<RealtimeWorkspaceSync />}
-              user={authState.user}
-            />
-            <main className="flex-1 px-3 py-4 sm:px-4 sm:py-5 lg:px-6 lg:py-5" id="main-content">
-              {children}
-            </main>
-          </div>
-        </OrganizationRealtimeProvider>
+        <div className="flex min-w-0 flex-col">
+          <DashboardShellHeader
+            activeOrganization={organizationSelection.activeOrganization}
+            authNavigation={<AuthNavigation {...authState} />}
+            isLoading={authState.isLoading}
+            organizationSwitcher={
+              <OrganizationSwitcher
+                {...organizationSelection}
+                error={organizationSelectionError}
+                isLoading={authState.isLoading}
+              />
+            }
+            realtimeStatus={
+              <RealtimeWorkspaceSync
+                organizationId={organizationSelection.activeOrganization?.id ?? null}
+              />
+            }
+            user={authState.user}
+          />
+          <main className="flex-1 px-3 py-4 sm:px-4 sm:py-5 lg:px-6 lg:py-5" id="main-content">
+            {children}
+          </main>
+        </div>
       </div>
     </div>
   );

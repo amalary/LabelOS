@@ -57,9 +57,7 @@ export function LabelPerformance({ performance }: LabelPerformanceProps) {
                 Total {activeViewModel.metric.label}
               </p>
               <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1">
-                <p className="text-3xl font-semibold text-slate-50">
-                  {activeViewModel.totalLabel}
-                </p>
+                <p className="text-3xl font-semibold text-slate-50">{activeViewModel.totalLabel}</p>
                 <p
                   className={cn(
                     "text-sm font-semibold",

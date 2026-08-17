@@ -49,7 +49,10 @@ export function RecentActivity({ activity, now }: RecentActivityProps) {
         </div>
         {activity.loading ? <RecentActivityLoading /> : null}
         {!activity.loading && activity.error ? (
-          <div className="rounded-lg border border-rose-400/30 bg-rose-950/30 px-3 py-3" role="alert">
+          <div
+            className="rounded-lg border border-rose-400/30 bg-rose-950/30 px-3 py-3"
+            role="alert"
+          >
             <p className="text-sm font-medium text-rose-100">Activity could not be loaded.</p>
             <p className="mt-1 text-sm text-rose-200/80">{activity.error}</p>
           </div>
