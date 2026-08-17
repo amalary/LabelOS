@@ -116,7 +116,9 @@ pnpm typecheck
 The starter frontend currently provides:
 
 - `/` - frontend starter placeholder.
-- `/dashboard` - dashboard placeholder wrapped in the application shell.
+- `/dashboard` - protected Dashboard V1 with organization-aware header, four
+  permission-aware KPI cards, label performance, release pipeline, and realtime
+  recent activity.
 - `/login` - starts the server-side WorkOS AuthKit flow.
 
 The `/dashboard` route is protected by AuthKit middleware. Users without a valid
@@ -172,6 +174,12 @@ Starter endpoints:
 - `/health/database` - database connectivity check.
 - `/api/v1/status` - versioned API status.
 - `/api/v1/me` - protected current user and organization memberships.
+- `/api/v1/dashboard/summary` - organization-scoped dashboard summary with
+  permission-filtered card and section availability.
+- `/api/v1/dashboard/performance` - protected label performance series for
+  authorized dashboard users.
+- `/api/v1/realtime/organizations/{organization_id}/events` - organization
+  realtime event stream used by the dashboard shell and recent activity.
 
 Run backend validation from the repository root:
 

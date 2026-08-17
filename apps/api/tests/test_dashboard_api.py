@@ -138,7 +138,15 @@ def _set_active_organization(
     *,
     organization_id: UUID,
     workos_organization_id: str,
-    permissions: tuple[str, ...] = ("analytics:view",),
+    role: MembershipRole = MembershipRole.admin,
+    permissions: tuple[str, ...] = (
+        "analytics:view",
+        "artists:view",
+        "releases:view",
+        "campaigns:view",
+        "contracts:view",
+        "members:manage",
+    ),
 ) -> None:
     async def override_context() -> CurrentUserContext:
         return CurrentUserContext(
@@ -148,8 +156,8 @@ def _set_active_organization(
                 subject="user_01TEST",
                 session_id="session_SECRET",
                 organization_id=workos_organization_id,
-                role="member",
-                roles=("member",),
+                role=role.value,
+                roles=(role.value,),
                 permissions=permissions,
             ),
             memberships=(
@@ -158,7 +166,7 @@ def _set_active_organization(
                     organization_name="Active Label",
                     organization_slug="active-label",
                     workos_organization_id=workos_organization_id,
-                    role=MembershipRole.member,
+                    role=role,
                 ),
             ),
         )
@@ -199,9 +207,61 @@ def test_dashboard_summary_is_scoped_to_active_organization(
             "scheduled": 0,
             "released": 0,
         },
+        "availableCards": [
+            "active-artists",
+            "upcoming-releases",
+            "active-campaigns",
+            "tasks-approvals",
+        ],
+        "availableSections": [
+            "release-pipeline",
+            "label-performance",
+            "member-activity",
+        ],
+        "authorization": {
+            "role": "admin",
+            "permissions": [
+                "members:manage",
+                "artists:view",
+                "releases:view",
+                "campaigns:view",
+                "analytics:view",
+                "contracts:view",
+            ],
+        },
     }
     assert "org_ALPHA" not in response.text
     assert "session_SECRET" not in response.text
+
+
+def test_dashboard_summary_blocks_organization_b_data_for_organization_a_user(
+    dashboard_client: tuple[TestClient, DashboardSeed],
+) -> None:
+    client, seeded = dashboard_client
+    _set_active_organization(
+        client,
+        seeded,
+        organization_id=seeded.org_a_id,
+        workos_organization_id="org_ALPHA",
+    )
+
+    response = client.get("/api/v1/dashboard/summary")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["active_artists"] == 2
+    assert payload["upcoming_releases"] == 2
+    assert payload["active_campaigns"] == 2
+    assert payload["pending_approvals"] == 2
+    assert payload["releasePipeline"]["planning"] == 2
+    assert payload["active_artists"] != 3
+    assert payload["upcoming_releases"] != 3
+    assert payload["active_campaigns"] != 3
+    assert payload["pending_approvals"] != 3
+    assert "Outside Artist" not in response.text
+    assert "Outside Release" not in response.text
+    assert "Outside Campaign" not in response.text
+    assert "Outside Contract" not in response.text
 
 
 def test_dashboard_summary_does_not_return_another_organizations_counts(
@@ -230,10 +290,32 @@ def test_dashboard_summary_does_not_return_another_organizations_counts(
             "scheduled": 0,
             "released": 0,
         },
+        "availableCards": [
+            "active-artists",
+            "upcoming-releases",
+            "active-campaigns",
+            "tasks-approvals",
+        ],
+        "availableSections": [
+            "release-pipeline",
+            "label-performance",
+            "member-activity",
+        ],
+        "authorization": {
+            "role": "admin",
+            "permissions": [
+                "members:manage",
+                "artists:view",
+                "releases:view",
+                "campaigns:view",
+                "analytics:view",
+                "contracts:view",
+            ],
+        },
     }
 
 
-def test_dashboard_summary_requires_analytics_permission(
+def test_dashboard_summary_omits_unauthorized_sensitive_cards(
     dashboard_client: tuple[TestClient, DashboardSeed],
 ) -> None:
     client, seeded = dashboard_client
@@ -242,13 +324,31 @@ def test_dashboard_summary_requires_analytics_permission(
         seeded,
         organization_id=seeded.org_a_id,
         workos_organization_id="org_ALPHA",
-        permissions=("artists:view",),
+        role=MembershipRole.member,
+        permissions=("artists:view", "releases:view"),
     )
 
     response = client.get("/api/v1/dashboard/summary")
 
-    assert response.status_code == 403
-    assert response.json() == {"detail": "Insufficient permission"}
+    assert response.status_code == 200
+    assert response.json() == {
+        "active_artists": 2,
+        "upcoming_releases": 2,
+        "releasePipeline": {
+            "planning": 2,
+            "production": 0,
+            "distribution": 0,
+            "scheduled": 0,
+            "released": 0,
+        },
+        "availableCards": ["active-artists", "upcoming-releases"],
+        "availableSections": ["release-pipeline"],
+        "authorization": {
+            "role": "member",
+            "permissions": ["artists:view", "releases:view"],
+        },
+    }
+    assert "pending_approvals" not in response.text
 
 
 def test_dashboard_performance_returns_normalized_mock_contract(
@@ -318,6 +418,44 @@ def test_dashboard_performance_requires_analytics_permission(
     )
 
     response = client.get("/api/v1/dashboard/performance?metric=streams&period=30d")
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Insufficient permission"}
+
+
+def test_dashboard_performance_requires_admin_role(
+    dashboard_client: tuple[TestClient, DashboardSeed],
+) -> None:
+    client, seeded = dashboard_client
+    _set_active_organization(
+        client,
+        seeded,
+        organization_id=seeded.org_a_id,
+        workos_organization_id="org_ALPHA",
+        role=MembershipRole.member,
+        permissions=("analytics:view",),
+    )
+
+    response = client.get("/api/v1/dashboard/performance?metric=streams&period=30d")
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Insufficient organization role"}
+
+
+def test_dashboard_revenue_performance_requires_royalties_permission(
+    dashboard_client: tuple[TestClient, DashboardSeed],
+) -> None:
+    client, seeded = dashboard_client
+    _set_active_organization(
+        client,
+        seeded,
+        organization_id=seeded.org_a_id,
+        workos_organization_id="org_ALPHA",
+        role=MembershipRole.admin,
+        permissions=("analytics:view",),
+    )
+
+    response = client.get("/api/v1/dashboard/performance?metric=revenue&period=30d")
 
     assert response.status_code == 403
     assert response.json() == {"detail": "Insufficient permission"}

@@ -200,7 +200,7 @@ export function OrganizationSwitcher({
         aria-expanded={isOpen}
         aria-haspopup="listbox"
         aria-labelledby={`${buttonId}-label ${buttonId}-name`}
-        className="h-11 max-w-[16rem] justify-start gap-3 border-white/70 bg-white/70 px-3 text-left shadow-sm hover:bg-white focus-visible:outline-sky-500"
+        className="h-11 max-w-[min(16rem,calc(100vw-2rem))] justify-start gap-3 border-white/70 bg-white/70 px-3 text-left shadow-sm hover:bg-white focus-visible:outline-sky-500"
         disabled={pending}
         id={buttonId}
         onBlur={(event) => {

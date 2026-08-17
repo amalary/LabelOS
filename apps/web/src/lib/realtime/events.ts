@@ -1,5 +1,6 @@
 export type RealtimeEventType =
   | "organization.updated"
+  | "member.updated"
   | "member.joined"
   | "member.removed"
   | "artist.created"
@@ -31,8 +32,25 @@ export type RealtimeEventEnvelope = {
   created_at: string;
 };
 
+export const activityEventTypes = new Set<RealtimeEventType>([
+  "organization.updated",
+  "member.updated",
+  "member.joined",
+  "member.removed",
+  "artist.created",
+  "artist.updated",
+  "artist.status_changed",
+  "release.updated",
+  "campaign.updated",
+  "approval.updated",
+  "agent.started",
+  "agent.completed",
+  "agent.failed",
+]);
+
 export const refetchEventTypes = new Set<RealtimeEventType>([
   "organization.updated",
+  "member.updated",
   "member.joined",
   "member.removed",
   "artist.created",

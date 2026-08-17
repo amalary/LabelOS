@@ -7,8 +7,13 @@ const navigation = vi.hoisted(() => ({
   refresh: vi.fn(),
 }));
 
+const routeState = vi.hoisted(() => ({
+  pathname: "/artists",
+}));
+
 vi.mock("next/navigation", () => ({
   useRouter: () => navigation,
+  usePathname: () => routeState.pathname,
 }));
 
 type Listener = (message: MessageEvent<string>) => void;
@@ -42,12 +47,15 @@ class FakeEventSource {
 }
 
 function RealtimeProbe() {
-  const { connectionState, lastUpdatedBy, presence } = useOrganizationRealtime("org_01");
+  const { connectionState, lastUpdatedBy, presence, recentActivityEvents } =
+    useOrganizationRealtime("org_01");
   return (
     <div>
       <span>{connectionState}</span>
       <span>{lastUpdatedBy ?? "none"}</span>
       <span>{presence.length}</span>
+      <span>{recentActivityEvents.length}</span>
+      <span>{recentActivityEvents[0]?.type ?? "no activity"}</span>
     </div>
   );
 }
@@ -55,6 +63,7 @@ function RealtimeProbe() {
 describe("useOrganizationRealtime", () => {
   beforeEach(() => {
     navigation.refresh.mockReset();
+    routeState.pathname = "/artists";
     FakeEventSource.instances = [];
     window.sessionStorage.clear();
     vi.stubGlobal("EventSource", FakeEventSource);
@@ -103,7 +112,59 @@ describe("useOrganizationRealtime", () => {
     await waitFor(() => expect(navigation.refresh).toHaveBeenCalledTimes(1));
     expect(window.sessionStorage.getItem("labelos:artists")).toBeNull();
     expect(screen.getByText("Mara Chen")).toBeInTheDocument();
-    expect(screen.getByText("1")).toBeInTheDocument();
+    expect(screen.getAllByText("1")).toHaveLength(2);
+    expect(screen.getByText("artist.updated")).toBeInTheDocument();
+  });
+
+  it("keeps dashboard activity local without a full dashboard refresh", async () => {
+    routeState.pathname = "/dashboard";
+    window.sessionStorage.setItem("labelos:artists", "cached");
+    render(<RealtimeProbe />);
+    const source = FakeEventSource.instances[0]!;
+
+    act(() => {
+      source.emit("message", {
+        id: "event_03",
+        type: "member.updated",
+        version: 1,
+        channel: "organization:org_01",
+        organization_id: "org_01",
+        entity_type: "member",
+        entity_id: "member_01",
+        operation_id: "operation_03",
+        actor: { user_id: "user_01", display_name: "Mara Chen" },
+        payload: { displayName: "Sarah Jones" },
+        created_at: new Date().toISOString(),
+      });
+    });
+
+    expect(await screen.findByText("member.updated")).toBeInTheDocument();
+    expect(navigation.refresh).not.toHaveBeenCalled();
+    expect(window.sessionStorage.getItem("labelos:artists")).toBe("cached");
+  });
+
+  it("ignores events for a different organization", () => {
+    render(<RealtimeProbe />);
+    const source = FakeEventSource.instances[0]!;
+
+    act(() => {
+      source.emit("message", {
+        id: "event_other_org",
+        type: "artist.updated",
+        version: 1,
+        channel: "organization:org_02",
+        organization_id: "org_02",
+        entity_type: "artist",
+        entity_id: "artist_02",
+        operation_id: "operation_other_org",
+        actor: { user_id: "user_02", display_name: "Other User" },
+        payload: {},
+        created_at: new Date().toISOString(),
+      });
+    });
+
+    expect(navigation.refresh).not.toHaveBeenCalled();
+    expect(screen.getByText("no activity")).toBeInTheDocument();
   });
 
   it("reconnects with the last processed cursor", () => {

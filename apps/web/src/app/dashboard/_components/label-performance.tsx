@@ -27,6 +27,12 @@ const changeToneClasses = {
   positive: "text-emerald-200",
 };
 
+const changeDirectionLabels = {
+  negative: "Decrease",
+  neutral: "No change",
+  positive: "Increase",
+};
+
 export function LabelPerformance({ performance }: LabelPerformanceProps) {
   const [selectedMetric, setSelectedMetric] = useState<LabelPerformanceMetricId>(defaultMetric);
   const [selectedRange, setSelectedRange] = useState<LabelPerformanceTimeRange>(defaultRange);
@@ -37,10 +43,13 @@ export function LabelPerformance({ performance }: LabelPerformanceProps) {
   const activeViewModel = performance.loading || performance.error ? null : viewModel;
 
   return (
-    <DashboardPanel aria-labelledby="label-performance-title" className="min-h-[34rem]">
-      <div className="flex h-full flex-col gap-6">
+    <DashboardPanel
+      aria-labelledby="label-performance-title"
+      className="min-h-[28rem] sm:min-h-[31rem] lg:min-h-[33rem]"
+    >
+      <div className="flex h-full min-w-0 flex-col gap-4 sm:gap-5">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-          <div>
+          <div className="min-w-0">
             <h2 className="text-xl font-semibold text-slate-50" id="label-performance-title">
               Label Performance
             </h2>
@@ -51,13 +60,13 @@ export function LabelPerformance({ performance }: LabelPerformanceProps) {
           {activeViewModel ? (
             <div
               aria-live="polite"
-              className="rounded-[14px] border border-slate-700/70 bg-slate-950/30 px-4 py-3 lg:min-w-56"
+              className="dashboard-panel-soft rounded-[14px] px-4 py-3 sm:min-w-56"
             >
               <p className="text-sm font-medium text-slate-400">
                 Total {activeViewModel.metric.label}
               </p>
               <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1">
-                <p className="text-3xl font-semibold text-slate-50">
+                <p className="text-2xl font-semibold text-slate-50 sm:text-3xl">
                   {activeViewModel.totalLabel}
                 </p>
                 <p
@@ -66,6 +75,7 @@ export function LabelPerformance({ performance }: LabelPerformanceProps) {
                     changeToneClasses[activeViewModel.changeDirection],
                   )}
                 >
+                  {changeDirectionLabels[activeViewModel.changeDirection]}{" "}
                   {activeViewModel.changeLabel}
                 </p>
               </div>
@@ -76,7 +86,7 @@ export function LabelPerformance({ performance }: LabelPerformanceProps) {
         {performance.loading ? (
           <div
             aria-label="Label performance loading"
-            className="grid min-h-72 place-items-center rounded-[18px] border border-slate-700/70 bg-slate-950/30"
+            className="grid min-h-72 place-items-center rounded-[16px] border border-slate-700/70 bg-slate-950/30"
             role="status"
           >
             <div className="w-full max-w-md space-y-4 px-6">
@@ -92,7 +102,7 @@ export function LabelPerformance({ performance }: LabelPerformanceProps) {
           </div>
         ) : performance.error ? (
           <div
-            className="rounded-[18px] border border-rose-300/30 bg-rose-400/10 px-5 py-4 text-sm leading-6 text-rose-100"
+            className="rounded-[16px] border border-rose-300/30 bg-rose-400/10 px-5 py-4 text-sm leading-6 text-rose-100"
             role="alert"
           >
             {performance.error}
@@ -100,7 +110,7 @@ export function LabelPerformance({ performance }: LabelPerformanceProps) {
         ) : !activeViewModel ? (
           <div
             aria-label="Label performance empty"
-            className="grid min-h-72 place-items-center rounded-[18px] border border-slate-700/70 bg-slate-950/30 px-5 text-center"
+            className="grid min-h-72 place-items-center rounded-[16px] border border-slate-700/70 bg-slate-950/30 px-5 text-center"
           >
             <div>
               <p className="text-base font-semibold text-slate-100">No performance data yet</p>
@@ -109,7 +119,7 @@ export function LabelPerformance({ performance }: LabelPerformanceProps) {
                 are available for this workspace.
               </p>
               <Link
-                className="mt-4 inline-flex text-sm font-semibold text-cyan-100 hover:text-cyan-50"
+                className="mt-4 inline-flex rounded-sm text-sm font-semibold text-cyan-100 hover:text-cyan-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950"
                 href="/dashboard/integrations"
               >
                 Connect analytics source -&gt;

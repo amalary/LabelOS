@@ -28,7 +28,7 @@ export function ReleasePipeline({ pipeline }: ReleasePipelineProps) {
 
   return (
     <DashboardPanel aria-labelledby="release-pipeline-title">
-      <div className="flex flex-col gap-5">
+      <div className="flex flex-col gap-4">
         <div>
           <h2 id="release-pipeline-title" className="text-lg font-semibold text-slate-50">
             Release Pipeline
@@ -42,11 +42,11 @@ export function ReleasePipeline({ pipeline }: ReleasePipelineProps) {
           <div
             role="status"
             aria-label="Release pipeline loading"
-            className="grid animate-pulse gap-3 sm:grid-cols-5"
+            className="grid animate-pulse gap-3 motion-reduce:animate-none sm:grid-cols-5"
           >
             {Array.from({ length: 5 }).map((_, index) => (
               <div
-                className="h-24 rounded-md border border-slate-700/70 bg-slate-800/50"
+                className="h-24 rounded-md border border-slate-700/60 bg-slate-800/45"
                 key={index}
               />
             ))}
@@ -61,7 +61,7 @@ export function ReleasePipeline({ pipeline }: ReleasePipelineProps) {
 
         {!pipeline.loading && !pipeline.error ? (
           <>
-            <div className="flex items-end justify-between gap-4">
+            <div className="flex flex-wrap items-end justify-between gap-4">
               <p className="text-sm text-slate-400">
                 <span className="font-semibold text-slate-100">
                   {formatReleaseCount(totalReleases)}
@@ -80,15 +80,18 @@ export function ReleasePipeline({ pipeline }: ReleasePipelineProps) {
                 {emptyOrganizationMessage}
               </p>
             ) : (
-              <ol className="grid gap-3 sm:grid-cols-5" aria-label="Release lifecycle stages">
+              <ol
+                className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,8rem),1fr))] gap-3 xl:grid-cols-5"
+                aria-label="Release lifecycle stages"
+              >
                 {pipeline.stages.map((stage, index) => (
                   <li className="relative min-w-0" key={stage.status}>
                     <Link
                       aria-label={`${stage.label}: ${formatReleaseCount(stage.count)} releases`}
                       className={cn(
-                        "group flex min-h-28 flex-col justify-between rounded-md border p-3 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950",
+                        "group flex min-h-28 touch-manipulation flex-col justify-between rounded-md border p-3 transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950",
                         stageToneClasses[stage.status],
-                        "hover:border-cyan-300/50 hover:bg-slate-800/80",
+                        "hover:border-cyan-300/45 hover:bg-slate-800/70",
                       )}
                       href={stage.href}
                     >
@@ -103,7 +106,7 @@ export function ReleasePipeline({ pipeline }: ReleasePipelineProps) {
                           </span>
                         ) : null}
                       </span>
-                      <span className="text-3xl font-semibold text-slate-50">
+                      <span className="text-[2rem] font-semibold leading-none text-slate-50">
                         {formatReleaseCount(stage.count)}
                       </span>
                       <span className="text-xs font-medium text-slate-400">
@@ -119,7 +122,7 @@ export function ReleasePipeline({ pipeline }: ReleasePipelineProps) {
               <div className="rounded-md border border-slate-700/70 bg-slate-950/30 p-4">
                 <p className="text-sm font-medium text-slate-200">{emptyMessage}</p>
                 <Link
-                  className="mt-2 inline-flex text-sm font-semibold text-cyan-100 hover:text-cyan-50"
+                  className="mt-2 inline-flex rounded-sm text-sm font-semibold text-cyan-100 hover:text-cyan-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950"
                   href="/releases/new"
                 >
                   Create a release -&gt;

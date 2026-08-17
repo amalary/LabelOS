@@ -84,7 +84,9 @@ describe("ReleasePipeline", () => {
 
     expect(screen.getByRole("status", { name: "Release pipeline loading" })).toBeInTheDocument();
 
-    rerender(<ReleasePipeline pipeline={{ stages: [], error: "Release data could not be loaded." }} />);
+    rerender(
+      <ReleasePipeline pipeline={{ stages: [], error: "Release data could not be loaded." }} />,
+    );
 
     expect(screen.getByRole("alert")).toHaveTextContent("Release data could not be loaded.");
 

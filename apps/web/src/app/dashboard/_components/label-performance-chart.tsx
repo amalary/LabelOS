@@ -8,10 +8,10 @@ type LabelPerformanceChartProps = {
 const width = 640;
 const height = 280;
 const padding = {
-  bottom: 42,
-  left: 18,
-  right: 18,
-  top: 22,
+  bottom: 38,
+  left: 22,
+  right: 22,
+  top: 18,
 };
 
 function toPath(points: Array<{ x: number; y: number }>) {
@@ -44,11 +44,18 @@ export function LabelPerformanceChart({ points, summary }: LabelPerformanceChart
   const firstPoint = coordinates[0];
   const lastPoint = coordinates.at(-1);
   const gridLines = [0, 0.25, 0.5, 0.75, 1].map((step) => padding.top + chartHeight * step);
+  const summaryId = "label-performance-chart-summary";
+  const tableId = "label-performance-chart-data";
 
   return (
-    <figure className="rounded-[18px] border border-slate-700/70 bg-slate-950/30 p-3 sm:p-4">
-      <p className="sr-only">{summary}</p>
-      <div className="h-72 w-full">
+    <figure
+      aria-describedby={`${summaryId} ${tableId}`}
+      className="min-w-0 rounded-[16px] border border-slate-700/60 bg-slate-950/30 p-2.5 sm:p-4"
+    >
+      <figcaption className="sr-only" id={summaryId}>
+        {summary}
+      </figcaption>
+      <div className="h-56 w-full sm:h-64 lg:h-[17rem]">
         <svg
           aria-hidden="true"
           className="h-full w-full overflow-visible"
@@ -57,15 +64,15 @@ export function LabelPerformanceChart({ points, summary }: LabelPerformanceChart
         >
           <defs>
             <linearGradient id="label-performance-area" x1="0" x2="0" y1="0" y2="1">
-              <stop offset="0%" stopColor="#22d3ee" stopOpacity="0.34" />
-              <stop offset="58%" stopColor="#34d399" stopOpacity="0.12" />
+              <stop offset="0%" stopColor="#67e8f9" stopOpacity="0.28" />
+              <stop offset="58%" stopColor="#34d399" stopOpacity="0.11" />
               <stop offset="100%" stopColor="#22d3ee" stopOpacity="0" />
             </linearGradient>
           </defs>
           {gridLines.map((lineY) => (
             <line
               key={lineY}
-              stroke="rgb(148 163 184 / 0.16)"
+              stroke="rgb(148 163 184 / 0.14)"
               strokeWidth="1"
               x1={padding.left}
               x2={width - padding.right}
@@ -80,7 +87,7 @@ export function LabelPerformanceChart({ points, summary }: LabelPerformanceChart
             stroke="#67e8f9"
             strokeLinecap="round"
             strokeLinejoin="round"
-            strokeWidth="4"
+            strokeWidth="3"
             vectorEffect="non-scaling-stroke"
           />
           {coordinates.map((point, index) => (
@@ -107,7 +114,7 @@ export function LabelPerformanceChart({ points, summary }: LabelPerformanceChart
           ) : null}
         </svg>
       </div>
-      <table className="sr-only">
+      <table className="sr-only" id={tableId}>
         <caption>Performance chart data</caption>
         <thead>
           <tr>
