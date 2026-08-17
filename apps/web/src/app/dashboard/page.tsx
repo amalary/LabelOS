@@ -21,14 +21,17 @@ export default async function DashboardPage() {
 
   return (
     <AppShell>
-      <div className="dashboard-surface relative isolate -mx-2 overflow-hidden rounded-[28px] border border-slate-800/80 px-4 py-5 shadow-[0_32px_110px_rgba(2,6,23,0.28)] sm:-mx-3 sm:px-6 sm:py-6 lg:px-8 lg:py-8">
-        <div className="pointer-events-none absolute inset-x-8 top-0 h-px bg-gradient-to-r from-transparent via-cyan-300/50 to-transparent" />
-        <div className="flex flex-col gap-7">
+      <div
+        aria-labelledby="dashboard-page-title"
+        className="dashboard-surface relative isolate max-w-full overflow-hidden rounded-[20px] border border-slate-800/70 px-3 py-4 shadow-[0_28px_90px_rgba(2,6,23,0.24)] sm:-mx-1 sm:rounded-[28px] sm:px-5 sm:py-5 lg:-mx-2 lg:px-7 lg:py-7"
+      >
+        <div className="pointer-events-none absolute inset-x-8 top-0 h-px bg-gradient-to-r from-transparent via-cyan-200/45 to-transparent" />
+        <div className="flex flex-col gap-6">
           <DashboardHeader organizationName={organization?.name ?? "selected workspace"} />
           {!organization ? (
             <section
               aria-live="polite"
-              className="rounded-[18px] border border-amber-300/30 bg-amber-400/10 px-5 py-4 text-sm leading-6 text-amber-100"
+              className="rounded-[16px] border border-amber-300/25 bg-amber-400/10 px-4 py-3 text-sm leading-6 text-amber-100"
               role="alert"
             >
               Your active organization selection needs attention. Choose another organization from

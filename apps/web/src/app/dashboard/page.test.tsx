@@ -216,7 +216,7 @@ describe("DashboardPage", () => {
     await expect(DashboardPage()).rejects.toThrow("NEXT_REDIRECT:/onboarding/workspace");
   });
 
-  it("renders the dashboard with an organization warning when active selection is missing", async () => {
+  it("does not trust a stale active organization claim when backend access is gone", async () => {
     authkit.withAuth.mockResolvedValue(authenticatedSession);
     organizations.getOrganizationSelection.mockResolvedValue({
       activeOrganization: null,
@@ -235,6 +235,8 @@ describe("DashboardPage", () => {
     render(await DashboardPage());
 
     expect(screen.getByRole("alert")).toHaveTextContent(/active organization selection/i);
+    expect(dashboardData.getDashboardData).not.toHaveBeenCalled();
+    expect(dashboardData.getEmptyDashboardData).toHaveBeenCalledWith({ emptyOrganization: true });
     expect(
       screen.getByRole("heading", { level: 2, name: "Label Performance" }),
     ).toBeInTheDocument();
