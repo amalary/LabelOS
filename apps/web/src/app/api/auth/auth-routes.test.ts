@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const authkit = vi.hoisted(() => ({
   getSignInUrl: vi.fn(),
+  getSignUpUrl: vi.fn(),
   handleAuth: vi.fn(),
   signOut: vi.fn(),
 }));
@@ -29,6 +30,7 @@ describe("WorkOS auth routes", () => {
     vi.resetModules();
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
     authkit.getSignInUrl.mockReset();
+    authkit.getSignUpUrl.mockReset();
     authkit.handleAuth.mockReset();
     authkit.signOut.mockReset();
     navigation.redirect.mockClear();
@@ -44,6 +46,18 @@ describe("WorkOS auth routes", () => {
 
     expect(authkit.getSignInUrl).toHaveBeenCalledWith({ returnTo: "/dashboard" });
     expect(navigation.redirect).toHaveBeenCalledWith("https://auth.workos.test/sign-in");
+  });
+
+  it("redirects signup requests to the WorkOS-hosted sign-up URL with a safe return path", async () => {
+    authkit.getSignUpUrl.mockResolvedValue("https://auth.workos.test/sign-up");
+    const { GET } = await import("./signup/route");
+
+    await expect(
+      GET(request("https://app.test/api/auth/signup?next=/join/public-token")),
+    ).rejects.toThrow("NEXT_REDIRECT:https://auth.workos.test/sign-up");
+
+    expect(authkit.getSignUpUrl).toHaveBeenCalledWith({ returnTo: "/join/public-token" });
+    expect(navigation.redirect).toHaveBeenCalledWith("https://auth.workos.test/sign-up");
   });
 
   it("configures callback handling with a safe success path and safe error redirect", async () => {

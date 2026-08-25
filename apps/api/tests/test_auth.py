@@ -6,7 +6,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
-from labelos_database.models import MembershipRole, User
+from labelos_database.models import MembershipRole, User, WorkspacePermission
 
 from labelos_api.auth import (
     AuthenticatedPrincipal,
@@ -14,10 +14,21 @@ from labelos_api.auth import (
     MembershipContext,
     has_role_at_least,
     principal_from_token,
+    require_active_workspace_id,
     require_organization_role,
     require_permission,
 )
-from labelos_api.authorization import INITIAL_ROLE_PERMISSIONS, Permission
+from labelos_api.authorization import (
+    INITIAL_ROLE_CAPABILITIES,
+    INITIAL_ROLE_PERMISSIONS,
+    AuthorizationResource,
+    Capability,
+    Permission,
+    authorization_service,
+    effective_capabilities,
+    has_capability,
+    has_department_access,
+)
 from labelos_api.config import Settings
 from labelos_api.main import create_app
 
@@ -351,9 +362,9 @@ def test_authenticated_me_response_uses_current_principal(
 
 
 def test_role_checks_follow_membership_hierarchy() -> None:
-    assert has_role_at_least(MembershipRole.owner, MembershipRole.viewer)
+    assert has_role_at_least(MembershipRole.owner, MembershipRole.guest)
     assert has_role_at_least(MembershipRole.admin, MembershipRole.member)
-    assert not has_role_at_least(MembershipRole.viewer, MembershipRole.member)
+    assert not has_role_at_least(MembershipRole.guest, MembershipRole.member)
 
 
 def test_initial_role_permission_mapping() -> None:
@@ -367,6 +378,245 @@ def test_initial_role_permission_mapping() -> None:
     assert Permission.royalties_manage not in admin_permissions
     assert Permission.artists_view in member_permissions
     assert Permission.artists_manage not in member_permissions
+
+
+def test_initial_role_capability_mapping() -> None:
+    owner_capabilities = INITIAL_ROLE_CAPABILITIES[MembershipRole.owner]
+    admin_capabilities = INITIAL_ROLE_CAPABILITIES[MembershipRole.admin]
+    member_capabilities = INITIAL_ROLE_CAPABILITIES[MembershipRole.member]
+
+    assert Capability.workspace_manage in owner_capabilities
+    assert Capability.contract_approve in admin_capabilities
+    assert Capability.role_assign in admin_capabilities
+    assert Capability.artist_view in member_capabilities
+    assert Capability.contract_approve not in member_capabilities
+
+
+def test_capability_authorization_combines_workspace_department_and_capability() -> (
+    None
+):
+    context = CurrentUserContext(
+        user=User(email="person@example.com"),
+        principal=AuthenticatedPrincipal(
+            provider="workos",
+            subject="user_01TEST",
+            session_id="session_01TEST",
+            organization_id="org_ACTIVE",
+        ),
+        memberships=(
+            MembershipContext(
+                organization_id=uuid4(),
+                organization_name="Example Label",
+                organization_slug="example-label",
+                workos_organization_id="org_ACTIVE",
+                workspace_permission=WorkspacePermission.member,
+                department_access=("legal",),
+                capability_permissions=("contract.approve",),
+            ),
+        ),
+    )
+
+    assert has_department_access(context, "legal")
+    assert has_capability(context, Capability.contract_approve)
+    assert Capability.contract_approve in effective_capabilities(context)
+    assert not has_capability(context, Capability.contract_sign_request)
+
+
+def test_authorization_service_can_resolves_workspace_capability_resource() -> None:
+    workspace_id = uuid4()
+    context = CurrentUserContext(
+        user=User(email="person@example.com"),
+        principal=AuthenticatedPrincipal(
+            provider="workos",
+            subject="user_01TEST",
+            session_id="session_01TEST",
+            organization_id="org_ACTIVE",
+        ),
+        memberships=(
+            MembershipContext(
+                organization_id=workspace_id,
+                organization_name="Malary Records",
+                organization_slug="malary-records",
+                workos_organization_id="org_ACTIVE",
+                workspace_permission=WorkspacePermission.member,
+                department_access=("legal",),
+                capability_permissions=("contract.upload",),
+            ),
+        ),
+    )
+
+    assert authorization_service.can(
+        context,
+        workspace_id,
+        Capability.contract_upload,
+        AuthorizationResource(department="legal"),
+    )
+    assert not authorization_service.can(
+        context,
+        workspace_id,
+        Capability.contract_upload,
+        AuthorizationResource(department="finance"),
+    )
+    assert not authorization_service.can(
+        context,
+        workspace_id,
+        Capability.contract_sign_request,
+        AuthorizationResource(department="legal"),
+    )
+
+
+def test_owner_has_all_capabilities_and_department_access() -> None:
+    context = CurrentUserContext(
+        user=User(email="person@example.com"),
+        principal=AuthenticatedPrincipal(
+            provider="workos",
+            subject="user_01TEST",
+            session_id="session_01TEST",
+            organization_id="org_ACTIVE",
+        ),
+        memberships=(
+            MembershipContext(
+                organization_id=uuid4(),
+                organization_name="Example Label",
+                organization_slug="example-label",
+                workos_organization_id="org_ACTIVE",
+                workspace_permission=WorkspacePermission.owner,
+            ),
+        ),
+    )
+
+    assert has_department_access(context, "legal")
+    assert has_capability(context, Capability.workspace_manage)
+
+
+def test_role_derived_capability_authorizes_without_direct_membership_grant() -> None:
+    context = CurrentUserContext(
+        user=User(email="person@example.com"),
+        principal=AuthenticatedPrincipal(
+            provider="workos",
+            subject="user_01TEST",
+            session_id="session_01TEST",
+            organization_id="org_ACTIVE",
+        ),
+        memberships=(
+            MembershipContext(
+                organization_id=uuid4(),
+                organization_name="Example Label",
+                organization_slug="example-label",
+                workos_organization_id="org_ACTIVE",
+                workspace_permission=WorkspacePermission.guest,
+                department_access=("legal",),
+                role_capabilities=("contract.approve",),
+            ),
+        ),
+    )
+
+    assert Capability.contract_approve in effective_capabilities(context)
+    assert has_capability(context, Capability.contract_approve)
+
+
+def test_authorization_service_denies_unknown_actions_by_default() -> None:
+    context = CurrentUserContext(
+        user=User(email="person@example.com"),
+        principal=AuthenticatedPrincipal(
+            provider="workos",
+            subject="user_01TEST",
+            session_id="session_01TEST",
+            organization_id="org_ACTIVE",
+        ),
+        memberships=(
+            MembershipContext(
+                organization_id=uuid4(),
+                organization_name="Example Label",
+                organization_slug="example-label",
+                workos_organization_id="org_ACTIVE",
+                workspace_permission=WorkspacePermission.owner,
+            ),
+        ),
+    )
+
+    assert not authorization_service.can(context, None, "unregistered.action")
+    assert not authorization_service.can_capability(context, "unregistered.action")
+    assert not authorization_service.can_permission(context, "unregistered:permission")
+    assert not authorization_service.can_role(context, "unregistered-role")
+
+
+def test_authorization_service_requires_active_workspace_membership() -> None:
+    workspace_id = uuid4()
+    inactive_membership = MembershipContext(
+        organization_id=workspace_id,
+        organization_name="Example Label",
+        organization_slug="example-label",
+        workos_organization_id="org_ACTIVE",
+        workspace_permission=WorkspacePermission.owner,
+        status="removed",
+    )
+    context = CurrentUserContext(
+        user=User(email="person@example.com"),
+        principal=AuthenticatedPrincipal(
+            provider="workos",
+            subject="user_01TEST",
+            session_id="session_01TEST",
+            organization_id="org_ACTIVE",
+        ),
+        memberships=(inactive_membership,),
+    )
+
+    assert context.active_membership is None
+    assert not authorization_service.can(
+        context,
+        inactive_membership,
+        Capability.workspace_manage,
+    )
+    assert not authorization_service.can(
+        context, workspace_id, Capability.workspace_manage
+    )
+
+
+def test_authorization_service_combines_capabilities_across_multiple_roles() -> None:
+    context = CurrentUserContext(
+        user=User(email="person@example.com"),
+        principal=AuthenticatedPrincipal(
+            provider="workos",
+            subject="user_01TEST",
+            session_id="session_01TEST",
+            organization_id="org_ACTIVE",
+        ),
+        memberships=(
+            MembershipContext(
+                organization_id=uuid4(),
+                organization_name="Example Label",
+                organization_slug="example-label",
+                workos_organization_id="org_ACTIVE",
+                workspace_permission=WorkspacePermission.guest,
+                department_access=("legal", "marketing"),
+                role_capabilities=("contract.view", "campaign.approve"),
+            ),
+        ),
+    )
+
+    capabilities = effective_capabilities(context)
+
+    assert Capability.contract_view in capabilities
+    assert Capability.campaign_approve in capabilities
+    assert authorization_service.can(
+        context,
+        None,
+        Capability.contract_view,
+        AuthorizationResource(department="legal"),
+    )
+    assert authorization_service.can(
+        context,
+        None,
+        Capability.campaign_approve,
+        AuthorizationResource(department="marketing"),
+    )
+    assert not authorization_service.can(
+        context,
+        None,
+        Capability.member_invite,
+        AuthorizationResource(department="administration"),
+    )
 
 
 def test_require_organization_role_rejects_insufficient_role() -> None:
@@ -384,7 +634,7 @@ def test_require_organization_role_rejects_insufficient_role() -> None:
                 organization_name="Example Label",
                 organization_slug="example-label",
                 workos_organization_id="org_01TEST",
-                role=MembershipRole.viewer,
+                role=MembershipRole.guest,
             ),
         ),
     )
@@ -393,6 +643,68 @@ def test_require_organization_role_rejects_insufficient_role() -> None:
         require_organization_role(organization_id, MembershipRole.admin, context)
 
     assert exc_info.value.status_code == 403
+
+
+def test_active_workspace_uses_workos_organization_membership() -> None:
+    active_organization_id = uuid4()
+    secondary_organization_id = uuid4()
+    context = CurrentUserContext(
+        user=User(email="person@example.com"),
+        principal=AuthenticatedPrincipal(
+            provider="workos",
+            subject="user_01TEST",
+            session_id="session_01TEST",
+            organization_id="org_ACTIVE",
+        ),
+        memberships=(
+            MembershipContext(
+                organization_id=secondary_organization_id,
+                organization_name="Secondary Label",
+                organization_slug="secondary-label",
+                workos_organization_id="org_SECONDARY",
+                role=MembershipRole.member,
+            ),
+            MembershipContext(
+                organization_id=active_organization_id,
+                organization_name="Active Label",
+                organization_slug="active-label",
+                workos_organization_id="org_ACTIVE",
+                role=MembershipRole.admin,
+            ),
+        ),
+    )
+
+    assert context.active_workspace_id == active_organization_id
+    assert context.workspace_memberships == context.memberships
+    assert require_active_workspace_id(context) == active_organization_id
+
+
+def test_active_workspace_requires_matching_active_membership() -> None:
+    context = CurrentUserContext(
+        user=User(email="person@example.com"),
+        principal=AuthenticatedPrincipal(
+            provider="workos",
+            subject="user_01TEST",
+            session_id="session_01TEST",
+            organization_id="org_MISSING",
+        ),
+        memberships=(
+            MembershipContext(
+                organization_id=uuid4(),
+                organization_name="Inactive Label",
+                organization_slug="inactive-label",
+                workos_organization_id="org_MISSING",
+                role=MembershipRole.admin,
+                status="inactive",
+            ),
+        ),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        require_active_workspace_id(context)
+
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.detail == "Workspace context required"
 
 
 def test_require_permission_rejects_missing_permission() -> None:
@@ -420,6 +732,9 @@ def _override_current_user_context(
     roles: tuple[str, ...] = (),
     permissions: tuple[str, ...] = (),
     organization_id: str | None = "org_01TEST",
+    workspace_permission: WorkspacePermission = WorkspacePermission.admin,
+    department_access: tuple[str, ...] = (),
+    capability_permissions: tuple[str, ...] = (),
 ) -> None:
     from labelos_api.auth import get_current_user_context
 
@@ -444,7 +759,9 @@ def _override_current_user_context(
                         organization_name="Example Label",
                         organization_slug="example-label",
                         workos_organization_id=organization_id,
-                        role=MembershipRole.admin,
+                        workspace_permission=workspace_permission,
+                        department_access=department_access,
+                        capability_permissions=capability_permissions,
                     ),
                 )
                 if organization_id is not None
@@ -527,6 +844,61 @@ def test_protected_route_rejects_missing_permission(
 
     assert response.status_code == 403
     assert response.json() == {"detail": "Insufficient permission"}
+
+
+def test_capability_route_allows_department_and_capability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "test")
+    app = create_app()
+    _override_current_user_context(
+        app,
+        workspace_permission=WorkspacePermission.member,
+        department_access=("legal",),
+        capability_permissions=("contract.upload",),
+    )
+
+    with TestClient(app) as test_client:
+        response = test_client.post("/api/v1/authorization/examples/contracts")
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "guard": "contract.upload"}
+
+
+def test_capability_route_rejects_missing_department(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "test")
+    app = create_app()
+    _override_current_user_context(
+        app,
+        workspace_permission=WorkspacePermission.member,
+        capability_permissions=("contract.upload",),
+    )
+
+    with TestClient(app) as test_client:
+        response = test_client.post("/api/v1/authorization/examples/contracts")
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Insufficient department access"}
+
+
+def test_capability_route_rejects_missing_capability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "test")
+    app = create_app()
+    _override_current_user_context(
+        app,
+        workspace_permission=WorkspacePermission.guest,
+        department_access=("legal",),
+    )
+
+    with TestClient(app) as test_client:
+        response = test_client.post("/api/v1/authorization/examples/contracts")
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Insufficient capability permission"}
 
 
 def test_workos_startup_validation_requires_client_id() -> None:

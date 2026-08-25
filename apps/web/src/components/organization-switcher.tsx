@@ -14,7 +14,7 @@ import { Button, cn } from "@label-os/ui";
 
 import { switchOrganization, type SwitchOrganizationState } from "../app/dashboard/actions";
 import { clearOrganizationScopedBrowserCaches } from "../lib/browser-cache";
-import type { OrganizationSummary } from "../lib/organizations";
+import type { OrganizationSummary, WorkspacePermission } from "../lib/organizations";
 
 type OrganizationSwitcherProps = {
   activeOrganization: OrganizationSummary | null;
@@ -25,7 +25,7 @@ type OrganizationSwitcherProps = {
 
 const initialState: SwitchOrganizationState = { error: null };
 
-function roleLabel(role: OrganizationSummary["role"]) {
+function roleLabel(role: WorkspacePermission) {
   return `${role.charAt(0).toUpperCase()}${role.slice(1)}`;
 }
 
@@ -214,7 +214,7 @@ export function OrganizationSwitcher({
         variant="secondary"
       >
         <span className="sr-only" id={`${buttonId}-label`}>
-          Active organization
+          Active workspace
         </span>
         {displayedOrganization ? (
           <>
@@ -227,7 +227,9 @@ export function OrganizationSwitcher({
                 {displayedOrganization.name}
               </span>
               <span className="block truncate text-xs font-normal text-slate-500">
-                {roleLabel(displayedOrganization.role)}
+                {roleLabel(
+                  displayedOrganization.workspace_permission ?? displayedOrganization.role,
+                )}
               </span>
             </span>
           </>
@@ -289,7 +291,9 @@ export function OrganizationSwitcher({
                     {organization.name}
                   </span>
                   <span className="block truncate text-xs text-slate-500">
-                    {isActive ? "Current workspace" : roleLabel(organization.role)}
+                    {isActive
+                      ? "Current workspace"
+                      : roleLabel(organization.workspace_permission ?? organization.role)}
                   </span>
                 </span>
               </button>
@@ -304,7 +308,7 @@ export function OrganizationSwitcher({
       ) : null}
       {!activeOrganization && organizations.length > 0 ? (
         <p className="mt-2 max-w-[22rem] text-xs leading-5 text-amber-700" role="status">
-          Select an organization to continue.
+          Select a workspace to continue.
         </p>
       ) : null}
     </form>

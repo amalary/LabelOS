@@ -17,6 +17,7 @@ logger = logging.getLogger("labelos_api.realtime")
 class RealtimeEventType(StrEnum):
     organization_updated = "organization.updated"
     member_updated = "member.updated"
+    member_role_changed = "member.role_changed"
     member_joined = "member.joined"
     member_removed = "member.removed"
     artist_created = "artist.created"

@@ -10,14 +10,22 @@ from fastapi.testclient import TestClient
 from labelos_database.base import Base
 from labelos_database.models import (
     AuthIdentity,
+    Department,
+    MembershipDepartmentAccess,
+    MembershipProfessionalRole,
     MembershipRole,
     Organization,
     OrganizationMembership,
+    ProfessionalRole,
+    UniversalProfile,
     User,
     WebhookEvent,
+    WorkspaceMembership,
+    WorkspacePermission,
 )
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import selectinload
 from sqlalchemy.pool import StaticPool
 
 from labelos_api.auth import get_session
@@ -105,6 +113,42 @@ async def _scalar(
 ):
     async with sessionmaker() as session:
         return await session.scalar(statement)
+
+
+async def _membership_with_roles(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    workos_membership_id: str,
+) -> OrganizationMembership | None:
+    async with sessionmaker() as session:
+        return await session.scalar(
+            select(OrganizationMembership)
+            .options(
+                selectinload(
+                    OrganizationMembership.professional_role_links
+                ).selectinload(MembershipProfessionalRole.professional_role),
+                selectinload(OrganizationMembership.department_access_grants),
+                selectinload(
+                    OrganizationMembership.department_access_grants
+                ).selectinload(MembershipDepartmentAccess.department),
+            )
+            .where(OrganizationMembership.workos_membership_id == workos_membership_id)
+        )
+
+
+async def _workspace_membership_for_profile_email(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    email: str,
+) -> WorkspaceMembership | None:
+    async with sessionmaker() as session:
+        return await session.scalar(
+            select(WorkspaceMembership)
+            .join(WorkspaceMembership.profile)
+            .where(UniversalProfile.primary_email == email)
+            .options(
+                selectinload(WorkspaceMembership.profile),
+                selectinload(WorkspaceMembership.organization_membership),
+            )
+        )
 
 
 def test_workos_webhook_accepts_valid_signature(
@@ -248,6 +292,10 @@ def test_workos_webhook_synchronizes_membership_event(
             "organization_name": "Membership Label",
             "status": "active",
             "role": {"slug": "admin"},
+            "metadata": {
+                "professional_roles": ["A&R", "Product Manager", "A&R"],
+                "department_access": ["artists", "marketing"],
+            },
             "user": _user_data(),
         },
         event_id="event_membership",
@@ -256,17 +304,143 @@ def test_workos_webhook_synchronizes_membership_event(
     response = _post_webhook(client, raw_body, _signature(raw_body))
 
     assert response.status_code == 200
-    membership = asyncio.run(
+    membership = asyncio.run(_membership_with_roles(sessionmaker, "om_01TEST"))
+    product_manager = asyncio.run(
         _scalar(
             sessionmaker,
-            select(OrganizationMembership).where(
-                OrganizationMembership.workos_membership_id == "om_01TEST"
-            ),
+            select(ProfessionalRole).where(ProfessionalRole.slug == "product_manager"),
         )
     )
     assert membership is not None
     assert membership.role == MembershipRole.admin
+    assert membership.workspace_permission == WorkspacePermission.admin
+    assert list(membership.professional_roles) == ["A&R", "Product Manager"]
+    assert product_manager is not None
+    assert len(membership.professional_role_links) == 2
+    assert membership.professional_role_links[0].is_primary
+    assert membership.department_access == ["artists", "marketing"]
+    assert membership.approved_department_access == (
+        "artists",
+        "marketing",
+        "a&r",
+        "discovery",
+        "artist",
+        "evaluations",
+    )
+    assert membership.pending_department_access == ()
+    assert {
+        grant.department_slug: grant.source
+        for grant in membership.department_access_grants
+    } == {
+        "artists": "invitation",
+        "marketing": "invitation",
+        "a&r": "role_default",
+        "discovery": "role_default",
+        "artist": "role_default",
+        "evaluations": "role_default",
+    }
     assert membership.status == "active"
+    workspace_membership = asyncio.run(
+        _workspace_membership_for_profile_email(sessionmaker, "ada@example.com")
+    )
+    assert workspace_membership is not None
+    assert workspace_membership.workspace_id == membership.organization_id
+    assert workspace_membership.profile.primary_email == "ada@example.com"
+    assert workspace_membership.organization_membership_id == membership.id
+    assert workspace_membership.status == "active"
+
+
+def test_workos_webhook_requests_department_access_from_professional_roles(
+    webhook_client: tuple[TestClient, async_sessionmaker[AsyncSession]],
+) -> None:
+    client, sessionmaker = webhook_client
+    raw_body = _event(
+        "organization_membership.created",
+        {
+            "object": "organization_membership",
+            "id": "om_default_departments",
+            "user_id": "user_01TEST",
+            "organization_id": "org_01TEST",
+            "organization_name": "Default Departments Label",
+            "status": "active",
+            "role": {"slug": "member"},
+            "metadata": {
+                "professional_roles": ["Artist", "Management"],
+            },
+            "user": _user_data(),
+        },
+        event_id="event_default_departments",
+    )
+
+    response = _post_webhook(client, raw_body, _signature(raw_body))
+
+    assert response.status_code == 200
+    membership = asyncio.run(
+        _membership_with_roles(sessionmaker, "om_default_departments")
+    )
+    assert membership is not None
+    assert list(membership.professional_roles) == ["Artist", "Management"]
+    assert membership.department_access == []
+    assert membership.approved_department_access == (
+        "artist",
+        "creative",
+        "releases",
+        "analytics",
+        "management",
+        "marketing",
+    )
+    assert membership.pending_department_access == ()
+
+
+def test_workos_webhook_separates_requested_roles_from_granted_access(
+    webhook_client: tuple[TestClient, async_sessionmaker[AsyncSession]],
+) -> None:
+    client, sessionmaker = webhook_client
+    raw_body = _event(
+        "organization_membership.created",
+        {
+            "object": "organization_membership",
+            "id": "om_sarah",
+            "user_id": "user_01TEST",
+            "organization_id": "org_01TEST",
+            "organization_name": "Sarah Label",
+            "status": "active",
+            "role": {"slug": "member"},
+            "metadata": {
+                "professional_roles": ["Legal", "Management"],
+                "department_access": ["management", "artist", "releases"],
+                "requested_department_access": ["legal", "finance"],
+            },
+            "user": _user_data(email="sarah@example.com"),
+        },
+        event_id="event_sarah_access",
+    )
+
+    response = _post_webhook(client, raw_body, _signature(raw_body))
+
+    assert response.status_code == 200
+    membership = asyncio.run(_membership_with_roles(sessionmaker, "om_sarah"))
+    assert membership is not None
+    finance_grant = asyncio.run(
+        _scalar(
+            sessionmaker,
+            select(MembershipDepartmentAccess)
+            .join(Department, Department.id == MembershipDepartmentAccess.department_id)
+            .where(MembershipDepartmentAccess.membership_id == membership.id)
+            .where(Department.slug == "finance"),
+        )
+    )
+    assert list(membership.professional_roles) == ["Legal", "Management"]
+    assert membership.approved_department_access == (
+        "management",
+        "artist",
+        "releases",
+        "legal",
+        "finance",
+    )
+    assert membership.pending_department_access == ()
+    assert finance_grant is not None
+    assert finance_grant.source == "role_default"
 
 
 def test_workos_webhook_skips_out_of_order_resource_event(

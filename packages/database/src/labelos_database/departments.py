@@ -20,6 +20,10 @@ class DefaultDepartment:
         DepartmentAccessSensitivity.standard
     )
 
+    @property
+    def key(self) -> str:
+        return self.slug
+
 
 STANDARD_DEPARTMENT_SLUGS = frozenset(
     {
@@ -74,7 +78,8 @@ DEFAULT_DEPARTMENTS: tuple[DefaultDepartment, ...] = (
         "6ddeaa4f-678c-5fc4-b116-7126b24542a4",
         "releases",
         "Releases",
-        "Release planning, distribution readiness, metadata, delivery, and go-live tasks.",
+        "Release planning, distribution readiness, metadata, delivery, and go-live "
+        "tasks.",
         department_access_sensitivity_for_slug("releases"),
     ),
     DefaultDepartment(
@@ -115,7 +120,7 @@ DEFAULT_DEPARTMENTS: tuple[DefaultDepartment, ...] = (
     DefaultDepartment(
         "9d74786e-944e-55fa-a6b6-67d8a0075abe",
         "management",
-        "Management",
+        "Artist Management",
         "Artist management, business coordination, approvals, and stakeholder updates.",
         department_access_sensitivity_for_slug("management"),
     ),
@@ -236,4 +241,31 @@ DEFAULT_ROLE_DEPARTMENT_ACCESS: dict[str, list[str]] = {
         "administration",
     ],
     "other": [],
+}
+
+
+DEFAULT_ROLE_DEPARTMENT_ASSOCIATIONS: dict[str, list[str]] = {
+    "artist": ["creative", "management"],
+    "manager": ["management"],
+    "producer": ["creative"],
+    "songwriter": ["creative"],
+    "a&r": ["a&r"],
+    "marketing": ["marketing"],
+    "release_operations": ["release_operations"],
+    "legal": ["legal"],
+    "finance": ["finance"],
+    "analytics": ["analytics"],
+    "executive": [
+        "a&r",
+        "management",
+        "marketing",
+        "release_operations",
+        "legal",
+        "finance",
+        "royalties",
+        "analytics",
+        "creative",
+        "administration",
+    ],
+    "administrator": ["administration"],
 }

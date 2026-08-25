@@ -1,6 +1,7 @@
 export type RealtimeEventType =
   | "organization.updated"
   | "member.updated"
+  | "member.role_changed"
   | "member.joined"
   | "member.removed"
   | "artist.created"
@@ -35,6 +36,7 @@ export type RealtimeEventEnvelope = {
 export const activityEventTypes = new Set<RealtimeEventType>([
   "organization.updated",
   "member.updated",
+  "member.role_changed",
   "member.joined",
   "member.removed",
   "artist.created",
@@ -51,6 +53,7 @@ export const activityEventTypes = new Set<RealtimeEventType>([
 export const refetchEventTypes = new Set<RealtimeEventType>([
   "organization.updated",
   "member.updated",
+  "member.role_changed",
   "member.joined",
   "member.removed",
   "artist.created",

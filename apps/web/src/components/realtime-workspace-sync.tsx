@@ -1,14 +1,16 @@
 "use client";
 
 import { useOrganizationRealtimeContext } from "../lib/realtime/use-organization-realtime";
+import { useActiveWorkspace } from "../lib/workspace-context";
 
 export function RealtimeWorkspaceSync() {
+  const { activeWorkspace } = useActiveWorkspace();
   const realtime = useOrganizationRealtimeContext();
   const connectionState = realtime?.connectionState ?? "idle";
   const lastUpdatedBy = realtime?.lastUpdatedBy ?? null;
   const presence = realtime?.presence ?? [];
 
-  if (!realtime?.organizationId) {
+  if (!activeWorkspace || realtime?.organizationId !== activeWorkspace.id) {
     return null;
   }
 

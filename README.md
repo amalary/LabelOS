@@ -235,12 +235,13 @@ The initial migration creates only foundational identity and organization tables
 - `organization_memberships`
 
 `auth_identities` links an external provider subject to the local `users` table.
-Organization memberships support these roles:
+Organization memberships separate administrative workspace permission from
+music-industry professional context. Workspace permissions are:
 
 - `owner`
 - `admin`
 - `member`
-- `viewer`
+- `guest`
 
 The initial application authorization policy uses Owner, Admin, and Member with
 WorkOS RBAC permission claims such as `artists:view` and `settings:manage`.
@@ -323,7 +324,7 @@ In the WorkOS dashboard:
 2. Enable AuthKit and copy the Client ID and API Key into local or production
    secret storage.
 3. Configure RBAC roles with these initial slugs: `owner`, `admin`, `member`,
-   and `viewer`.
+   and `guest`.
 4. Configure permission slugs to match the application permissions documented in
    [Authorization](docs/development/authorization.md), including
    `organization:manage`, `members:manage`, `artists:view`, `artists:manage`,
@@ -438,7 +439,8 @@ dependencies are the enforcement point:
 - Organization-scoped data queries always include the active local organization
   ID resolved from the WorkOS `org_id` claim.
 
-The initial role hierarchy is `owner` > `admin` > `member` > `viewer`.
+The initial workspace permission hierarchy is `owner` > `admin` > `member` >
+`guest`.
 Permission checks use WorkOS permission slugs, and frontend helpers only hide or
 disable unavailable actions.
 

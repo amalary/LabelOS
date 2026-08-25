@@ -1,19 +1,81 @@
+import re
+from datetime import UTC, datetime
 from enum import StrEnum
+from urllib.parse import urlparse
 from uuid import UUID
 
-from datetime import datetime
-
-from sqlalchemy import DateTime, Enum, ForeignKey, Index, JSON, String, UniqueConstraint
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    Enum,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    UniqueConstraint,
+    false,
+    func,
+    true,
+)
+from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 
 from labelos_database.base import Base, TimestampMixin, UUIDPrimaryKey
+
+_LOCALE_PATTERN = re.compile(r"^[A-Za-z]{2,3}(?:[-_][A-Za-z0-9]{2,8})*$")
+
+
+def _required_text(value: str | None, field_name: str) -> str:
+    if value is None:
+        raise ValueError(f"{field_name} is required")
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError(f"{field_name} is required")
+    return normalized
+
+
+def _optional_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def _json_object(value: dict | None, field_name: str) -> dict:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"{field_name} must be a JSON object")
+    return value
+
+
+def _validate_url(value: str | None) -> str:
+    normalized = _required_text(value, "url")
+    parsed = urlparse(normalized)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("url must be an absolute HTTP(S) URL")
+    return normalized
+
+
+class WorkspacePermission(StrEnum):
+    owner = "owner"
+    admin = "admin"
+    member = "member"
+    guest = "guest"
 
 
 class MembershipRole(StrEnum):
     owner = "owner"
     admin = "admin"
     member = "member"
+    guest = "guest"
     viewer = "viewer"
+
+
+def workspace_permission_from_role(role: MembershipRole) -> WorkspacePermission:
+    if role == MembershipRole.viewer:
+        return WorkspacePermission.guest
+    return WorkspacePermission(role.value)
 
 
 class User(Base, TimestampMixin):
@@ -42,10 +104,317 @@ class User(Base, TimestampMixin):
         back_populates="user",
         cascade="all, delete-orphan",
     )
+    universal_profile: Mapped["UniversalProfile | None"] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
 
     __table_args__ = (
         UniqueConstraint("workos_user_id", name="uq_users_workos_user_id"),
         Index("ix_users_workos_user_id", "workos_user_id"),
+    )
+
+
+class UniversalProfile(Base, TimestampMixin):
+    __tablename__ = "universal_profiles"
+
+    id: Mapped[UUIDPrimaryKey]
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    display_name: Mapped[str | None] = mapped_column(String(200))
+    first_name: Mapped[str | None] = mapped_column(String(120))
+    last_name: Mapped[str | None] = mapped_column(String(120))
+    slug: Mapped[str | None] = mapped_column(String(120))
+    headline: Mapped[str | None] = mapped_column(String(240))
+    biography: Mapped[str | None] = mapped_column(String(4000))
+    avatar_url: Mapped[str | None] = mapped_column(String(2048))
+    location: Mapped[str | None] = mapped_column(String(240))
+    timezone: Mapped[str | None] = mapped_column(String(120))
+    primary_email: Mapped[str | None] = mapped_column(String(320))
+    profile_status: Mapped[str] = mapped_column(
+        String(60),
+        nullable=False,
+        default="active",
+        server_default="active",
+    )
+    onboarding_status: Mapped[str] = mapped_column(
+        String(60),
+        nullable=False,
+        default="not_started",
+        server_default="not_started",
+    )
+
+    user: Mapped[User] = relationship(back_populates="universal_profile")
+    attributes: Mapped[list["ProfileAttribute"]] = relationship(
+        back_populates="profile",
+        cascade="all, delete-orphan",
+        order_by=lambda: (
+            ProfileAttribute.sort_order.asc(),
+            ProfileAttribute.attribute_type.asc(),
+            ProfileAttribute.created_at.asc(),
+            ProfileAttribute.id.asc(),
+        ),
+    )
+    links: Mapped[list["ProfileLink"]] = relationship(
+        back_populates="profile",
+        cascade="all, delete-orphan",
+        order_by=lambda: (
+            ProfileLink.sort_order.asc(),
+            ProfileLink.link_type.asc(),
+            ProfileLink.created_at.asc(),
+            ProfileLink.id.asc(),
+        ),
+    )
+    preference: Mapped["ProfilePreference | None"] = relationship(
+        back_populates="profile",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
+    workspace_memberships: Mapped[list["WorkspaceMembership"]] = relationship(
+        back_populates="profile",
+        cascade="all, delete-orphan",
+        foreign_keys="WorkspaceMembership.profile_id",
+    )
+
+    __table_args__ = (
+        UniqueConstraint("user_id", name="uq_universal_profiles_user_id"),
+        UniqueConstraint("slug", name="uq_universal_profiles_slug"),
+        Index("ix_universal_profiles_user_id", "user_id"),
+        Index("ix_universal_profiles_slug", "slug"),
+        Index("ix_universal_profiles_display_name", "display_name"),
+        Index("ix_universal_profiles_primary_email", "primary_email"),
+        Index("ix_universal_profiles_profile_status", "profile_status"),
+        Index("ix_universal_profiles_onboarding_status", "onboarding_status"),
+    )
+
+
+class ProfileAttribute(Base, TimestampMixin):
+    __tablename__ = "profile_attributes"
+
+    id: Mapped[UUIDPrimaryKey]
+    profile_id: Mapped[UUID] = mapped_column(
+        ForeignKey("universal_profiles.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    attribute_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    label: Mapped[str | None] = mapped_column(String(120))
+    value: Mapped[str] = mapped_column(String(500), nullable=False)
+    source: Mapped[str] = mapped_column(
+        String(80),
+        nullable=False,
+        default="user",
+        server_default="user",
+    )
+    is_primary: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=false(),
+    )
+    sort_order: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    metadata_json: Mapped[dict] = mapped_column(
+        "metadata",
+        JSON,
+        nullable=False,
+        default=dict,
+        server_default="{}",
+    )
+
+    profile: Mapped[UniversalProfile] = relationship(back_populates="attributes")
+
+    @validates("attribute_type", "value", "source")
+    def _validate_required_text(self, key: str, value: str | None) -> str:
+        return _required_text(value, key)
+
+    @validates("label")
+    def _validate_label(self, _key: str, value: str | None) -> str | None:
+        return _optional_text(value)
+
+    @validates("metadata_json")
+    def _validate_metadata(self, key: str, value: dict | None) -> dict:
+        return _json_object(value, key)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "profile_id",
+            "attribute_type",
+            "value",
+            name="uq_profile_attributes_profile_id_type_value",
+        ),
+        Index("ix_profile_attributes_profile_id", "profile_id"),
+        Index("ix_profile_attributes_attribute_type", "attribute_type"),
+        Index("ix_profile_attributes_profile_id_type", "profile_id", "attribute_type"),
+        Index("ix_profile_attributes_is_primary", "is_primary"),
+    )
+
+
+class ProfileLink(Base, TimestampMixin):
+    __tablename__ = "profile_links"
+
+    id: Mapped[UUIDPrimaryKey]
+    profile_id: Mapped[UUID] = mapped_column(
+        ForeignKey("universal_profiles.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    link_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    label: Mapped[str | None] = mapped_column(String(120))
+    url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    username: Mapped[str | None] = mapped_column(String(120))
+    external_id: Mapped[str | None] = mapped_column(String(255))
+    status: Mapped[str] = mapped_column(
+        String(60),
+        nullable=False,
+        default="active",
+        server_default="active",
+    )
+    is_primary: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=false(),
+    )
+    sort_order: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    metadata_json: Mapped[dict] = mapped_column(
+        "metadata",
+        JSON,
+        nullable=False,
+        default=dict,
+        server_default="{}",
+    )
+
+    profile: Mapped[UniversalProfile] = relationship(back_populates="links")
+
+    @validates("link_type", "status")
+    def _validate_required_text(self, key: str, value: str | None) -> str:
+        return _required_text(value, key)
+
+    @validates("label", "username", "external_id")
+    def _validate_optional_text(self, _key: str, value: str | None) -> str | None:
+        return _optional_text(value)
+
+    @validates("url")
+    def _validate_profile_link_url(self, _key: str, value: str | None) -> str:
+        return _validate_url(value)
+
+    @validates("metadata_json")
+    def _validate_metadata(self, key: str, value: dict | None) -> dict:
+        return _json_object(value, key)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "profile_id",
+            "link_type",
+            "url",
+            name="uq_profile_links_profile_id_type_url",
+        ),
+        Index("ix_profile_links_profile_id", "profile_id"),
+        Index("ix_profile_links_link_type", "link_type"),
+        Index("ix_profile_links_profile_id_type", "profile_id", "link_type"),
+        Index("ix_profile_links_status", "status"),
+        Index("ix_profile_links_is_primary", "is_primary"),
+    )
+
+
+class ProfilePreference(Base, TimestampMixin):
+    __tablename__ = "profile_preferences"
+
+    id: Mapped[UUIDPrimaryKey]
+    profile_id: Mapped[UUID] = mapped_column(
+        ForeignKey("universal_profiles.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    locale: Mapped[str | None] = mapped_column(String(35))
+    timezone: Mapped[str | None] = mapped_column(String(120))
+    default_workspace_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("organizations.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    email_notifications_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default=true(),
+    )
+    push_notifications_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default=true(),
+    )
+    sms_notifications_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=false(),
+    )
+    marketing_notifications_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=false(),
+    )
+    interface_theme: Mapped[str | None] = mapped_column(String(60))
+    interface_density: Mapped[str | None] = mapped_column(String(60))
+    notification_preferences: Mapped[dict] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+        server_default="{}",
+    )
+    interface_preferences: Mapped[dict] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+        server_default="{}",
+    )
+    integration_preferences: Mapped[dict] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+        server_default="{}",
+    )
+
+    profile: Mapped[UniversalProfile] = relationship(back_populates="preference")
+    default_workspace: Mapped["Organization | None"] = relationship()
+
+    @validates("locale")
+    def _validate_locale(self, _key: str, value: str | None) -> str | None:
+        normalized = _optional_text(value)
+        if normalized is not None and _LOCALE_PATTERN.fullmatch(normalized) is None:
+            raise ValueError("locale must be a valid BCP 47-style locale")
+        return normalized
+
+    @validates("timezone", "interface_theme", "interface_density")
+    def _validate_optional_text(self, _key: str, value: str | None) -> str | None:
+        return _optional_text(value)
+
+    @validates(
+        "notification_preferences",
+        "interface_preferences",
+        "integration_preferences",
+    )
+    def _validate_json_preferences(self, key: str, value: dict | None) -> dict:
+        return _json_object(value, key)
+
+    __table_args__ = (
+        UniqueConstraint("profile_id", name="uq_profile_preferences_profile_id"),
+        Index("ix_profile_preferences_profile_id", "profile_id"),
+        Index("ix_profile_preferences_locale", "locale"),
+        Index("ix_profile_preferences_timezone", "timezone"),
+        Index("ix_profile_preferences_default_workspace_id", "default_workspace_id"),
     )
 
 
@@ -94,6 +463,10 @@ class Organization(Base, TimestampMixin):
         back_populates="organization",
         cascade="all, delete-orphan",
     )
+    workspace_memberships: Mapped[list["WorkspaceMembership"]] = relationship(
+        back_populates="workspace",
+        cascade="all, delete-orphan",
+    )
     artists: Mapped[list["Artist"]] = relationship(
         back_populates="organization",
         cascade="all, delete-orphan",
@@ -126,6 +499,11 @@ class Organization(Base, TimestampMixin):
         back_populates="organization",
         cascade="all, delete-orphan",
     )
+    workspace_invites: Mapped[list["WorkspaceInvite"]] = relationship(
+        back_populates="organization",
+        cascade="all, delete-orphan",
+        foreign_keys="WorkspaceInvite.organization_id",
+    )
 
     __table_args__ = (
         UniqueConstraint(
@@ -139,6 +517,17 @@ class Organization(Base, TimestampMixin):
 
 class OrganizationMembership(Base, TimestampMixin):
     __tablename__ = "organization_memberships"
+
+    def __init__(self, **kwargs: object) -> None:
+        if "workspace_permission" not in kwargs and "role" in kwargs:
+            role = kwargs["role"]
+            if isinstance(role, MembershipRole):
+                kwargs["workspace_permission"] = workspace_permission_from_role(role)
+            elif role == "viewer":
+                kwargs["workspace_permission"] = WorkspacePermission.guest
+            else:
+                kwargs["workspace_permission"] = role
+        super().__init__(**kwargs)
 
     id: Mapped[UUIDPrimaryKey]
     workos_membership_id: Mapped[str | None] = mapped_column(
@@ -163,15 +552,79 @@ class OrganizationMembership(Base, TimestampMixin):
         default=MembershipRole.member,
         server_default=MembershipRole.member.value,
     )
+    workspace_permission: Mapped[WorkspacePermission] = mapped_column(
+        Enum(
+            WorkspacePermission,
+            name="workspace_permission",
+            values_callable=lambda permissions: [
+                permission.value for permission in permissions
+            ],
+        ),
+        nullable=False,
+        default=WorkspacePermission.member,
+        server_default=WorkspacePermission.member.value,
+    )
     status: Mapped[str] = mapped_column(
         String(60),
         nullable=False,
         default="active",
         server_default="active",
     )
+    department_access: Mapped[list[str]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+        server_default="[]",
+    )
+    capability_permissions: Mapped[list[str]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+        server_default="[]",
+    )
 
     organization: Mapped[Organization] = relationship(back_populates="memberships")
     user: Mapped[User] = relationship(back_populates="memberships")
+    professional_role_links: Mapped[list["MembershipProfessionalRole"]] = relationship(
+        back_populates="membership",
+        cascade="all, delete-orphan",
+        order_by=lambda: (
+            MembershipProfessionalRole.is_primary.desc(),
+            MembershipProfessionalRole.created_at.asc(),
+            MembershipProfessionalRole.professional_role_id.asc(),
+        ),
+    )
+    department_access_grants: Mapped[list["MembershipDepartmentAccess"]] = relationship(
+        back_populates="membership",
+        cascade="all, delete-orphan",
+        order_by=lambda: (
+            MembershipDepartmentAccess.created_at.asc(),
+            MembershipDepartmentAccess.id.asc(),
+        ),
+    )
+    workspace_membership: Mapped["WorkspaceMembership | None"] = relationship(
+        back_populates="organization_membership",
+        uselist=False,
+    )
+
+    @property
+    def professional_roles(self) -> tuple[str, ...]:
+        return tuple(
+            link.professional_role.display_name
+            for link in self.professional_role_links
+            if link.status == "active" and link.professional_role is not None
+        )
+
+    @property
+    def approved_department_access(self) -> tuple[str, ...]:
+        grants = tuple(grant.department_slug for grant in self.department_access_grants)
+        if grants:
+            return grants
+        return tuple(self.department_access)
+
+    @property
+    def pending_department_access(self) -> tuple[str, ...]:
+        return ()
 
     __table_args__ = (
         UniqueConstraint(
@@ -189,6 +642,365 @@ class OrganizationMembership(Base, TimestampMixin):
             "ix_organization_memberships_workos_membership_id",
             "workos_membership_id",
         ),
+    )
+
+
+class WorkspaceMembership(Base, TimestampMixin):
+    __tablename__ = "workspace_memberships"
+
+    id: Mapped[UUIDPrimaryKey]
+    workspace_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    profile_id: Mapped[UUID] = mapped_column(
+        ForeignKey("universal_profiles.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    organization_membership_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("organization_memberships.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    status: Mapped[str] = mapped_column(
+        String(60),
+        nullable=False,
+        default="active",
+        server_default="active",
+    )
+    invited_by: Mapped[UUID | None] = mapped_column(
+        ForeignKey("universal_profiles.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    joined_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    workspace: Mapped[Organization] = relationship(
+        back_populates="workspace_memberships"
+    )
+    profile: Mapped[UniversalProfile] = relationship(
+        back_populates="workspace_memberships",
+        foreign_keys=[profile_id],
+    )
+    inviter: Mapped[UniversalProfile | None] = relationship(foreign_keys=[invited_by])
+    organization_membership: Mapped[OrganizationMembership | None] = relationship(
+        back_populates="workspace_membership"
+    )
+    role_assignments: Mapped[list["WorkspaceMembershipRole"]] = relationship(
+        back_populates="workspace_membership",
+        cascade="all, delete-orphan",
+        order_by=lambda: (
+            WorkspaceMembershipRole.assigned_at.asc(),
+            WorkspaceMembershipRole.role_id.asc(),
+        ),
+    )
+
+    @property
+    def professional_roles(self) -> tuple[str, ...]:
+        if self.organization_membership is None:
+            return ()
+        return self.organization_membership.professional_roles
+
+    @property
+    def roles(self) -> tuple["Role", ...]:
+        return tuple(
+            assignment.role
+            for assignment in self.role_assignments
+            if assignment.role is not None
+        )
+
+    @property
+    def role_keys(self) -> tuple[str, ...]:
+        return tuple(role.key for role in self.roles)
+
+    @property
+    def capability_keys(self) -> tuple[str, ...]:
+        capability_keys: list[str] = []
+        for role in self.roles:
+            for capability in role.capabilities:
+                if capability.key not in capability_keys:
+                    capability_keys.append(capability.key)
+        return tuple(capability_keys)
+
+    @property
+    def department_access(self) -> tuple[str, ...]:
+        if self.organization_membership is None:
+            return ()
+        return self.organization_membership.approved_department_access
+
+    @property
+    def workspace_permission(self) -> WorkspacePermission | None:
+        if self.organization_membership is None:
+            return None
+        return self.organization_membership.workspace_permission
+
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id",
+            "profile_id",
+            name="uq_workspace_memberships_workspace_id_profile_id",
+        ),
+        UniqueConstraint(
+            "organization_membership_id",
+            name="uq_workspace_memberships_organization_membership_id",
+        ),
+        Index("ix_workspace_memberships_workspace_id", "workspace_id"),
+        Index("ix_workspace_memberships_profile_id", "profile_id"),
+        Index(
+            "ix_workspace_memberships_organization_membership_id",
+            "organization_membership_id",
+        ),
+        Index("ix_workspace_memberships_status", "status"),
+        Index("ix_workspace_memberships_invited_by", "invited_by"),
+    )
+
+
+class Role(Base, TimestampMixin):
+    __tablename__ = "roles"
+
+    id: Mapped[UUIDPrimaryKey]
+    key: Mapped[str] = mapped_column(String(80), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    description: Mapped[str] = mapped_column(String(500), nullable=False)
+    system_role: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=false(),
+    )
+
+    workspace_membership_assignments: Mapped[list["WorkspaceMembershipRole"]] = (
+        relationship(
+            back_populates="role",
+            cascade="all, delete-orphan",
+        )
+    )
+    department_links: Mapped[list["RoleDepartment"]] = relationship(
+        back_populates="role",
+        cascade="all, delete-orphan",
+    )
+    capability_links: Mapped[list["RoleCapability"]] = relationship(
+        back_populates="role",
+        cascade="all, delete-orphan",
+        order_by=lambda: (
+            RoleCapability.created_at.asc(),
+            RoleCapability.capability_id.asc(),
+        ),
+    )
+
+    @validates("key", "display_name", "description")
+    def _validate_required_text(self, key: str, value: str | None) -> str:
+        return _required_text(value, key)
+
+    @property
+    def capabilities(self) -> tuple["Capability", ...]:
+        return tuple(
+            link.capability
+            for link in self.capability_links
+            if link.capability is not None
+        )
+
+    __table_args__ = (
+        UniqueConstraint("key", name="uq_roles_key"),
+        Index("ix_roles_key", "key"),
+        Index("ix_roles_system_role", "system_role"),
+    )
+
+
+class Capability(Base, TimestampMixin):
+    __tablename__ = "capabilities"
+
+    id: Mapped[UUIDPrimaryKey]
+    key: Mapped[str] = mapped_column(String(120), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    description: Mapped[str] = mapped_column(String(500), nullable=False)
+    system_capability: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=false(),
+    )
+
+    role_links: Mapped[list["RoleCapability"]] = relationship(
+        back_populates="capability",
+        cascade="all, delete-orphan",
+    )
+
+    @validates("key", "display_name", "description")
+    def _validate_required_text(self, key: str, value: str | None) -> str:
+        return _required_text(value, key)
+
+    __table_args__ = (
+        UniqueConstraint("key", name="uq_capabilities_key"),
+        Index("ix_capabilities_key", "key"),
+        Index("ix_capabilities_system_capability", "system_capability"),
+    )
+
+
+class RoleCapability(Base):
+    __tablename__ = "role_capabilities"
+
+    id: Mapped[UUIDPrimaryKey]
+    role_id: Mapped[UUID] = mapped_column(
+        ForeignKey("roles.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    capability_id: Mapped[UUID] = mapped_column(
+        ForeignKey("capabilities.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    source: Mapped[str] = mapped_column(
+        String(60),
+        nullable=False,
+        default="system_default",
+        server_default="system_default",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    role: Mapped["Role"] = relationship(back_populates="capability_links")
+    capability: Mapped[Capability] = relationship(back_populates="role_links")
+
+    @property
+    def capability_key(self) -> str:
+        return self.capability.key
+
+    @validates("source")
+    def _validate_required_text(self, key: str, value: str | None) -> str:
+        return _required_text(value, key)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "role_id",
+            "capability_id",
+            name="uq_role_capabilities_role_id_capability_id",
+        ),
+        Index("ix_role_capabilities_role_id", "role_id"),
+        Index("ix_role_capabilities_capability_id", "capability_id"),
+        Index("ix_role_capabilities_source", "source"),
+    )
+
+
+class WorkspaceMembershipRole(Base):
+    __tablename__ = "workspace_membership_roles"
+
+    id: Mapped[UUIDPrimaryKey]
+    membership_id: Mapped[UUID] = mapped_column(
+        ForeignKey("workspace_memberships.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    role_id: Mapped[UUID] = mapped_column(
+        ForeignKey("roles.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    assigned_by: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    assigned_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        server_default=func.now(),
+        nullable=False,
+    )
+    metadata_json: Mapped[dict] = mapped_column(
+        "metadata",
+        JSON,
+        nullable=False,
+        default=dict,
+        server_default="{}",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    workspace_membership: Mapped[WorkspaceMembership] = relationship(
+        back_populates="role_assignments"
+    )
+    role: Mapped[Role] = relationship(back_populates="workspace_membership_assignments")
+    assigner: Mapped[User | None] = relationship()
+
+    @validates("metadata_json")
+    def _validate_metadata(self, key: str, value: dict | None) -> dict:
+        return _json_object(value, key)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "membership_id",
+            "role_id",
+            name="uq_workspace_membership_roles_membership_id_role_id",
+        ),
+        Index(
+            "ix_workspace_membership_roles_membership_id",
+            "membership_id",
+        ),
+        Index("ix_workspace_membership_roles_role_id", "role_id"),
+        Index("ix_workspace_membership_roles_assigned_by", "assigned_by"),
+        Index("ix_workspace_membership_roles_assigned_at", "assigned_at"),
+    )
+
+
+class WorkspaceInvite(Base, TimestampMixin):
+    __tablename__ = "workspace_invites"
+
+    id: Mapped[UUIDPrimaryKey]
+    token: Mapped[str] = mapped_column(String(120), nullable=False)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    inviter_user_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    invitee_email: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    professional_roles: Mapped[list[str]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+        server_default="[]",
+    )
+    proposed_department_access: Mapped[list[str]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+        server_default="[]",
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    maximum_uses: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    use_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    status: Mapped[str] = mapped_column(
+        String(60),
+        nullable=False,
+        default="active",
+        server_default="active",
+    )
+
+    organization: Mapped[Organization] = relationship(
+        back_populates="workspace_invites",
+        foreign_keys=[organization_id],
+    )
+    inviter: Mapped[User | None] = relationship(foreign_keys=[inviter_user_id])
+
+    __table_args__ = (
+        UniqueConstraint("token", name="uq_workspace_invites_token"),
+        Index("ix_workspace_invites_organization_id", "organization_id"),
+        Index("ix_workspace_invites_inviter_user_id", "inviter_user_id"),
+        Index("ix_workspace_invites_invitee_email", "invitee_email"),
+        Index("ix_workspace_invites_token", "token"),
+        Index("ix_workspace_invites_status_expires_at", "status", "expires_at"),
     )
 
 
@@ -220,6 +1032,251 @@ class WebhookEvent(Base, TimestampMixin):
             "resource_type",
             "resource_id",
             "workos_event_created_at",
+        ),
+    )
+
+
+class ProfessionalRole(Base, TimestampMixin):
+    __tablename__ = "professional_roles"
+
+    id: Mapped[UUIDPrimaryKey]
+    slug: Mapped[str] = mapped_column(String(80), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    description: Mapped[str] = mapped_column(String(500), nullable=False)
+    default_department_access: Mapped[list[str]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+        server_default="[]",
+    )
+    is_active: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default=true(),
+    )
+    membership_links: Mapped[list["MembershipProfessionalRole"]] = relationship(
+        back_populates="professional_role",
+        cascade="all, delete-orphan",
+    )
+
+    __table_args__ = (
+        UniqueConstraint("slug", name="uq_professional_roles_slug"),
+        Index("ix_professional_roles_slug", "slug"),
+        Index("ix_professional_roles_is_active", "is_active"),
+    )
+
+
+class Department(Base, TimestampMixin):
+    __tablename__ = "departments"
+
+    id: Mapped[UUIDPrimaryKey]
+    slug: Mapped[str] = mapped_column(String(80), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    description: Mapped[str] = mapped_column(String(500), nullable=False)
+    access_sensitivity: Mapped[str] = mapped_column(
+        String(40),
+        nullable=False,
+        default="standard",
+        server_default="standard",
+    )
+    is_active: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default=true(),
+    )
+    membership_access_grants: Mapped[list["MembershipDepartmentAccess"]] = relationship(
+        back_populates="department",
+        cascade="all, delete-orphan",
+    )
+    role_links: Mapped[list["RoleDepartment"]] = relationship(
+        back_populates="department",
+        cascade="all, delete-orphan",
+    )
+
+    @property
+    def key(self) -> str:
+        return self.slug
+
+    @key.setter
+    def key(self, value: str) -> None:
+        self.slug = value
+
+    __table_args__ = (
+        UniqueConstraint("slug", name="uq_departments_slug"),
+        Index("ix_departments_slug", "slug"),
+        Index("ix_departments_is_active", "is_active"),
+    )
+
+
+class MembershipDepartmentAccess(Base, TimestampMixin):
+    __tablename__ = "membership_department_access"
+
+    id: Mapped[UUIDPrimaryKey]
+    membership_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization_memberships.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    department_id: Mapped[UUID] = mapped_column(
+        ForeignKey("departments.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    access_level: Mapped[str] = mapped_column(
+        String(60),
+        nullable=False,
+        default="member",
+        server_default="member",
+    )
+    source: Mapped[str] = mapped_column(
+        String(60),
+        nullable=False,
+        default="role_default",
+        server_default="role_default",
+    )
+    approved_by: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    membership: Mapped[OrganizationMembership] = relationship(
+        back_populates="department_access_grants"
+    )
+    department: Mapped[Department] = relationship(
+        back_populates="membership_access_grants"
+    )
+    approver: Mapped[User | None] = relationship()
+
+    @property
+    def department_slug(self) -> str:
+        return self.department.slug
+
+    __table_args__ = (
+        UniqueConstraint(
+            "membership_id",
+            "department_id",
+            name="uq_membership_department_access_membership_id_department_id",
+        ),
+        Index(
+            "ix_membership_department_access_membership_id",
+            "membership_id",
+        ),
+        Index(
+            "ix_membership_department_access_department_id",
+            "department_id",
+        ),
+        Index(
+            "ix_membership_department_access_access_level",
+            "access_level",
+        ),
+        Index(
+            "ix_membership_department_access_source",
+            "source",
+        ),
+    )
+
+
+class RoleDepartment(Base):
+    __tablename__ = "role_departments"
+
+    id: Mapped[UUIDPrimaryKey]
+    role_id: Mapped[UUID] = mapped_column(
+        ForeignKey("roles.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    department_id: Mapped[UUID] = mapped_column(
+        ForeignKey("departments.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    access_level: Mapped[str] = mapped_column(
+        String(60),
+        nullable=False,
+        default="responsibility",
+        server_default="responsibility",
+    )
+    source: Mapped[str] = mapped_column(
+        String(60),
+        nullable=False,
+        default="system_default",
+        server_default="system_default",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    role: Mapped["Role"] = relationship(back_populates="department_links")
+    department: Mapped[Department] = relationship(back_populates="role_links")
+
+    @property
+    def department_key(self) -> str:
+        return self.department.key
+
+    __table_args__ = (
+        UniqueConstraint(
+            "role_id",
+            "department_id",
+            name="uq_role_departments_role_id_department_id",
+        ),
+        Index("ix_role_departments_role_id", "role_id"),
+        Index("ix_role_departments_department_id", "department_id"),
+        Index("ix_role_departments_access_level", "access_level"),
+        Index("ix_role_departments_source", "source"),
+    )
+
+
+class MembershipProfessionalRole(Base):
+    __tablename__ = "membership_professional_roles"
+
+    membership_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization_memberships.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    professional_role_id: Mapped[UUID] = mapped_column(
+        ForeignKey("professional_roles.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    is_primary: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=false(),
+    )
+    status: Mapped[str] = mapped_column(
+        String(60),
+        nullable=False,
+        default="active",
+        server_default="active",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    membership: Mapped[OrganizationMembership] = relationship(
+        back_populates="professional_role_links"
+    )
+    professional_role: Mapped[ProfessionalRole] = relationship(
+        back_populates="membership_links"
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_membership_professional_roles_membership_id",
+            "membership_id",
+        ),
+        Index(
+            "ix_membership_professional_roles_professional_role_id",
+            "professional_role_id",
+        ),
+        Index(
+            "ix_membership_professional_roles_status",
+            "status",
         ),
     )
 

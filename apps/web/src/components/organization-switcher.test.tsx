@@ -41,11 +41,11 @@ describe("OrganizationSwitcher", () => {
     );
 
     expect(
-      screen.getByRole("button", { name: /active organization alpha label/i }),
+      screen.getByRole("button", { name: /active workspace alpha label/i }),
     ).toBeInTheDocument();
     expect(screen.queryByText("org-a")).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /active organization alpha label/i }));
+    await user.click(screen.getByRole("button", { name: /active workspace alpha label/i }));
 
     expect(screen.getByRole("listbox", { name: /alpha label/i })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: /beta label/i })).toBeInTheDocument();
@@ -87,7 +87,7 @@ describe("OrganizationSwitcher", () => {
 
     expect(screen.getByRole("img", { name: "Alpha Label logo" })).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /active organization alpha label/i }));
+    await user.click(screen.getByRole("button", { name: /active workspace alpha label/i }));
 
     expect(screen.getByText("BL")).toBeInTheDocument();
   });
@@ -124,7 +124,7 @@ describe("OrganizationSwitcher", () => {
       />,
     );
 
-    await user.click(screen.getByRole("button", { name: /active organization alpha label/i }));
+    await user.click(screen.getByRole("button", { name: /active workspace alpha label/i }));
     await user.click(screen.getByRole("option", { name: /beta label/i }));
 
     expect(sessionStorage.getItem("labelos:artists:org-a")).toBeNull();
@@ -161,7 +161,7 @@ describe("OrganizationSwitcher", () => {
       />,
     );
 
-    screen.getByRole("button", { name: /active organization alpha label/i }).focus();
+    screen.getByRole("button", { name: /active workspace alpha label/i }).focus();
     await user.keyboard("{ArrowDown}");
 
     expect(screen.getByRole("listbox")).toBeInTheDocument();
@@ -174,7 +174,7 @@ describe("OrganizationSwitcher", () => {
     await user.keyboard("{Escape}");
 
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /active organization alpha label/i })).toHaveFocus();
+    expect(screen.getByRole("button", { name: /active workspace alpha label/i })).toHaveFocus();
   });
 
   it("renders loading, empty, and error states", () => {
@@ -207,6 +207,6 @@ describe("OrganizationSwitcher", () => {
     );
 
     expect(screen.getByRole("alert")).toHaveTextContent("Workspaces unavailable");
-    expect(screen.getByRole("status")).toHaveTextContent("Select an organization");
+    expect(screen.getByRole("status")).toHaveTextContent("Select a workspace");
   });
 });

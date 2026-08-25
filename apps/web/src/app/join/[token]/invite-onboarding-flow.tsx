@@ -28,12 +28,24 @@ function AcceptButton({ disabled }: { disabled: boolean }) {
   );
 }
 
+const selectableProfessionalRoles = [
+  "Artist",
+  "Producer",
+  "Songwriter",
+  "Management",
+  "A&R",
+  "Legal",
+  "Marketing",
+  "Finance",
+];
+
 export function InviteOnboardingFlow({
   invite,
   hasInviteError,
   initialStep = "intro",
 }: InviteOnboardingFlowProps) {
   const [step, setStep] = useState<InviteOnboardingStep>(initialStep);
+  const [selectedRoles, setSelectedRoles] = useState<string[]>([]);
   const joinPath = useMemo(() => `/join/${invite.token}`, [invite.token]);
   const loginPath = useMemo(
     () => `/api/auth/login?next=${encodeURIComponent(`${joinPath}?step=accept`)}`,
@@ -44,8 +56,18 @@ export function InviteOnboardingFlow({
     [joinPath],
   );
   const isActive = invite.status === "active";
+  const hasAssignedRoles = invite.professional_roles.length > 0;
   const showsAccountChoice = step === "account" || step === "accept" || step === "roles";
   const showsAcceptStep = step === "accept" || step === "roles";
+  const requiresRoleSelection = showsAcceptStep && !hasAssignedRoles;
+
+  function toggleRole(role: string) {
+    setSelectedRoles((currentRoles) =>
+      currentRoles.includes(role)
+        ? currentRoles.filter((currentRole) => currentRole !== role)
+        : [...currentRoles, role],
+    );
+  }
 
   return (
     <section className="w-full border border-slate-200 bg-white p-6 shadow-sm">
@@ -130,7 +152,30 @@ export function InviteOnboardingFlow({
           ) : (
             <form action={acceptWorkspaceInviteAction} className="grid gap-5">
               <input name="token" type="hidden" value={invite.token} />
-              <AcceptButton disabled={!isActive} />
+              {requiresRoleSelection ? (
+                <fieldset className="grid gap-3">
+                  <legend className="text-sm font-semibold text-slate-950">Select your role</legend>
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    {selectableProfessionalRoles.map((role) => (
+                      <label
+                        className="flex min-h-11 items-center gap-3 border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-800 transition has-[:checked]:border-slate-950 has-[:checked]:bg-slate-50"
+                        key={role}
+                      >
+                        <input
+                          checked={selectedRoles.includes(role)}
+                          className="size-4 accent-slate-950"
+                          name="professional_roles"
+                          onChange={() => toggleRole(role)}
+                          type="checkbox"
+                          value={role}
+                        />
+                        {role}
+                      </label>
+                    ))}
+                  </div>
+                </fieldset>
+              ) : null}
+              <AcceptButton disabled={!isActive || (requiresRoleSelection && selectedRoles.length === 0)} />
             </form>
           )}
         </div>

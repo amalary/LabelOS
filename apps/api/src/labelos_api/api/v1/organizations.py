@@ -1,10 +1,33 @@
-from typing import Annotated
+import secrets
+from datetime import UTC, datetime, timedelta
+from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from labelos_database.models import MembershipRole, Organization, OrganizationMembership
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
+from labelos_database.departments import (
+    DEFAULT_DEPARTMENTS,
+    DEFAULT_ROLE_DEPARTMENT_ACCESS,
+)
+from labelos_database.models import (
+    Department,
+    MembershipDepartmentAccess,
+    MembershipProfessionalRole,
+    MembershipRole,
+    Organization,
+    OrganizationMembership,
+    ProfessionalRole,
+    Role,
+    WorkspaceInvite,
+    WorkspaceMembership,
+    WorkspaceMembershipRole,
+    WorkspacePermission,
+)
+from labelos_database.workspace_memberships import (
+    ensure_workspace_membership_for_organization_membership,
+    get_or_create_profile_for_user,
+)
 from pydantic import BaseModel, Field, field_validator, model_validator
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -22,6 +45,19 @@ from labelos_api.realtime import RealtimeEventType, RealtimePublisher
 router = APIRouter(prefix="/organizations", tags=["organizations"])
 
 SLUG_PATTERN = r"^[a-z0-9](?:[a-z0-9-]{0,118}[a-z0-9])?$"
+ALLOWED_PROFESSIONAL_ROLES = {
+    "artist": "Artist",
+    "producer": "Producer",
+    "songwriter": "Songwriter",
+    "management": "Management",
+    "a&r": "A&R",
+    "legal": "Legal",
+    "marketing": "Marketing",
+    "finance": "Finance",
+}
+ALLOWED_DEPARTMENT_ACCESS = {
+    department.slug: department.display_name for department in DEFAULT_DEPARTMENTS
+}
 
 
 class OrganizationCreateRequest(BaseModel):
@@ -72,7 +108,10 @@ class OrganizationResponse(BaseModel):
     id: UUID
     name: str
     slug: str
-    role: MembershipRole
+    workspace_permission: WorkspacePermission
+    role: WorkspacePermission
+    department_access: list[str] = Field(default_factory=list)
+    capability_permissions: list[str] = Field(default_factory=list)
     can_switch: bool = False
 
 
@@ -88,7 +127,13 @@ class OrganizationMemberResponse(BaseModel):
     user_id: UUID
     email: str
     display_name: str | None
-    role: MembershipRole
+    workspace_permission: WorkspacePermission
+    role: WorkspacePermission
+    professional_roles: list[str] = Field(default_factory=list)
+    department_access: list[str] = Field(default_factory=list)
+    pending_department_access: list[str] = Field(default_factory=list)
+    denied_department_access: list[str] = Field(default_factory=list)
+    capability_permissions: list[str] = Field(default_factory=list)
     status: str
 
 
@@ -99,9 +144,117 @@ class OrganizationMembersListResponse(BaseModel):
     total: int
 
 
+class WorkspaceRoleAssignmentCreateRequest(BaseModel):
+    role_id: UUID
+    metadata: dict[str, Any] | None = None
+
+    @field_validator("metadata")
+    @classmethod
+    def validate_metadata(
+        cls, value: dict[str, Any] | None
+    ) -> dict[str, Any] | None:
+        if value is not None and not isinstance(value, dict):
+            raise ValueError("metadata must be an object")
+        return value
+
+
+class WorkspaceRoleResponse(BaseModel):
+    id: UUID
+    key: str
+    display_name: str
+    description: str
+    system_role: bool
+
+
+class WorkspaceRoleAssignmentResponse(BaseModel):
+    id: UUID
+    membership_id: UUID
+    role: WorkspaceRoleResponse
+    assigned_by: UUID | None
+    assigned_at: datetime
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+
+
+class WorkspaceRoleAssignmentsListResponse(BaseModel):
+    roles: list[WorkspaceRoleAssignmentResponse]
+
+
 class OrganizationActivationResponse(BaseModel):
     organization: OrganizationResponse
     workos_organization_id: str
+
+
+class WorkspaceInviteCreateRequest(BaseModel):
+    email: str | None = Field(default=None, min_length=3, max_length=320)
+    professional_roles: list[str] = Field(default_factory=list, max_length=8)
+    department_access: list[str] | None = Field(default=None, max_length=32)
+    expires_in_days: int = Field(default=7, ge=1, le=90)
+    maximum_uses: int | None = Field(default=None, ge=1, le=1000)
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        email = value.strip().lower()
+        if "@" not in email or email.startswith("@") or email.endswith("@"):
+            raise ValueError("Invite email is required")
+        return email
+
+    @field_validator("professional_roles")
+    @classmethod
+    def validate_professional_roles(cls, value: list[str]) -> list[str]:
+        return _normalize_professional_roles(value)
+
+    @field_validator("department_access")
+    @classmethod
+    def validate_department_access(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        return _normalize_department_access(value)
+
+
+class WorkspaceInviteAcceptRequest(BaseModel):
+    professional_roles: list[str] = Field(default_factory=list, max_length=8)
+
+    @field_validator("professional_roles")
+    @classmethod
+    def validate_professional_roles(cls, value: list[str]) -> list[str]:
+        return _normalize_professional_roles(value)
+
+
+class WorkspaceInviteWorkspaceResponse(BaseModel):
+    id: UUID
+    name: str
+    slug: str
+
+
+class WorkspaceInviteInviterResponse(BaseModel):
+    id: UUID
+    email: str
+    display_name: str | None
+
+
+class WorkspaceInviteResponse(BaseModel):
+    id: UUID
+    token: str
+    email: str | None
+    workspace: WorkspaceInviteWorkspaceResponse
+    inviter: WorkspaceInviteInviterResponse | None
+    professional_roles: list[str] = Field(default_factory=list)
+    proposed_department_access: list[str] = Field(default_factory=list)
+    expiration: datetime
+    maximum_uses: int | None
+    use_count: int
+    status: str
+    join_path: str
+
+
+class WorkspaceInviteAcceptResponse(BaseModel):
+    workspace: WorkspaceInviteWorkspaceResponse
+    membership_id: UUID
+    status: str
 
 
 def _not_found() -> HTTPException:
@@ -116,16 +269,20 @@ def _forbidden(detail: str) -> HTTPException:
     return HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
 
 
+def _gone(detail: str) -> HTTPException:
+    return HTTPException(status_code=status.HTTP_410_GONE, detail=detail)
+
+
 def _membership_for_context(
     context: CurrentUserContext,
     organization_id: UUID,
-) -> MembershipRole | None:
+) -> WorkspacePermission | None:
     for membership in context.memberships:
         if (
             membership.organization_id == organization_id
             and membership.status == "active"
         ):
-            return membership.role
+            return membership.workspace_permission
     return None
 
 
@@ -133,7 +290,7 @@ def _require_membership(
     context: CurrentUserContext,
     organization_id: UUID,
     required_role: MembershipRole,
-) -> MembershipRole:
+) -> WorkspacePermission:
     role = _membership_for_context(context, organization_id)
     if role is None:
         raise _not_found()
@@ -149,15 +306,333 @@ def _require_permission(context: CurrentUserContext, permission: Permission) -> 
 
 def _organization_response(
     organization: Organization,
-    role: MembershipRole,
+    workspace_permission: WorkspacePermission,
+    *,
+    department_access: list[str] | None = None,
+    capability_permissions: list[str] | None = None,
 ) -> OrganizationResponse:
     return OrganizationResponse(
         id=organization.id,
         name=organization.name,
         slug=organization.slug,
-        role=role,
+        workspace_permission=workspace_permission,
+        role=workspace_permission,
+        department_access=department_access or [],
+        capability_permissions=capability_permissions or [],
         can_switch=organization.workos_organization_id is not None,
     )
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def _invite_status(invite: WorkspaceInvite) -> str:
+    if invite.status != "active":
+        return invite.status
+    if _as_utc(invite.expires_at) <= _utc_now():
+        return "expired"
+    if invite.maximum_uses is not None and invite.use_count >= invite.maximum_uses:
+        return "exhausted"
+    return "active"
+
+
+def _require_usable_invite(invite: WorkspaceInvite) -> None:
+    effective_status = _invite_status(invite)
+    if effective_status != "active":
+        if effective_status == "expired" and invite.status == "active":
+            invite.status = "expired"
+        raise _gone("Invite is no longer available")
+
+
+def _professional_role_slug(value: str) -> str:
+    slug = "".join(
+        character.lower() if character.isalnum() or character == "&" else "_"
+        for character in value.strip()
+    ).strip("_")
+    while "__" in slug:
+        slug = slug.replace("__", "_")
+    return slug or "other"
+
+
+def _normalize_professional_roles(value: list[str]) -> list[str]:
+    normalized_roles: list[str] = []
+    seen: set[str] = set()
+
+    for role in value:
+        normalized = _professional_role_slug(role)
+        if normalized not in ALLOWED_PROFESSIONAL_ROLES:
+            raise ValueError("Unsupported professional role")
+        if normalized in seen:
+            continue
+        normalized_roles.append(ALLOWED_PROFESSIONAL_ROLES[normalized])
+        seen.add(normalized)
+
+    return normalized_roles
+
+
+def _normalize_department_slug(value: str) -> str:
+    slug = "".join(
+        character.lower() if character.isalnum() or character == "&" else "_"
+        for character in value.strip()
+    ).strip("_")
+    while "__" in slug:
+        slug = slug.replace("__", "_")
+    return slug
+
+
+def _normalize_department_access(value: list[str]) -> list[str]:
+    normalized_departments: list[str] = []
+    seen: set[str] = set()
+
+    for department in value:
+        normalized = _normalize_department_slug(department)
+        if normalized not in ALLOWED_DEPARTMENT_ACCESS:
+            raise ValueError("Unsupported department access")
+        if normalized in seen:
+            continue
+        normalized_departments.append(normalized)
+        seen.add(normalized)
+
+    return normalized_departments
+
+
+def _proposed_department_access_for_roles(role_names: list[str]) -> list[str]:
+    department_slugs: list[str] = []
+    seen: set[str] = set()
+
+    for role_name in role_names:
+        role_slug = _professional_role_slug(role_name)
+        for department_slug in DEFAULT_ROLE_DEPARTMENT_ACCESS.get(role_slug, []):
+            if department_slug in seen:
+                continue
+            department_slugs.append(department_slug)
+            seen.add(department_slug)
+
+    return department_slugs
+
+
+async def _get_or_create_professional_role(
+    session: AsyncSession,
+    display_name: str,
+) -> ProfessionalRole:
+    slug = _professional_role_slug(display_name)
+    role = await session.scalar(
+        select(ProfessionalRole).where(
+            (ProfessionalRole.slug == slug)
+            | (func.lower(ProfessionalRole.display_name) == display_name.lower())
+        )
+    )
+    if role is not None:
+        return role
+
+    role = ProfessionalRole(
+        slug=slug,
+        display_name=display_name,
+        description=f"{display_name} professional role.",
+        default_department_access=list(DEFAULT_ROLE_DEPARTMENT_ACCESS.get(slug, [])),
+    )
+    session.add(role)
+    await session.flush()
+    return role
+
+
+async def _get_or_create_department(
+    session: AsyncSession,
+    slug: str,
+) -> Department:
+    department = await session.scalar(select(Department).where(Department.slug == slug))
+    if department is not None:
+        return department
+
+    default_department = next(
+        (department for department in DEFAULT_DEPARTMENTS if department.slug == slug),
+        None,
+    )
+    display_name = (
+        default_department.display_name
+        if default_department is not None
+        else slug.replace("_", " ").title()
+    )
+    description = (
+        default_department.description
+        if default_department is not None
+        else f"{display_name} department."
+    )
+    access_sensitivity = (
+        default_department.access_sensitivity.value
+        if default_department is not None
+        else "standard"
+    )
+    department = Department(
+        slug=slug,
+        display_name=display_name,
+        description=description,
+        access_sensitivity=access_sensitivity,
+    )
+    session.add(department)
+    await session.flush()
+    return department
+
+
+async def _replace_membership_professional_roles(
+    session: AsyncSession,
+    membership: OrganizationMembership,
+    role_names: list[str],
+) -> None:
+    await session.execute(
+        delete(MembershipProfessionalRole).where(
+            MembershipProfessionalRole.membership_id == membership.id
+        )
+    )
+    await session.flush()
+
+    for index, role_name in enumerate(role_names):
+        professional_role = await _get_or_create_professional_role(session, role_name)
+        session.add(
+            MembershipProfessionalRole(
+                membership_id=membership.id,
+                professional_role_id=professional_role.id,
+                is_primary=index == 0,
+                status="active",
+            )
+        )
+
+
+async def _replace_membership_department_access(
+    session: AsyncSession,
+    membership: OrganizationMembership,
+    department_slugs: list[str],
+    *,
+    approved_by: UUID | None,
+) -> None:
+    await session.execute(
+        delete(MembershipDepartmentAccess).where(
+            MembershipDepartmentAccess.membership_id == membership.id
+        )
+    )
+    await session.flush()
+
+    membership.department_access = list(department_slugs)
+    approved_at = _utc_now() if approved_by is not None else None
+    for department_slug in department_slugs:
+        department = await _get_or_create_department(session, department_slug)
+        session.add(
+            MembershipDepartmentAccess(
+                membership_id=membership.id,
+                department_id=department.id,
+                access_level="member",
+                source="invitation",
+                approved_by=approved_by,
+                approved_at=approved_at,
+            )
+        )
+
+
+def _workspace_invite_response(invite: WorkspaceInvite) -> WorkspaceInviteResponse:
+    status_value = _invite_status(invite)
+    return WorkspaceInviteResponse(
+        id=invite.id,
+        token=invite.token,
+        email=invite.invitee_email,
+        workspace=WorkspaceInviteWorkspaceResponse(
+            id=invite.organization.id,
+            name=invite.organization.name,
+            slug=invite.organization.slug,
+        ),
+        inviter=(
+            WorkspaceInviteInviterResponse(
+                id=invite.inviter.id,
+                email=invite.inviter.email,
+                display_name=invite.inviter.display_name,
+            )
+            if invite.inviter is not None
+            else None
+        ),
+        professional_roles=list(invite.professional_roles),
+        proposed_department_access=list(invite.proposed_department_access),
+        expiration=invite.expires_at,
+        maximum_uses=invite.maximum_uses,
+        use_count=invite.use_count,
+        status=status_value,
+        join_path=f"/join/{invite.token}",
+    )
+
+
+def _role_assignment_response(
+    assignment: WorkspaceMembershipRole,
+) -> WorkspaceRoleAssignmentResponse:
+    return WorkspaceRoleAssignmentResponse(
+        id=assignment.id,
+        membership_id=assignment.membership_id,
+        role=WorkspaceRoleResponse(
+            id=assignment.role.id,
+            key=assignment.role.key,
+            display_name=assignment.role.display_name,
+            description=assignment.role.description,
+            system_role=assignment.role.system_role,
+        ),
+        assigned_by=assignment.assigned_by,
+        assigned_at=assignment.assigned_at,
+        metadata=assignment.metadata_json,
+        created_at=assignment.created_at,
+    )
+
+
+def _member_role_payload(
+    *,
+    membership: OrganizationMembership,
+    role: Role,
+    action: str,
+) -> dict[str, Any]:
+    return {
+        "action": action,
+        "membershipId": str(membership.id),
+        "userId": str(membership.user_id),
+        "name": membership.user.display_name or membership.user.email,
+        "displayName": membership.user.display_name,
+        "email": membership.user.email,
+        "roleId": str(role.id),
+        "role": role.display_name,
+        "roleKey": role.key,
+    }
+
+
+async def _workspace_membership_for_organization_member(
+    session: AsyncSession,
+    *,
+    organization_id: UUID,
+    member_id: UUID,
+    ensure: bool = True,
+) -> tuple[OrganizationMembership, WorkspaceMembership | None]:
+    membership = await session.scalar(
+        select(OrganizationMembership)
+        .options(selectinload(OrganizationMembership.user))
+        .where(OrganizationMembership.id == member_id)
+        .where(OrganizationMembership.organization_id == organization_id)
+    )
+    if membership is None:
+        raise _not_found()
+
+    workspace_membership = await session.scalar(
+        select(WorkspaceMembership)
+        .where(WorkspaceMembership.organization_membership_id == membership.id)
+        .where(WorkspaceMembership.workspace_id == organization_id)
+    )
+    if workspace_membership is None and ensure:
+        workspace_membership = (
+            await ensure_workspace_membership_for_organization_membership(
+                session,
+                membership,
+            )
+        )
+    return membership, workspace_membership
 
 
 async def _active_membership_row(
@@ -167,6 +642,12 @@ async def _active_membership_row(
 ) -> tuple[Organization, OrganizationMembership] | None:
     row = await session.execute(
         select(Organization, OrganizationMembership)
+        .options(
+            selectinload(OrganizationMembership.department_access_grants),
+            selectinload(OrganizationMembership.department_access_grants).selectinload(
+                MembershipDepartmentAccess.department
+            ),
+        )
         .join(
             OrganizationMembership,
             OrganizationMembership.organization_id == Organization.id,
@@ -190,6 +671,20 @@ async def _slug_exists(
     return await session.scalar(statement) is not None
 
 
+async def _workspace_invite_by_token(
+    session: AsyncSession,
+    token: str,
+) -> WorkspaceInvite | None:
+    return await session.scalar(
+        select(WorkspaceInvite)
+        .options(
+            selectinload(WorkspaceInvite.organization),
+            selectinload(WorkspaceInvite.inviter),
+        )
+        .where(WorkspaceInvite.token == token)
+    )
+
+
 @router.get("", response_model=OrganizationsListResponse)
 async def list_organizations(
     session: SessionDep,
@@ -204,7 +699,13 @@ async def list_organizations(
         .where(OrganizationMembership.status == "active")
     )
     rows = await session.execute(
-        select(Organization, OrganizationMembership.role)
+        select(Organization, OrganizationMembership)
+        .options(
+            selectinload(OrganizationMembership.department_access_grants),
+            selectinload(OrganizationMembership.department_access_grants).selectinload(
+                MembershipDepartmentAccess.department
+            ),
+        )
         .join(
             OrganizationMembership,
             OrganizationMembership.organization_id == Organization.id,
@@ -217,8 +718,13 @@ async def list_organizations(
     )
     return OrganizationsListResponse(
         organizations=[
-            _organization_response(organization, role)
-            for organization, role in rows.all()
+            _organization_response(
+                organization,
+                membership.workspace_permission,
+                department_access=list(membership.approved_department_access),
+                capability_permissions=list(membership.capability_permissions),
+            )
+            for organization, membership in rows.all()
         ],
         limit=limit,
         offset=offset,
@@ -234,11 +740,19 @@ async def get_current_organization(
     organization_id = context.active_organization_id
     if organization_id is None:
         raise _forbidden("Organization context required")
-    role = _require_membership(context, organization_id, MembershipRole.viewer)
+    role = _require_membership(context, organization_id, MembershipRole.guest)
+    membership = context.active_membership
     organization = await session.get(Organization, organization_id)
     if organization is None:
         raise _not_found()
-    return _organization_response(organization, role)
+    return _organization_response(
+        organization,
+        role,
+        department_access=list(membership.department_access) if membership else [],
+        capability_permissions=(
+            list(membership.capability_permissions) if membership else []
+        ),
+    )
 
 
 @router.post(
@@ -259,8 +773,159 @@ async def activate_organization(
         raise _conflict("Organization is not connected to WorkOS")
 
     return OrganizationActivationResponse(
-        organization=_organization_response(organization, membership.role),
+        organization=_organization_response(
+            organization,
+            membership.workspace_permission,
+            department_access=list(membership.approved_department_access),
+            capability_permissions=list(membership.capability_permissions),
+        ),
         workos_organization_id=organization.workos_organization_id,
+    )
+
+
+@router.post(
+    "/{organization_id}/invites",
+    response_model=WorkspaceInviteResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_workspace_invite(
+    organization_id: UUID,
+    payload: WorkspaceInviteCreateRequest,
+    session: SessionDep,
+    context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
+) -> WorkspaceInviteResponse:
+    _require_membership(context, organization_id, MembershipRole.admin)
+    _require_permission(context, Permission.members_manage)
+
+    organization = await session.get(Organization, organization_id)
+    if organization is None:
+        raise _not_found()
+
+    for _attempt in range(5):
+        proposed_department_access = (
+            payload.department_access
+            if payload.department_access is not None
+            else _proposed_department_access_for_roles(payload.professional_roles)
+        )
+        invite = WorkspaceInvite(
+            token=secrets.token_urlsafe(9),
+            organization_id=organization_id,
+            inviter_user_id=context.user.id,
+            invitee_email=payload.email,
+            professional_roles=payload.professional_roles,
+            proposed_department_access=proposed_department_access,
+            expires_at=_utc_now() + timedelta(days=payload.expires_in_days),
+            maximum_uses=payload.maximum_uses,
+            status="active",
+        )
+        session.add(invite)
+        try:
+            await session.commit()
+            await session.refresh(invite, attribute_names=["organization", "inviter"])
+            return _workspace_invite_response(invite)
+        except IntegrityError:
+            await session.rollback()
+
+    raise _conflict("Could not create a unique invite link")
+
+
+@router.get("/invites/{token}", response_model=WorkspaceInviteResponse)
+async def get_workspace_invite(
+    token: str,
+    session: SessionDep,
+) -> WorkspaceInviteResponse:
+    invite = await _workspace_invite_by_token(session, token)
+    if invite is None:
+        raise _not_found()
+    if _invite_status(invite) == "expired" and invite.status == "active":
+        invite.status = "expired"
+        await session.commit()
+    return _workspace_invite_response(invite)
+
+
+@router.post(
+    "/invites/{token}/accept",
+    response_model=WorkspaceInviteAcceptResponse,
+)
+async def accept_workspace_invite(
+    token: str,
+    session: SessionDep,
+    context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
+    payload: Annotated[WorkspaceInviteAcceptRequest | None, Body()] = None,
+) -> WorkspaceInviteAcceptResponse:
+    invite = await _workspace_invite_by_token(session, token)
+    if invite is None:
+        raise _not_found()
+
+    _require_usable_invite(invite)
+
+    membership = await session.scalar(
+        select(OrganizationMembership)
+        .where(OrganizationMembership.organization_id == invite.organization_id)
+        .where(OrganizationMembership.user_id == context.user.id)
+    )
+    if membership is None:
+        membership = OrganizationMembership(
+            organization_id=invite.organization_id,
+            user_id=context.user.id,
+            role=MembershipRole.member,
+            workspace_permission=WorkspacePermission.member,
+            status="active",
+        )
+        session.add(membership)
+        invite.use_count += 1
+    elif membership.status != "active":
+        membership.status = "active"
+        membership.role = MembershipRole.member
+        membership.workspace_permission = WorkspacePermission.member
+        invite.use_count += 1
+    await session.flush()
+    inviter_profile_id = None
+    if invite.inviter is not None:
+        inviter_profile = await get_or_create_profile_for_user(session, invite.inviter)
+        inviter_profile_id = inviter_profile.id
+    await ensure_workspace_membership_for_organization_membership(
+        session,
+        membership,
+        invited_by_profile_id=inviter_profile_id,
+    )
+
+    invite_roles = list(invite.professional_roles)
+    accepted_roles = invite_roles or (
+        payload.professional_roles if payload is not None else []
+    )
+    if accepted_roles:
+        await _replace_membership_professional_roles(
+            session,
+            membership,
+            accepted_roles,
+        )
+    invited_department_access = list(invite.proposed_department_access)
+    if invited_department_access:
+        await _replace_membership_department_access(
+            session,
+            membership,
+            invited_department_access,
+            approved_by=invite.inviter_user_id,
+        )
+
+    if _invite_status(invite) == "exhausted":
+        invite.status = "exhausted"
+
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise _conflict("Invite could not be accepted") from exc
+
+    return WorkspaceInviteAcceptResponse(
+        workspace=WorkspaceInviteWorkspaceResponse(
+            id=invite.organization.id,
+            name=invite.organization.name,
+            slug=invite.organization.slug,
+        ),
+        membership_id=membership.id,
+        status=membership.status,
     )
 
 
@@ -285,14 +950,33 @@ async def create_organization(
     )
     session.add(organization)
     await session.flush()
-    session.add(
-        OrganizationMembership(
-            organization_id=organization.id,
-            user_id=context.user.id,
-            role=MembershipRole.owner,
-            status="active",
-        )
+    owner_membership = OrganizationMembership(
+        organization_id=organization.id,
+        user_id=context.user.id,
+        role=MembershipRole.owner,
+        workspace_permission=WorkspacePermission.owner,
+        status="active",
     )
+    session.add(owner_membership)
+    await session.flush()
+    await ensure_workspace_membership_for_organization_membership(
+        session,
+        owner_membership,
+    )
+    departments = (
+        await session.scalars(select(Department).where(Department.is_active.is_(True)))
+    ).all()
+    for department in departments:
+        session.add(
+            MembershipDepartmentAccess(
+                membership_id=owner_membership.id,
+                department_id=department.id,
+                access_level="owner",
+                source="workspace_owner",
+                approved_by=context.user.id,
+                approved_at=datetime.now(UTC),
+            )
+        )
 
     try:
         await session.commit()
@@ -308,7 +992,7 @@ async def create_organization(
         entity_id=organization.id,
         payload={
             "organization": _organization_response(
-                organization, MembershipRole.owner
+                organization, WorkspacePermission.owner
             ).model_dump(mode="json")
         },
     )
@@ -321,7 +1005,7 @@ async def create_organization(
         payload={"role": MembershipRole.owner.value, "status": "active"},
     )
     await session.commit()
-    return _organization_response(organization, MembershipRole.owner)
+    return _organization_response(organization, WorkspacePermission.owner)
 
 
 @router.patch("/{organization_id}", response_model=OrganizationResponse)
@@ -391,7 +1075,16 @@ async def list_organization_members(
     )
     memberships = await session.scalars(
         select(OrganizationMembership)
-        .options(selectinload(OrganizationMembership.user))
+        .options(
+            selectinload(OrganizationMembership.user),
+            selectinload(OrganizationMembership.professional_role_links).selectinload(
+                MembershipProfessionalRole.professional_role
+            ),
+            selectinload(OrganizationMembership.department_access_grants),
+            selectinload(OrganizationMembership.department_access_grants).selectinload(
+                MembershipDepartmentAccess.department
+            ),
+        )
         .where(OrganizationMembership.organization_id == organization_id)
         .order_by(
             OrganizationMembership.created_at.asc(),
@@ -407,7 +1100,13 @@ async def list_organization_members(
                 user_id=membership.user_id,
                 email=membership.user.email,
                 display_name=membership.user.display_name,
-                role=membership.role,
+                workspace_permission=membership.workspace_permission,
+                role=membership.workspace_permission,
+                professional_roles=list(membership.professional_roles),
+                department_access=list(membership.approved_department_access),
+                pending_department_access=list(membership.pending_department_access),
+                denied_department_access=[],
+                capability_permissions=list(membership.capability_permissions),
                 status=membership.status,
             )
             for membership in memberships.all()
@@ -416,3 +1115,159 @@ async def list_organization_members(
         offset=offset,
         total=total or 0,
     )
+
+
+@router.get(
+    "/{organization_id}/members/{member_id}/roles",
+    response_model=WorkspaceRoleAssignmentsListResponse,
+)
+async def list_member_workspace_roles(
+    organization_id: UUID,
+    member_id: UUID,
+    session: SessionDep,
+    context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
+) -> WorkspaceRoleAssignmentsListResponse:
+    _require_membership(context, organization_id, MembershipRole.admin)
+    _require_permission(context, Permission.members_manage)
+
+    _membership, workspace_membership = (
+        await _workspace_membership_for_organization_member(
+            session,
+            organization_id=organization_id,
+            member_id=member_id,
+            ensure=False,
+        )
+    )
+    if workspace_membership is None:
+        return WorkspaceRoleAssignmentsListResponse(roles=[])
+    assignments = await session.scalars(
+        select(WorkspaceMembershipRole)
+        .options(selectinload(WorkspaceMembershipRole.role))
+        .where(WorkspaceMembershipRole.membership_id == workspace_membership.id)
+        .order_by(
+            WorkspaceMembershipRole.assigned_at.asc(),
+            WorkspaceMembershipRole.role_id.asc(),
+        )
+    )
+    return WorkspaceRoleAssignmentsListResponse(
+        roles=[
+            _role_assignment_response(assignment)
+            for assignment in assignments.all()
+        ]
+    )
+
+
+@router.post(
+    "/{organization_id}/members/{member_id}/roles",
+    response_model=WorkspaceRoleAssignmentResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def assign_member_workspace_role(
+    organization_id: UUID,
+    member_id: UUID,
+    payload: WorkspaceRoleAssignmentCreateRequest,
+    session: SessionDep,
+    context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
+) -> WorkspaceRoleAssignmentResponse:
+    _require_membership(context, organization_id, MembershipRole.admin)
+    _require_permission(context, Permission.members_manage)
+
+    membership, workspace_membership = (
+        await _workspace_membership_for_organization_member(
+            session,
+            organization_id=organization_id,
+            member_id=member_id,
+        )
+    )
+    if workspace_membership is None:
+        raise _not_found()
+    role = await session.get(Role, payload.role_id)
+    if role is None:
+        raise _not_found()
+
+    existing_assignment = await session.scalar(
+        select(WorkspaceMembershipRole)
+        .where(WorkspaceMembershipRole.membership_id == workspace_membership.id)
+        .where(WorkspaceMembershipRole.role_id == role.id)
+    )
+    if existing_assignment is not None:
+        raise _conflict("Workspace role is already assigned to this member")
+
+    assignment = WorkspaceMembershipRole(
+        membership_id=workspace_membership.id,
+        role_id=role.id,
+        assigned_by=context.user.id,
+        assigned_at=_utc_now(),
+        metadata_json=payload.metadata or {},
+    )
+    session.add(assignment)
+    try:
+        await session.flush()
+        await RealtimePublisher(session).publish(
+            organization_id=organization_id,
+            event_type=RealtimeEventType.member_role_changed,
+            actor=context.user,
+            entity_type="member",
+            entity_id=membership.id,
+            payload=_member_role_payload(
+                membership=membership,
+                role=role,
+                action="assigned",
+            ),
+        )
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise _conflict("Workspace role is already assigned to this member") from exc
+
+    assignment.role = role
+    return _role_assignment_response(assignment)
+
+
+@router.delete(
+    "/{organization_id}/members/{member_id}/roles/{role_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def remove_member_workspace_role(
+    organization_id: UUID,
+    member_id: UUID,
+    role_id: UUID,
+    session: SessionDep,
+    context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
+) -> None:
+    _require_membership(context, organization_id, MembershipRole.admin)
+    _require_permission(context, Permission.members_manage)
+
+    membership, workspace_membership = (
+        await _workspace_membership_for_organization_member(
+            session,
+            organization_id=organization_id,
+            member_id=member_id,
+        )
+    )
+    if workspace_membership is None:
+        raise _not_found()
+    assignment = await session.scalar(
+        select(WorkspaceMembershipRole)
+        .options(selectinload(WorkspaceMembershipRole.role))
+        .where(WorkspaceMembershipRole.membership_id == workspace_membership.id)
+        .where(WorkspaceMembershipRole.role_id == role_id)
+    )
+    if assignment is None:
+        raise _not_found()
+
+    role = assignment.role
+    await session.delete(assignment)
+    await RealtimePublisher(session).publish(
+        organization_id=organization_id,
+        event_type=RealtimeEventType.member_role_changed,
+        actor=context.user,
+        entity_type="member",
+        entity_id=membership.id,
+        payload=_member_role_payload(
+            membership=membership,
+            role=role,
+            action="removed",
+        ),
+    )
+    await session.commit()

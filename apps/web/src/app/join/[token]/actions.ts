@@ -14,9 +14,14 @@ export async function acceptWorkspaceInviteAction(formData: FormData): Promise<v
   if (typeof token !== "string" || token.length === 0) {
     redirect("/dashboard");
   }
+  const professionalRoles = formData
+    .getAll("professional_roles")
+    .filter((role): role is string => typeof role === "string" && role.length > 0);
 
   try {
-    await acceptWorkspaceInvite(token);
+    await acceptWorkspaceInvite(token, {
+      professional_roles: professionalRoles,
+    });
   } catch (error) {
     if (!(error instanceof ApiClientError)) {
       logServerError("Workspace invite acceptance failed", error, {
