@@ -10,17 +10,18 @@
   --panel: #ffffff;
   --border: #d8dee8;
   --focus-ring: #0ea5e9;
-  --dashboard-bg: #050816;
-  --dashboard-panel: rgb(15 23 42 / 0.72);
-  --dashboard-panel-soft: rgb(15 23 42 / 0.48);
-  --dashboard-border: rgb(148 163 184 / 0.18);
-  --dashboard-border-strong: rgb(125 211 252 / 0.28);
+  --dashboard-bg: #060914;
+  --dashboard-panel: rgb(15 23 42 / 0.68);
+  --dashboard-panel-soft: rgb(15 23 42 / 0.42);
+  --dashboard-border: rgb(203 213 225 / 0.16);
+  --dashboard-border-strong: rgb(125 211 252 / 0.24);
   --dashboard-text: #f8fafc;
   --dashboard-muted: #94a3b8;
   --dashboard-subtle: #cbd5e1;
-  --dashboard-violet: #8b5cf6;
-  --dashboard-blue: #3b82f6;
+  --dashboard-violet: #a78bfa;
+  --dashboard-blue: #60a5fa;
   --dashboard-cyan: #22d3ee;
+  --dashboard-emerald: #34d399;
 }
 
 * {
@@ -67,27 +68,53 @@ a {
   .dashboard-surface {
     color: var(--dashboard-text);
     background:
-      radial-gradient(circle at 12% 0%, rgb(139 92 246 / 0.18), transparent 30rem),
-      radial-gradient(circle at 92% 12%, rgb(34 211 238 / 0.16), transparent 28rem),
-      linear-gradient(135deg, #050816 0%, #08111f 46%, #03111f 100%);
+      linear-gradient(135deg, rgb(167 139 250 / 0.12), transparent 28rem),
+      radial-gradient(circle at 12% 0%, rgb(96 165 250 / 0.16), transparent 31rem),
+      radial-gradient(circle at 92% 12%, rgb(52 211 153 / 0.12), transparent 30rem),
+      linear-gradient(135deg, #060914 0%, #091321 48%, #04141d 100%);
   }
 
   .dashboard-panel {
     border: 1px solid var(--dashboard-border);
     background: var(--dashboard-panel);
-    box-shadow: 0 24px 80px rgb(2 6 23 / 0.24);
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 0.04),
+      0 18px 54px rgb(2 6 23 / 0.2);
+    transition:
+      border-color 180ms ease,
+      background-color 180ms ease,
+      box-shadow 180ms ease,
+      transform 180ms ease;
+  }
+
+  .dashboard-panel-interactive:hover {
+    border-color: rgb(125 211 252 / 0.34);
+    background: rgb(15 23 42 / 0.76);
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 0.06),
+      0 22px 62px rgb(2 6 23 / 0.24);
   }
 
   @supports (backdrop-filter: blur(1px)) {
     .dashboard-panel {
-      backdrop-filter: blur(18px);
-      -webkit-backdrop-filter: blur(18px);
+      backdrop-filter: blur(22px);
+      -webkit-backdrop-filter: blur(22px);
+    }
+  }
+
+  @media (max-width: 767px) {
+    @supports (backdrop-filter: blur(1px)) {
+      .dashboard-panel {
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
+      }
     }
   }
 
   .dashboard-panel-soft {
     border: 1px solid var(--dashboard-border);
     background: var(--dashboard-panel-soft);
+    box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.04);
   }
 
   .dashboard-accent-text {
@@ -96,10 +123,11 @@ a {
 
   .dashboard-gradient-text {
     background: linear-gradient(
-      90deg,
-      var(--dashboard-violet),
-      var(--dashboard-blue),
-      var(--dashboard-cyan)
+      92deg,
+      #f8fafc 0%,
+      #dbeafe 34%,
+      var(--dashboard-cyan) 68%,
+      var(--dashboard-emerald) 100%
     );
     -webkit-background-clip: text;
     background-clip: text;

@@ -22,8 +22,10 @@ describe("LabelPerformance", () => {
     expect(screen.getByRole("heading", { name: "Label Performance" })).toBeInTheDocument();
     expect(screen.getByText("Total Streams")).toBeInTheDocument();
     expect(screen.getByText("8.4M")).toBeInTheDocument();
-    expect(screen.getByText("+14.2%")).toBeInTheDocument();
+    expect(screen.getByText("Increase +14.2%")).toBeInTheDocument();
     expect(screen.getByText(/Streams for 30D: 8.4M, \+14.2%/i)).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "Performance metric" })).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "Performance time range" })).toBeInTheDocument();
     expect(screen.getByRole("table", { name: "Performance chart data" })).toBeInTheDocument();
   });
 

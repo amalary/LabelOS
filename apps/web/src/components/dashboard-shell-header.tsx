@@ -29,7 +29,7 @@ function DefaultNotificationsControl() {
   return (
     <button
       aria-label="Open notifications"
-      className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-white/65 bg-white/60 text-slate-700 shadow-[0_16px_40px_rgba(15,23,42,0.10)] backdrop-blur-2xl transition duration-200 hover:-translate-y-0.5 hover:bg-white/75 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-500"
+      className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-white/70 bg-white/65 text-slate-700 shadow-[0_14px_34px_rgba(15,23,42,0.09)] backdrop-blur-2xl transition-colors duration-150 hover:bg-white/80 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-500"
       type="button"
     >
       <svg aria-hidden="true" className="h-5 w-5" fill="none" viewBox="0 0 24 24">
@@ -60,11 +60,11 @@ export function DashboardShellHeader({
     : "Choose a workspace to see label operations.";
 
   return (
-    <header className="border-b border-white/70 bg-white/45 px-4 py-4 backdrop-blur-2xl sm:px-6">
+    <header className="border-b border-white/70 bg-white/50 px-3 py-4 backdrop-blur-xl sm:px-6 lg:backdrop-blur-2xl">
       <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
         <div className="min-w-0">
           <p className="text-sm font-semibold text-slate-600">{organizationName}</p>
-          <h1 className="mt-1 truncate text-2xl font-semibold tracking-normal text-slate-950">
+          <h1 className="mt-1 text-2xl font-semibold tracking-normal text-slate-950 sm:truncate">
             {isLoading ? "Dashboard" : dashboardGreeting(new Date(), user)}
           </h1>
           <p className="mt-1 max-w-2xl text-sm leading-6 text-slate-600">{description}</p>
@@ -90,7 +90,7 @@ export function DashboardShellHeader({
               />
             </svg>
             <input
-              className="h-11 w-full rounded-full border border-white/65 bg-white/65 pl-10 pr-4 text-sm text-slate-900 shadow-[0_16px_40px_rgba(15,23,42,0.08)] outline-none transition placeholder:text-slate-400 focus:border-sky-300 focus:bg-white/80 focus-visible:ring-2 focus-visible:ring-sky-500"
+              className="h-11 w-full rounded-full border border-white/70 bg-white/70 pl-10 pr-4 text-sm text-slate-900 shadow-[0_14px_34px_rgba(15,23,42,0.07)] outline-none transition-colors duration-150 placeholder:text-slate-400 focus:border-sky-300 focus:bg-white/85 focus-visible:ring-2 focus-visible:ring-sky-500"
               id="dashboard-search"
               name="q"
               placeholder="Search dashboard"

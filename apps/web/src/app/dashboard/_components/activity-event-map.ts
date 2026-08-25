@@ -100,6 +100,11 @@ const activityEventMappers: Partial<Record<ActivityEventType, ActivityEventMappe
     description: `${textValue(event.payload, ["email", "memberEmail", "displayName"], "A teammate")} was invited`,
     tone: "team",
   }),
+  "member.updated": (event) => ({
+    title: "Member updated",
+    description: `${entityName(event, "A member")} was updated`,
+    tone: "team",
+  }),
   "member.joined": (event) => ({
     title: "Member joined",
     description: `${entityName(event, actorName(event))} joined the organization`,

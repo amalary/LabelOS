@@ -62,11 +62,28 @@ describe("DashboardGrid", () => {
       "/dashboard/artists",
     );
     expect(screen.getByRole("heading", { name: "Active Artists" })).toBeInTheDocument();
-    expect(screen.getByLabelText("Increase 9.1%")).toHaveTextContent("↑ Increase 9.1%");
+    expect(screen.getByLabelText("Increase 9.1%")).toHaveTextContent("\u2191 Increase 9.1%");
     expect(screen.getByLabelText("Upcoming Releases empty")).toHaveTextContent(
       "No releases are scheduled yet.",
     );
-    expect(screen.getByLabelText("No change 0%")).toHaveTextContent("→ No change 0%");
+    expect(screen.getByLabelText("No change 0%")).toHaveTextContent("\u2192 No change 0%");
     expect(screen.getByRole("alert")).toHaveTextContent("Tasks could not be loaded.");
+  });
+
+  it("does not reserve grid space for unavailable dashboard components", () => {
+    render(
+      <DashboardGrid
+        data={{
+          ...dashboardData,
+          kpis: dashboardData.kpis.filter((kpi) => kpi.id !== "tasks-approvals"),
+          labelPerformance: { metrics: [], ranges: [], unavailable: true },
+          recentActivity: { events: [], unavailable: true },
+        }}
+      />,
+    );
+
+    expect(screen.queryByRole("heading", { name: "Tasks / Approvals" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Primary dashboard column")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Secondary dashboard column")).toBeInTheDocument();
   });
 });

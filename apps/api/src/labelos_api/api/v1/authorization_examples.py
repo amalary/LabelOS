@@ -4,7 +4,13 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 from labelos_api.auth import CurrentUserContext
-from labelos_api.authorization import Permission, require_permission, require_role
+from labelos_api.authorization import (
+    Capability,
+    Permission,
+    require_capability,
+    require_permission,
+    require_role,
+)
 
 router = APIRouter(prefix="/authorization/examples", tags=["authorization"])
 
@@ -40,3 +46,17 @@ async def admin_example(
     ],
 ) -> ProtectedRouteResponse:
     return ProtectedRouteResponse(ok=True, guard="admin")
+
+
+@router.post(
+    "/contracts",
+    response_model=ProtectedRouteResponse,
+    summary="Example capability-protected route",
+)
+async def create_contract_example(
+    _context: Annotated[
+        CurrentUserContext,
+        Depends(require_capability(Capability.contract_upload, department="legal")),
+    ],
+) -> ProtectedRouteResponse:
+    return ProtectedRouteResponse(ok=True, guard=Capability.contract_upload.value)

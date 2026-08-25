@@ -54,6 +54,7 @@ export type LabelPerformanceData = {
   isMock?: boolean;
   loading?: boolean;
   error?: string;
+  unavailable?: boolean;
 };
 
 export type LabelPerformanceApiPoint = {
@@ -86,6 +87,7 @@ export type ReleasePipelineData = {
   loading?: boolean;
   error?: string;
   emptyOrganization?: boolean;
+  unavailable?: boolean;
 };
 
 export type ActivityEventType =
@@ -93,6 +95,7 @@ export type ActivityEventType =
   | "organization.updated"
   | "organization.switched"
   | "member.invited"
+  | "member.updated"
   | "member.joined"
   | "member.role_changed"
   | "member.removed"
@@ -128,6 +131,7 @@ export type RecentActivityData = {
   events: ActivityEvent[];
   loading?: boolean;
   error?: string;
+  unavailable?: boolean;
 };
 
 export type DashboardData = {

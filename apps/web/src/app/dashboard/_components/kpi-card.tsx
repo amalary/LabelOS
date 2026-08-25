@@ -34,9 +34,9 @@ const trendLabels: Record<DashboardKpiTrendDirection, string> = {
 };
 
 const trendSymbols: Record<DashboardKpiTrendDirection, string> = {
-  negative: "↓",
-  neutral: "→",
-  positive: "↑",
+  negative: "\u2193",
+  neutral: "\u2192",
+  positive: "\u2191",
 };
 
 function kpiHeadingId(title: string) {
@@ -61,8 +61,8 @@ function KpiCardFrame({
     <DashboardPanel
       aria-label={title}
       className={cn(
-        "relative min-h-36 overflow-hidden transition-colors",
-        href ? "hover:border-cyan-300/40 focus-within:border-cyan-300/50" : null,
+        "relative min-h-[8.5rem] overflow-hidden",
+        href ? "dashboard-panel-interactive focus-within:border-cyan-300/50" : null,
         className,
       )}
     >
@@ -81,7 +81,7 @@ function KpiCardFrame({
   return (
     <Link
       aria-label={`${title} details`}
-      className="block rounded-[18px] focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950"
+      className="block rounded-[16px] focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950"
       href={href}
     >
       {panel}
@@ -134,15 +134,15 @@ export function KpiCard({
   primaryValue,
   value,
 }: KpiCardProps) {
-  const displayValue = primaryValue ?? value ?? "—";
+  const displayValue = primaryValue ?? value ?? "\u2014";
 
   if (loading) {
     return (
-      <KpiCardFrame title={title} href={href} className="animate-pulse">
-        <div role="status" aria-label={`Loading ${title}`} className="flex h-full flex-col gap-6">
+      <KpiCardFrame title={title} href={href} className="animate-pulse motion-reduce:animate-none">
+        <div role="status" aria-label={`Loading ${title}`} className="flex h-full flex-col gap-5">
           <div className="flex items-start justify-between gap-4">
             <div className="h-4 w-28 rounded bg-slate-700/80" />
-            <div className="h-10 w-10 rounded-md bg-slate-700/70" />
+            <div className="h-9 w-9 rounded-md bg-slate-700/70" />
           </div>
           <div className="h-9 w-20 rounded bg-slate-700/80" />
           <div className="mt-auto h-4 w-36 rounded bg-slate-700/60" />
@@ -158,7 +158,7 @@ export function KpiCard({
           <div className="flex items-start justify-between gap-4">
             <h2 className="text-sm font-medium text-slate-300">{title}</h2>
             <div
-              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md border border-rose-300/20 bg-rose-300/10 text-sm font-semibold text-rose-100"
+              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-rose-300/20 bg-rose-300/10 text-sm font-semibold text-rose-100"
               aria-hidden="true"
             >
               !
@@ -180,7 +180,7 @@ export function KpiCard({
           <div className="flex items-start justify-between gap-4">
             <h2 className="text-sm font-medium text-slate-400">{title}</h2>
             <div
-              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md border border-slate-500/20 bg-slate-500/10 text-sm font-semibold text-slate-300"
+              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-slate-500/20 bg-slate-500/10 text-xs font-semibold text-slate-300"
               aria-hidden="true"
             >
               {icon}
@@ -204,13 +204,18 @@ export function KpiCard({
       <article className="flex min-h-28 flex-col justify-between gap-5" aria-labelledby={headingId}>
         <div className="flex items-start justify-between gap-4">
           <div className="min-w-0">
-            <h2 id={headingId} className="text-sm font-medium text-slate-400">
+            <h2
+              id={headingId}
+              className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-400"
+            >
               {title}
             </h2>
-            <p className="mt-3 text-3xl font-semibold text-slate-50">{displayValue}</p>
+            <p className="mt-3 text-[2rem] font-semibold leading-none text-slate-50">
+              {displayValue}
+            </p>
           </div>
           <div
-            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md border border-cyan-300/20 bg-cyan-300/10 text-xs font-semibold text-cyan-100"
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-cyan-300/20 bg-cyan-300/10 text-xs font-semibold text-cyan-100"
             aria-hidden="true"
           >
             {icon}

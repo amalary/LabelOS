@@ -20,7 +20,7 @@ describe("KpiCard", () => {
     expect(screen.getByRole("heading", { name: "Active Artists" })).toBeInTheDocument();
     expect(screen.getByText("12")).toBeInTheDocument();
     expect(screen.getByText("Roster with recent activity")).toBeInTheDocument();
-    expect(screen.getByLabelText("Increase 9.1%")).toHaveTextContent("↑ Increase 9.1%");
+    expect(screen.getByLabelText("Increase 9.1%")).toHaveTextContent("\u2191 Increase 9.1%");
     expect(screen.getByText("from last month")).toBeInTheDocument();
   });
 
@@ -35,7 +35,7 @@ describe("KpiCard", () => {
       />,
     );
 
-    expect(screen.getByLabelText("Decrease 2")).toHaveTextContent("↓ Decrease 2");
+    expect(screen.getByLabelText("Decrease 2")).toHaveTextContent("\u2193 Decrease 2");
 
     rerender(
       <KpiCard
@@ -47,7 +47,7 @@ describe("KpiCard", () => {
       />,
     );
 
-    expect(screen.getByLabelText("No change 0%")).toHaveTextContent("→ No change 0%");
+    expect(screen.getByLabelText("No change 0%")).toHaveTextContent("\u2192 No change 0%");
   });
 
   it("handles missing trend data", () => {

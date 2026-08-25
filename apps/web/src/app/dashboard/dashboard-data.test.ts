@@ -38,6 +38,13 @@ describe("getDashboardData", () => {
             scheduled: 1,
             released: 9,
           },
+          availableCards: [
+            "active-artists",
+            "upcoming-releases",
+            "active-campaigns",
+            "tasks-approvals",
+          ],
+          availableSections: ["release-pipeline", "label-performance", "member-activity"],
         }),
         { status: 200 },
       ),
@@ -75,6 +82,39 @@ describe("getDashboardData", () => {
       { status: "released", label: "Released", count: 9, href: "/releases?status=released" },
     ]);
     expect(data.labelPerformance.ranges).toEqual([]);
+    expect(data.labelPerformance.unavailable).toBe(false);
+    expect(data.releasePipeline.unavailable).toBe(false);
+    expect(data.recentActivity.unavailable).toBe(false);
+  });
+
+  it("omits dashboard cards and sections marked unavailable by the backend", async () => {
+    apiClient.apiFetch.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          active_artists: 12,
+          upcoming_releases: 7,
+          releasePipeline: {
+            planning: 4,
+            production: 1,
+            distribution: 1,
+            scheduled: 1,
+            released: 9,
+          },
+          availableCards: ["active-artists", "upcoming-releases"],
+          availableSections: ["release-pipeline"],
+        }),
+        { status: 200 },
+      ),
+    );
+
+    const { getDashboardData } = await import("./dashboard-data");
+    const data = await getDashboardData();
+
+    expect(data.kpis.map((kpi) => kpi.id)).toEqual(["active-artists", "upcoming-releases"]);
+    expect(data.releasePipeline.stages).toHaveLength(5);
+    expect(data.releasePipeline.unavailable).toBe(false);
+    expect(data.labelPerformance.unavailable).toBe(true);
+    expect(data.recentActivity.unavailable).toBe(true);
     expect(data.recentActivity.events).toEqual([]);
   });
 
@@ -133,7 +173,7 @@ describe("getDashboardData", () => {
     ]);
     expect(data.releasePipeline.stages.every((stage) => stage.count === 0)).toBe(true);
     expect(data.labelPerformance).toMatchObject({ ranges: [] });
-    expect(data.recentActivity).toEqual({ events: [] });
+    expect(data.recentActivity).toEqual({ events: [], unavailable: false });
   });
 
   it("returns component-level error states when the dashboard summary fails", async () => {

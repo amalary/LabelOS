@@ -27,7 +27,7 @@ function AuthNavigationContent() {
   } = useAuthUi();
 
   return (
-    <div className="flex h-14 min-w-[18rem] items-center justify-end">
+    <div className="flex min-h-11 min-w-0 items-center justify-end">
       <div className="grid w-full justify-items-end [grid-template-areas:'stack']">
         <div
           aria-hidden={isAuthenticated || isLoading}

@@ -1,6 +1,16 @@
 import { describe, expect, it } from "vitest";
 
-import { hasPermission, hasRole, permissions, unavailableActionProps } from "./authorization";
+import {
+  can,
+  canUseCapability,
+  capabilities,
+  hasCapability,
+  hasDepartmentAccess,
+  hasPermission,
+  hasRole,
+  permissions,
+  unavailableActionProps,
+} from "./authorization";
 
 describe("frontend authorization helpers", () => {
   it("checks the Owner/Admin/Member role hierarchy", () => {
@@ -28,5 +38,45 @@ describe("frontend authorization helpers", () => {
         permissions.artistsManage,
       ),
     ).toEqual({});
+  });
+
+  it("checks capability authorization with department access", () => {
+    const subject = {
+      workspacePermission: "member",
+      departmentAccess: ["legal"],
+      capabilities: [capabilities.contractUpload],
+    };
+
+    expect(hasDepartmentAccess(subject, "legal")).toBe(true);
+    expect(hasCapability(subject, capabilities.contractUpload)).toBe(true);
+    expect(canUseCapability(subject, capabilities.contractUpload, "legal")).toBe(true);
+    expect(canUseCapability(subject, capabilities.contractSignRequest, "legal")).toBe(false);
+    expect(canUseCapability(subject, capabilities.contractUpload, "production")).toBe(false);
+  });
+
+  it("uses can as the central authorization resolver", () => {
+    const subject = {
+      role: "member",
+      permissions: [permissions.contractsManage],
+      workspacePermission: "member",
+      departmentAccess: ["legal"],
+      capabilities: [capabilities.contractApprove],
+    };
+
+    expect(can(subject, null, permissions.contractsManage)).toBe(true);
+    expect(can(subject, null, "admin")).toBe(false);
+    expect(can(subject, null, capabilities.contractApprove, { department: "legal" })).toBe(true);
+    expect(can(subject, null, capabilities.contractApprove, { department: "finance" })).toBe(false);
+    expect(can(subject, null, capabilities.contractSignRequest, { department: "legal" })).toBe(
+      false,
+    );
+  });
+
+  it("treats workspace owners as having every department and capability", () => {
+    const subject = { workspacePermission: "owner" };
+
+    expect(hasDepartmentAccess(subject, "legal")).toBe(true);
+    expect(hasCapability(subject, capabilities.workspaceManage)).toBe(true);
+    expect(canUseCapability(subject, capabilities.releaseEdit, "release_operations")).toBe(true);
   });
 });

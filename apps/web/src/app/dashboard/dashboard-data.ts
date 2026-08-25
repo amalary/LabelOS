@@ -10,11 +10,17 @@ import type {
 import { getLabelPerformanceMetrics } from "./_components/label-performance-data";
 
 type DashboardSummaryResponse = {
-  active_artists: number;
-  upcoming_releases: number;
-  active_campaigns: number;
-  pending_approvals: number;
-  releasePipeline: Record<ReleaseLifecycleStatus, number>;
+  active_artists?: number;
+  upcoming_releases?: number;
+  active_campaigns?: number;
+  pending_approvals?: number;
+  releasePipeline?: Record<ReleaseLifecycleStatus, number>;
+  availableCards?: string[];
+  availableSections?: string[];
+  authorization?: {
+    role: string;
+    permissions: string[];
+  };
 };
 
 const releasePipelineStageConfig: Array<{
@@ -33,7 +39,7 @@ function formatCount(value: number) {
 }
 
 function toReleasePipelineStages(
-  counts: DashboardSummaryResponse["releasePipeline"],
+  counts: Record<ReleaseLifecycleStatus, number>,
 ): ReleasePipelineStage[] {
   return releasePipelineStageConfig.map(({ status, label }) => ({
     status,
@@ -99,19 +105,26 @@ const kpiConfig: Array<{
 ];
 
 function toKpis(summary: DashboardSummaryResponse): DashboardKpi[] {
-  return kpiConfig.map((item) => {
-    const count = summary[item.valueKey];
+  const availableCards = new Set(summary.availableCards ?? kpiConfig.map((item) => item.id));
 
-    return {
-      id: item.id,
-      title: item.title,
-      primaryValue: formatCount(count),
-      icon: item.icon,
-      description: count === 0 ? item.emptyDescription : item.description,
-      href: item.href,
-      actionLabel: item.actionLabel,
-      empty: count === 0,
-    };
+  return kpiConfig.flatMap((item) => {
+    if (!availableCards.has(item.id)) {
+      return [];
+    }
+    const count = summary[item.valueKey] ?? 0;
+
+    return [
+      {
+        id: item.id,
+        title: item.title,
+        primaryValue: formatCount(count),
+        icon: item.icon,
+        description: count === 0 ? item.emptyDescription : item.description,
+        href: item.href,
+        actionLabel: item.actionLabel,
+        empty: count === 0,
+      },
+    ];
   });
 }
 
@@ -191,12 +204,23 @@ export async function getDashboardData(): Promise<DashboardData> {
     labelPerformance: {
       metrics: getLabelPerformanceMetrics(),
       ranges: [],
+      unavailable: !(summary.availableSections ?? ["label-performance"]).includes(
+        "label-performance",
+      ),
     },
     releasePipeline: {
-      stages: toReleasePipelineStages(summary.releasePipeline),
+      stages:
+        summary.releasePipeline &&
+        (summary.availableSections ?? ["release-pipeline"]).includes("release-pipeline")
+          ? toReleasePipelineStages(summary.releasePipeline)
+          : [],
+      unavailable: !(summary.availableSections ?? ["release-pipeline"]).includes(
+        "release-pipeline",
+      ),
     },
     recentActivity: {
       events: [],
+      unavailable: !(summary.availableSections ?? ["member-activity"]).includes("member-activity"),
     },
   };
 }

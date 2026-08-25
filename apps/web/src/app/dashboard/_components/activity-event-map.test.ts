@@ -44,6 +44,25 @@ describe("activity event mapping", () => {
     });
   });
 
+  it("maps member updated events", () => {
+    expect(
+      mapActivityEvent(
+        {
+          id: "activity-member-updated",
+          type: "member.updated",
+          payload: { displayName: "Sarah Jones" },
+          createdAt: "2026-08-12T17:59:00.000Z",
+        },
+        now,
+      ),
+    ).toMatchObject({
+      title: "Member updated",
+      description: "Sarah Jones was updated",
+      tone: "team",
+      rawType: "member.updated",
+    });
+  });
+
   it("formats unavailable timestamps without throwing", () => {
     expect(formatActivityTimestamp("not-a-date", now)).toBe("Time unavailable");
   });

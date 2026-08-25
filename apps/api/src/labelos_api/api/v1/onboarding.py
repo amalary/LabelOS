@@ -1,7 +1,18 @@
+from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from labelos_database.models import MembershipRole, Organization, OrganizationMembership
+from labelos_database.models import (
+    Department,
+    MembershipDepartmentAccess,
+    MembershipRole,
+    Organization,
+    OrganizationMembership,
+    WorkspacePermission,
+)
+from labelos_database.workspace_memberships import (
+    ensure_workspace_membership_for_organization_membership,
+)
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -22,6 +33,7 @@ class WorkspaceSyncRequest(BaseModel):
 class WorkspaceSyncResponse(BaseModel):
     organization_id: str
     organization_slug: str
+    workspace_permission: WorkspacePermission
     membership_role: MembershipRole
 
 
@@ -117,16 +129,47 @@ async def sync_onboarded_workspace(
             organization_id=organization.id,
             user_id=context.user.id,
             role=MembershipRole.owner,
+            workspace_permission=WorkspacePermission.owner,
             workos_membership_id=payload.workos_membership_id,
             status=payload.membership_status,
         )
         session.add(membership)
     else:
         membership.role = MembershipRole.owner
+        membership.workspace_permission = WorkspacePermission.owner
         membership.workos_membership_id = (
             payload.workos_membership_id or membership.workos_membership_id
         )
         membership.status = payload.membership_status
+    await session.flush()
+    await ensure_workspace_membership_for_organization_membership(session, membership)
+
+    existing_department_ids = {
+        row[0]
+        for row in (
+            await session.execute(
+                select(MembershipDepartmentAccess.department_id).where(
+                    MembershipDepartmentAccess.membership_id == membership.id
+                )
+            )
+        ).all()
+    }
+    departments = (
+        await session.scalars(select(Department).where(Department.is_active.is_(True)))
+    ).all()
+    for department in departments:
+        if department.id in existing_department_ids:
+            continue
+        session.add(
+            MembershipDepartmentAccess(
+                membership_id=membership.id,
+                department_id=department.id,
+                access_level="owner",
+                source="workspace_owner",
+                approved_by=context.user.id,
+                approved_at=datetime.now(UTC),
+            )
+        )
 
     try:
         await session.commit()
@@ -140,5 +183,6 @@ async def sync_onboarded_workspace(
     return WorkspaceSyncResponse(
         organization_id=str(organization.id),
         organization_slug=organization.slug,
+        workspace_permission=WorkspacePermission.owner,
         membership_role=MembershipRole.owner,
     )

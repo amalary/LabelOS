@@ -7,15 +7,28 @@ from datetime import UTC, datetime
 from hashlib import sha256
 from typing import Any
 
+from labelos_database.departments import (
+    DEFAULT_DEPARTMENTS,
+    DEFAULT_ROLE_DEPARTMENT_ACCESS,
+)
 from labelos_database.models import (
     AuthIdentity,
+    Department,
+    MembershipDepartmentAccess,
+    MembershipProfessionalRole,
     MembershipRole,
     Organization,
     OrganizationMembership,
+    ProfessionalRole,
     User,
     WebhookEvent,
+    workspace_permission_from_role,
 )
-from sqlalchemy import delete, desc, select
+from labelos_database.workspace_memberships import (
+    ensure_workspace_membership_for_organization_membership,
+    mark_workspace_membership_removed,
+)
+from sqlalchemy import delete, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from labelos_api.api.v1.onboarding import slugify_organization_name
@@ -335,7 +348,17 @@ async def _synchronize_membership_event(
     )
     if event_type == "organization_membership.deleted":
         if membership is not None:
-            await session.delete(membership)
+            workspace_membership = (
+                await ensure_workspace_membership_for_organization_membership(
+                    session,
+                    membership,
+                )
+            )
+            await mark_workspace_membership_removed(
+                session,
+                workspace_id=membership.organization_id,
+                profile_id=workspace_membership.profile_id,
+            )
         return
 
     workos_user_id = _required_string(data, "user_id")
@@ -380,21 +403,211 @@ async def _synchronize_membership_event(
 
     role = _membership_role(data)
     status = _str_or_none(data.get("status")) or "active"
+    professional_roles = _string_list_from_membership_data(data, "professional_roles")
+    department_access = _string_list_from_membership_data(data, "department_access")
+    requested_department_access = _string_list_from_membership_data(
+        data,
+        "requested_department_access",
+    )
+    if not requested_department_access:
+        requested_department_access = await _suggested_department_access_for_roles(
+            session,
+            professional_roles,
+        )
     if membership is None:
         membership = OrganizationMembership(
             workos_membership_id=workos_membership_id,
             organization_id=organization.id,
             user_id=user.id,
             role=role,
+            workspace_permission=workspace_permission_from_role(role),
+            department_access=department_access,
             status=status,
         )
         session.add(membership)
+        await session.flush()
     else:
         membership.workos_membership_id = workos_membership_id
         membership.organization_id = organization.id
         membership.user_id = user.id
         membership.role = role
+        membership.workspace_permission = workspace_permission_from_role(role)
+        membership.department_access = department_access
         membership.status = status
+        await session.flush()
+    await ensure_workspace_membership_for_organization_membership(session, membership)
+    await _replace_membership_professional_roles(
+        session,
+        membership=membership,
+        role_names=professional_roles,
+    )
+    await _replace_membership_department_access(
+        session,
+        membership=membership,
+        invitation_department_slugs=department_access,
+        role_default_department_slugs=requested_department_access,
+        workspace_owner=membership.workspace_permission.value == "owner",
+    )
+
+
+async def _replace_membership_professional_roles(
+    session: AsyncSession,
+    *,
+    membership: OrganizationMembership,
+    role_names: list[str],
+) -> None:
+    await session.execute(
+        delete(MembershipProfessionalRole).where(
+            MembershipProfessionalRole.membership_id == membership.id
+        )
+    )
+    for index, role_name in enumerate(role_names):
+        professional_role = await _get_or_create_professional_role(session, role_name)
+        session.add(
+            MembershipProfessionalRole(
+                membership_id=membership.id,
+                professional_role_id=professional_role.id,
+                is_primary=index == 0,
+                status="active",
+            )
+        )
+
+
+async def _replace_membership_department_access(
+    session: AsyncSession,
+    *,
+    membership: OrganizationMembership,
+    invitation_department_slugs: list[str],
+    role_default_department_slugs: list[str],
+    workspace_owner: bool,
+) -> None:
+    await session.execute(
+        delete(MembershipDepartmentAccess).where(
+            MembershipDepartmentAccess.membership_id == membership.id
+        )
+    )
+    granted: set[str] = set()
+    for department_slug in invitation_department_slugs:
+        department = await _get_or_create_department(session, department_slug)
+        session.add(
+            MembershipDepartmentAccess(
+                membership_id=membership.id,
+                department_id=department.id,
+                access_level="member",
+                source="invitation",
+                approved_at=datetime.now(UTC),
+            )
+        )
+        granted.add(department_slug)
+    for department_slug in role_default_department_slugs:
+        if department_slug in granted:
+            continue
+        department = await _get_or_create_department(session, department_slug)
+        session.add(
+            MembershipDepartmentAccess(
+                membership_id=membership.id,
+                department_id=department.id,
+                access_level="member",
+                source="role_default",
+                approved_at=datetime.now(UTC),
+            )
+        )
+        granted.add(department_slug)
+    if workspace_owner:
+        for default_department in DEFAULT_DEPARTMENTS:
+            if default_department.slug in granted:
+                continue
+            department = await _get_or_create_department(
+                session, default_department.slug
+            )
+            session.add(
+                MembershipDepartmentAccess(
+                    membership_id=membership.id,
+                    department_id=department.id,
+                    access_level="owner",
+                    source="workspace_owner",
+                    approved_at=datetime.now(UTC),
+                )
+            )
+            granted.add(default_department.slug)
+
+
+async def _suggested_department_access_for_roles(
+    session: AsyncSession,
+    role_names: list[str],
+) -> list[str]:
+    if not role_names:
+        return []
+
+    slugs = [_professional_role_slug(role_name) for role_name in role_names]
+    role_rows = (
+        await session.scalars(
+            select(ProfessionalRole).where(ProfessionalRole.slug.in_(slugs))
+        )
+    ).all()
+    roles_by_slug = {role.slug: role for role in role_rows}
+
+    department_access: list[str] = []
+    seen: set[str] = set()
+    for slug in slugs:
+        role = roles_by_slug.get(slug)
+        default_department_access = (
+            role.default_department_access
+            if role is not None and role.default_department_access
+            else DEFAULT_ROLE_DEPARTMENT_ACCESS.get(slug, [])
+        )
+        for department_slug in default_department_access:
+            if department_slug in seen:
+                continue
+            department_access.append(department_slug)
+            seen.add(department_slug)
+    return department_access
+
+
+async def _get_or_create_professional_role(
+    session: AsyncSession,
+    display_name: str,
+) -> ProfessionalRole:
+    slug = _professional_role_slug(display_name)
+    role = await session.scalar(
+        select(ProfessionalRole).where(
+            (ProfessionalRole.slug == slug)
+            | (func.lower(ProfessionalRole.display_name) == display_name.lower())
+        )
+    )
+    if role is not None:
+        return role
+
+    role = ProfessionalRole(
+        slug=slug,
+        display_name=display_name,
+        description=f"{display_name} professional role.",
+        default_department_access=list(DEFAULT_ROLE_DEPARTMENT_ACCESS.get(slug, [])),
+        is_active=True,
+    )
+    session.add(role)
+    await session.flush()
+    return role
+
+
+async def _get_or_create_department(
+    session: AsyncSession,
+    slug: str,
+) -> Department:
+    department = await session.scalar(select(Department).where(Department.slug == slug))
+    if department is not None:
+        return department
+
+    department = Department(
+        slug=slug,
+        display_name=slug.replace("_", " ").title(),
+        description=f"{slug.replace('_', ' ').title()} department.",
+        access_sensitivity="standard",
+        is_active=True,
+    )
+    session.add(department)
+    await session.flush()
+    return department
 
 
 def _update_user_from_workos_data(user: User, data: dict[str, Any]) -> None:
@@ -491,16 +704,62 @@ def _membership_role(data: dict[str, Any]) -> MembershipRole:
     if isinstance(role, dict):
         slug = _str_or_none(role.get("slug"))
         if slug:
-            return MembershipRole._value2member_map_.get(slug, MembershipRole.member)
+            return _membership_role_from_slug(slug)
 
     roles = data.get("roles")
     if isinstance(roles, list):
         for role_item in roles:
             if isinstance(role_item, dict):
                 slug = _str_or_none(role_item.get("slug"))
-                if slug in MembershipRole._value2member_map_:
-                    return MembershipRole(slug)
+                if slug:
+                    parsed_role = _membership_role_from_slug(slug)
+                    if parsed_role != MembershipRole.member or slug == "member":
+                        return parsed_role
     return MembershipRole.member
+
+
+def _membership_role_from_slug(slug: str) -> MembershipRole:
+    if slug == "viewer":
+        return MembershipRole.guest
+    return MembershipRole._value2member_map_.get(slug, MembershipRole.member)
+
+
+def _string_list_from_membership_data(data: dict[str, Any], key: str) -> list[str]:
+    direct_value = data.get(key)
+    if isinstance(direct_value, list):
+        return _normalize_string_list(direct_value)
+
+    metadata = data.get("metadata")
+    if isinstance(metadata, dict):
+        metadata_value = metadata.get(key)
+        if isinstance(metadata_value, list):
+            return _normalize_string_list(metadata_value)
+
+    return []
+
+
+def _normalize_string_list(values: list[object]) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        item = value.strip()
+        if not item or item in seen:
+            continue
+        normalized.append(item)
+        seen.add(item)
+    return normalized
+
+
+def _professional_role_slug(value: str) -> str:
+    slug = "".join(
+        character.lower() if character.isalnum() or character == "&" else "_"
+        for character in value.strip()
+    ).strip("_")
+    while "__" in slug:
+        slug = slug.replace("__", "_")
+    return slug or "other"
 
 
 def _organization_name(data: dict[str, Any], fallback: str) -> str:

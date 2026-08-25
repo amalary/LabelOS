@@ -17,7 +17,13 @@ vi.mock("@workos-inc/authkit-nextjs", () => ({
 
     return (request: { headers: Headers; nextUrl: URL }) => {
       const publicPaths = options.middlewareAuth?.unauthenticatedPaths ?? [];
-      const isPublicRoute = publicPaths.includes(request.nextUrl.pathname);
+      const isPublicRoute = publicPaths.some((path) => {
+        if (path.endsWith("/:path*")) {
+          return request.nextUrl.pathname.startsWith(path.slice(0, -":path*".length));
+        }
+
+        return path === request.nextUrl.pathname;
+      });
       const isAuthenticated = request.headers.get("x-test-authenticated") === "true";
 
       if (isPublicRoute || isAuthenticated) {
@@ -63,7 +69,8 @@ describe("route protection middleware", () => {
 
   it("allows public routes without an authenticated session", () => {
     for (const route of PUBLIC_ROUTES) {
-      expect(runMiddleware(createRequest(route))).toHaveProperty("status", 200);
+      const pathname = route.endsWith("/:path*") ? route.replace("/:path*", "/sample") : route;
+      expect(runMiddleware(createRequest(pathname))).toHaveProperty("status", 200);
     }
   });
 

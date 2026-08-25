@@ -116,7 +116,9 @@ pnpm typecheck
 The starter frontend currently provides:
 
 - `/` - frontend starter placeholder.
-- `/dashboard` - dashboard placeholder wrapped in the application shell.
+- `/dashboard` - protected Dashboard V1 with organization-aware header, four
+  permission-aware KPI cards, label performance, release pipeline, and realtime
+  recent activity.
 - `/login` - starts the server-side WorkOS AuthKit flow.
 
 The `/dashboard` route is protected by AuthKit middleware. Users without a valid
@@ -172,6 +174,12 @@ Starter endpoints:
 - `/health/database` - database connectivity check.
 - `/api/v1/status` - versioned API status.
 - `/api/v1/me` - protected current user and organization memberships.
+- `/api/v1/dashboard/summary` - organization-scoped dashboard summary with
+  permission-filtered card and section availability.
+- `/api/v1/dashboard/performance` - protected label performance series for
+  authorized dashboard users.
+- `/api/v1/realtime/organizations/{organization_id}/events` - organization
+  realtime event stream used by the dashboard shell and recent activity.
 
 Run backend validation from the repository root:
 
@@ -227,12 +235,13 @@ The initial migration creates only foundational identity and organization tables
 - `organization_memberships`
 
 `auth_identities` links an external provider subject to the local `users` table.
-Organization memberships support these roles:
+Organization memberships separate administrative workspace permission from
+music-industry professional context. Workspace permissions are:
 
 - `owner`
 - `admin`
 - `member`
-- `viewer`
+- `guest`
 
 The initial application authorization policy uses Owner, Admin, and Member with
 WorkOS RBAC permission claims such as `artists:view` and `settings:manage`.
@@ -315,7 +324,7 @@ In the WorkOS dashboard:
 2. Enable AuthKit and copy the Client ID and API Key into local or production
    secret storage.
 3. Configure RBAC roles with these initial slugs: `owner`, `admin`, `member`,
-   and `viewer`.
+   and `guest`.
 4. Configure permission slugs to match the application permissions documented in
    [Authorization](docs/development/authorization.md), including
    `organization:manage`, `members:manage`, `artists:view`, `artists:manage`,
@@ -430,7 +439,8 @@ dependencies are the enforcement point:
 - Organization-scoped data queries always include the active local organization
   ID resolved from the WorkOS `org_id` claim.
 
-The initial role hierarchy is `owner` > `admin` > `member` > `viewer`.
+The initial workspace permission hierarchy is `owner` > `admin` > `member` >
+`guest`.
 Permission checks use WorkOS permission slugs, and frontend helpers only hide or
 disable unavailable actions.
 

@@ -7,7 +7,10 @@ type DashboardPanelProps = ComponentPropsWithoutRef<typeof Card> & {
 
 export function DashboardPanel({ children, className, ...props }: DashboardPanelProps) {
   return (
-    <Card className={cn("dashboard-panel rounded-[18px] p-5 shadow-none", className)} {...props}>
+    <Card
+      className={cn("dashboard-panel rounded-[16px] p-4 shadow-none sm:p-5", className)}
+      {...props}
+    >
       {children}
     </Card>
   );

@@ -8,10 +8,18 @@ from fastapi import Depends, HTTPException, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from labelos_database.models import (
     AuthIdentity,
+    MembershipDepartmentAccess,
+    MembershipProfessionalRole,
     MembershipRole,
     Organization,
     OrganizationMembership,
+    Role,
+    RoleCapability,
     User,
+    WorkspaceMembership,
+    WorkspaceMembershipRole,
+    WorkspacePermission,
+    workspace_permission_from_role,
 )
 from labelos_database.session import get_async_session
 from sqlalchemy import select
@@ -50,14 +58,56 @@ class AuthenticatedPrincipal:
         return tuple(_workos_role_to_membership_role(role) for role in self.roles)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class MembershipContext:
     organization_id: UUID
     organization_name: str
     organization_slug: str
     workos_organization_id: str | None
-    role: MembershipRole
+    workspace_permission: WorkspacePermission
     status: str = "active"
+    professional_roles: tuple[str, ...] = ()
+    department_access: tuple[str, ...] = ()
+    pending_department_access: tuple[str, ...] = ()
+    capability_permissions: tuple[str, ...] = ()
+    role_capabilities: tuple[str, ...] = ()
+
+    def __init__(
+        self,
+        *,
+        organization_id: UUID,
+        organization_name: str,
+        organization_slug: str,
+        workos_organization_id: str | None,
+        workspace_permission: WorkspacePermission | MembershipRole | None = None,
+        role: MembershipRole | WorkspacePermission | None = None,
+        status: str = "active",
+        professional_roles: tuple[str, ...] = (),
+        department_access: tuple[str, ...] = (),
+        pending_department_access: tuple[str, ...] = (),
+        capability_permissions: tuple[str, ...] = (),
+        role_capabilities: tuple[str, ...] = (),
+    ) -> None:
+        permission = _workspace_permission_from_value(workspace_permission or role)
+        object.__setattr__(self, "organization_id", organization_id)
+        object.__setattr__(self, "organization_name", organization_name)
+        object.__setattr__(self, "organization_slug", organization_slug)
+        object.__setattr__(self, "workos_organization_id", workos_organization_id)
+        object.__setattr__(self, "workspace_permission", permission)
+        object.__setattr__(self, "status", status)
+        object.__setattr__(self, "professional_roles", professional_roles)
+        object.__setattr__(self, "department_access", department_access)
+        object.__setattr__(
+            self,
+            "pending_department_access",
+            pending_department_access,
+        )
+        object.__setattr__(self, "capability_permissions", capability_permissions)
+        object.__setattr__(self, "role_capabilities", role_capabilities)
+
+    @property
+    def role(self) -> MembershipRole:
+        return MembershipRole(self.workspace_permission.value)
 
 
 @dataclass(frozen=True)
@@ -78,9 +128,29 @@ class CurrentUserContext:
                 return membership.organization_id
         return None
 
+    @property
+    def active_workspace_id(self) -> UUID | None:
+        """LabelOS workspaces are backed by WorkOS organizations."""
+        return self.active_organization_id
+
+    @property
+    def workspace_memberships(self) -> tuple[MembershipContext, ...]:
+        return self.memberships
+
+    @property
+    def active_membership(self) -> MembershipContext | None:
+        active_organization_id = self.active_organization_id
+        if active_organization_id is None:
+            return None
+        for membership in self.memberships:
+            if membership.organization_id == active_organization_id:
+                return membership
+        return None
+
 
 ROLE_ORDER: dict[MembershipRole, int] = {
     MembershipRole.viewer: 0,
+    MembershipRole.guest: 0,
     MembershipRole.member: 1,
     MembershipRole.admin: 2,
     MembershipRole.owner: 3,
@@ -90,12 +160,19 @@ WORKOS_ROLE_MAP: dict[str, MembershipRole] = {
     "owner": MembershipRole.owner,
     "admin": MembershipRole.admin,
     "member": MembershipRole.member,
-    "viewer": MembershipRole.viewer,
+    "guest": MembershipRole.guest,
+    "viewer": MembershipRole.guest,
 }
 
 
-def has_role_at_least(actual: MembershipRole, required: MembershipRole) -> bool:
-    return ROLE_ORDER[actual] >= ROLE_ORDER[required]
+def has_role_at_least(
+    actual: MembershipRole | WorkspacePermission,
+    required: MembershipRole | WorkspacePermission,
+) -> bool:
+    return (
+        ROLE_ORDER[MembershipRole(actual.value)]
+        >= ROLE_ORDER[MembershipRole(required.value)]
+    )
 
 
 def _workos_role_to_membership_role(role: str | None) -> MembershipRole:
@@ -231,15 +308,37 @@ async def resolve_current_user(
                     organization_id=organization.id,
                     user_id=user.id,
                     role=membership_role,
+                    workspace_permission=workspace_permission_from_role(
+                        membership_role
+                    ),
                 )
             )
             await session.commit()
-        elif membership.role != membership_role:
+        elif membership.workspace_permission != workspace_permission_from_role(
+            membership_role
+        ):
             membership.role = membership_role
+            membership.workspace_permission = workspace_permission_from_role(
+                membership_role
+            )
             await session.commit()
 
     rows = await session.execute(
         select(OrganizationMembership, Organization)
+        .options(
+            selectinload(OrganizationMembership.professional_role_links).selectinload(
+                MembershipProfessionalRole.professional_role
+            ),
+            selectinload(OrganizationMembership.department_access_grants),
+            selectinload(OrganizationMembership.department_access_grants).selectinload(
+                MembershipDepartmentAccess.department
+            ),
+            selectinload(OrganizationMembership.workspace_membership)
+            .selectinload(WorkspaceMembership.role_assignments)
+            .selectinload(WorkspaceMembershipRole.role)
+            .selectinload(Role.capability_links)
+            .selectinload(RoleCapability.capability),
+        )
         .join(Organization, Organization.id == OrganizationMembership.organization_id)
         .where(OrganizationMembership.user_id == user.id)
     )
@@ -249,8 +348,17 @@ async def resolve_current_user(
             organization_name=organization.name,
             organization_slug=organization.slug,
             workos_organization_id=organization.workos_organization_id,
-            role=membership.role,
+            workspace_permission=membership.workspace_permission,
             status=membership.status,
+            professional_roles=tuple(membership.professional_roles),
+            department_access=tuple(membership.approved_department_access),
+            pending_department_access=tuple(membership.pending_department_access),
+            capability_permissions=tuple(membership.capability_permissions),
+            role_capabilities=(
+                tuple(membership.workspace_membership.capability_keys)
+                if membership.workspace_membership is not None
+                else ()
+            ),
         )
         for membership, organization in rows.all()
     )
@@ -262,6 +370,16 @@ async def get_current_user_context(
     principal: Annotated[AuthenticatedPrincipal, Depends(get_current_principal)],
 ) -> CurrentUserContext:
     return await resolve_current_user(session, principal)
+
+
+def _workspace_permission_from_value(
+    value: WorkspacePermission | MembershipRole | None,
+) -> WorkspacePermission:
+    if value is None:
+        return WorkspacePermission.member
+    if isinstance(value, WorkspacePermission):
+        return value
+    return workspace_permission_from_role(value)
 
 
 def require_organization_role(
@@ -288,6 +406,16 @@ def require_active_organization_id(context: CurrentUserContext) -> UUID:
             detail="Organization context required",
         )
     return organization_id
+
+
+def require_active_workspace_id(context: CurrentUserContext) -> UUID:
+    workspace_id = context.active_workspace_id
+    if workspace_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Workspace context required",
+        )
+    return workspace_id
 
 
 def require_permission(permission: str, context: CurrentUserContext) -> None:
