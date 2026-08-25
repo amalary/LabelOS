@@ -150,9 +150,7 @@ class WorkspaceRoleAssignmentCreateRequest(BaseModel):
 
     @field_validator("metadata")
     @classmethod
-    def validate_metadata(
-        cls, value: dict[str, Any] | None
-    ) -> dict[str, Any] | None:
+    def validate_metadata(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
         if value is not None and not isinstance(value, dict):
             raise ValueError("metadata must be an object")
         return value
@@ -1151,8 +1149,7 @@ async def list_member_workspace_roles(
     )
     return WorkspaceRoleAssignmentsListResponse(
         roles=[
-            _role_assignment_response(assignment)
-            for assignment in assignments.all()
+            _role_assignment_response(assignment) for assignment in assignments.all()
         ]
     )
 

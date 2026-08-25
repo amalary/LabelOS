@@ -130,24 +130,24 @@ Workspace owners should eventually be able to customize these policies per
 workspace, so the seeded department value is a default policy classification,
 not a hard-coded product rule.
 
-| Sensitivity | Default Policy | Departments |
-| ----------- | -------------- | ----------- |
-| Standard | May allow automatic access when requested by a trusted role or onboarding flow. | `artist`, `production`, `creative`, `marketing` |
-| Elevated | Requires additional approval before access is granted. | `management`, `a&r`, `analytics`, `release_operations` |
-| Sensitive | Generally requires explicit authorization from an owner or authorized administrator. | `legal`, `finance`, `royalties`, `administration` |
+| Sensitivity | Default Policy                                                                       | Departments                                            |
+| ----------- | ------------------------------------------------------------------------------------ | ------------------------------------------------------ |
+| Standard    | May allow automatic access when requested by a trusted role or onboarding flow.      | `artist`, `production`, `creative`, `marketing`        |
+| Elevated    | Requires additional approval before access is granted.                               | `management`, `a&r`, `analytics`, `release_operations` |
+| Sensitive   | Generally requires explicit authorization from an owner or authorized administrator. | `legal`, `finance`, `royalties`, `administration`      |
 
 Professional roles carry default department grants, but they are not identical
 to departments. The resulting access is persisted in
 `membership_department_access` with `source = "role_default"`. Examples:
 
-| Professional Role | Suggested Department Requests |
-| ----------------- | ----------------------------- |
-| Artist | `artist`, `creative`, `releases`, `analytics` |
-| Producer | `production`, `songs`, `sessions`, `credits` |
-| Management | `management`, `artist`, `releases`, `marketing`, `analytics` |
-| A&R | `a&r`, `discovery`, `artist`, `evaluations` |
-| Legal | `legal`, `contracts`, `agreements` |
-| Finance | `finance`, `royalties`, `reporting` |
+| Professional Role | Suggested Department Requests                                |
+| ----------------- | ------------------------------------------------------------ |
+| Artist            | `artist`, `creative`, `releases`, `analytics`                |
+| Producer          | `production`, `songs`, `sessions`, `credits`                 |
+| Management        | `management`, `artist`, `releases`, `marketing`, `analytics` |
+| A&R               | `a&r`, `discovery`, `artist`, `evaluations`                  |
+| Legal             | `legal`, `contracts`, `agreements`                           |
+| Finance           | `finance`, `royalties`, `reporting`                          |
 
 ## Permissions
 
@@ -207,14 +207,14 @@ Initial capabilities:
 
 Initial baseline capability mapping:
 
-| Source | Capabilities |
-| ------ | ------------ |
-| Owner workspace permission | All capabilities. |
-| Admin workspace permission | Broad operational capabilities including artist, campaign, release, contract, analytics, member, role, workspace, and profile actions. |
-| Member workspace permission | View-oriented artist, campaign, release, analytics, and profile actions. |
-| Guest workspace permission | No default capabilities. |
-| Workspace roles | Union of capabilities from every assigned role in `workspace_membership_roles` through `role_capabilities`. |
-| Explicit membership grants | Additional capability slugs stored on `organization_memberships.capability_permissions`. |
+| Source                      | Capabilities                                                                                                                           |
+| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| Owner workspace permission  | All capabilities.                                                                                                                      |
+| Admin workspace permission  | Broad operational capabilities including artist, campaign, release, contract, analytics, member, role, workspace, and profile actions. |
+| Member workspace permission | View-oriented artist, campaign, release, analytics, and profile actions.                                                               |
+| Guest workspace permission  | No default capabilities.                                                                                                               |
+| Workspace roles             | Union of capabilities from every assigned role in `workspace_membership_roles` through `role_capabilities`.                            |
+| Explicit membership grants  | Additional capability slugs stored on `organization_memberships.capability_permissions`.                                               |
 
 The resolver denies by default:
 

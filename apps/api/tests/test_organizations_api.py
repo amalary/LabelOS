@@ -904,9 +904,10 @@ def test_remove_workspace_role_keeps_universal_profile_and_publishes_activity(
 
     assert assign_response.status_code == 201
     assert remove_response.status_code == 204
-    assert asyncio.run(
-        _workspace_role_keys(sessionmaker, seeded.member_membership_id)
-    ) == []
+    assert (
+        asyncio.run(_workspace_role_keys(sessionmaker, seeded.member_membership_id))
+        == []
+    )
     assert asyncio.run(_universal_profile_count(sessionmaker)) == profile_count
     events = asyncio.run(_realtime_events(sessionmaker, seeded.org_a_id))
     assert [event.payload["action"] for event in events] == ["assigned", "removed"]

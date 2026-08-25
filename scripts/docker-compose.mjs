@@ -7,7 +7,6 @@ const args = process.argv.slice(2);
 
 if (args[0] === "--") {
   args.shift();
-
 }
 
 if (args.length === 0) {
@@ -20,7 +19,7 @@ mkdirSync(dockerConfigDir, { recursive: true });
 writeFileSync(join(dockerConfigDir, "config.json"), "{}\n", { flag: "w" });
 
 const env = {
-  ...process.env, 
+  ...process.env,
   DOCKER_CONFIG: process.env.DOCKER_CONFIG || dockerConfigDir,
 };
 

@@ -67,7 +67,9 @@ describe("frontend authorization helpers", () => {
     expect(can(subject, null, "admin")).toBe(false);
     expect(can(subject, null, capabilities.contractApprove, { department: "legal" })).toBe(true);
     expect(can(subject, null, capabilities.contractApprove, { department: "finance" })).toBe(false);
-    expect(can(subject, null, capabilities.contractSignRequest, { department: "legal" })).toBe(false);
+    expect(can(subject, null, capabilities.contractSignRequest, { department: "legal" })).toBe(
+      false,
+    );
   });
 
   it("treats workspace owners as having every department and capability", () => {

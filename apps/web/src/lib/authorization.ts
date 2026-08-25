@@ -77,9 +77,7 @@ function normalizeRole(role?: string | null): AppRole | null {
   return null;
 }
 
-function normalizeWorkspacePermission(
-  permission?: string | null,
-): WorkspacePermission | null {
+function normalizeWorkspacePermission(permission?: string | null): WorkspacePermission | null {
   const normalized = permission?.trim().toLowerCase();
   if (
     normalized === "owner" ||
@@ -137,7 +135,9 @@ export function canAccessDepartment(
   department: string,
 ): boolean {
   const resolvedWorkspace = workspace ?? subject;
-  if (normalizeWorkspacePermission(resolvedWorkspace.workspacePermission ?? subject.role) === "owner") {
+  if (
+    normalizeWorkspacePermission(resolvedWorkspace.workspacePermission ?? subject.role) === "owner"
+  ) {
     return true;
   }
   return resolvedWorkspace.departmentAccess?.includes(department) ?? false;
@@ -150,7 +150,9 @@ function canUseResolvedCapability(
   resource: AuthorizationResource,
 ): boolean {
   const resolvedWorkspace = workspace ?? subject;
-  if (normalizeWorkspacePermission(resolvedWorkspace.workspacePermission ?? subject.role) === "owner") {
+  if (
+    normalizeWorkspacePermission(resolvedWorkspace.workspacePermission ?? subject.role) === "owner"
+  ) {
     return true;
   }
   const department = resource?.department;

@@ -175,7 +175,9 @@ export function InviteOnboardingFlow({
                   </div>
                 </fieldset>
               ) : null}
-              <AcceptButton disabled={!isActive || (requiresRoleSelection && selectedRoles.length === 0)} />
+              <AcceptButton
+                disabled={!isActive || (requiresRoleSelection && selectedRoles.length === 0)}
+              />
             </form>
           )}
         </div>

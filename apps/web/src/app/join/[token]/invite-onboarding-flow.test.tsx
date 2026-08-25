@@ -73,9 +73,7 @@ describe("InviteOnboardingFlow", () => {
   it("continues from the post-auth accept step and submits the assigned invite roles", async () => {
     const { InviteOnboardingFlow } = await import("./invite-onboarding-flow");
 
-    render(
-      <InviteOnboardingFlow hasInviteError={false} initialStep="accept" invite={invite} />,
-    );
+    render(<InviteOnboardingFlow hasInviteError={false} initialStep="accept" invite={invite} />);
 
     expect(screen.getByRole("button", { name: "Accept Workspace Invitation" })).toBeEnabled();
     expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();

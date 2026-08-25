@@ -4,6 +4,7 @@ from collections.abc import Iterator
 import pytest
 from labelos_database.base import Base
 from labelos_database.models import (
+    Capability,
     Department,
     MembershipDepartmentAccess,
     MembershipProfessionalRole,
@@ -12,7 +13,6 @@ from labelos_database.models import (
     OrganizationMembership,
     ProfessionalRole,
     Role,
-    Capability,
     RoleCapability,
     UniversalProfile,
     User,
