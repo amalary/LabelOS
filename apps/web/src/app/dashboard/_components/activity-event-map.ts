@@ -95,6 +95,71 @@ const activityEventMappers: Partial<Record<ActivityEventType, ActivityEventMappe
     description: `${actorName(event)} switched to ${entityName(event, "another organization")}`,
     tone: "organization",
   }),
+  "profile.created": (event) => ({
+    title: "Profile created",
+    description: `${actorName(event)} created a profile`,
+    tone: "team",
+  }),
+  "profile.updated": (event) => ({
+    title: "Profile updated",
+    description: `${actorName(event)} updated a profile`,
+    tone: "team",
+  }),
+  "profile.roles_updated": (event) => ({
+    title: "Profile roles updated",
+    description: `${actorName(event)} updated profile roles`,
+    tone: "team",
+  }),
+  "profile.membership_updated": (event) => ({
+    title: "Profile membership updated",
+    description: `${actorName(event)} updated workspace membership`,
+    tone: "team",
+  }),
+  "profile.artist_updated": (event) => ({
+    title: "Artist profile updated",
+    description: `${entityName(event, "An artist profile")} was updated`,
+    tone: "artist",
+  }),
+  "profile.role_added": (event) => ({
+    title: "Profile role added",
+    description: `${actorName(event)} added ${textValue(event.payload, ["role", "roleKey"], "a role")} to a profile`,
+    tone: "team",
+  }),
+  "profile.role_removed": (event) => ({
+    title: "Profile role removed",
+    description: `${actorName(event)} removed ${textValue(event.payload, ["role", "roleKey"], "a role")} from a profile`,
+    tone: "team",
+  }),
+  "profile.workspace_joined": (event) => ({
+    title: "Profile joined workspace",
+    description: `${actorName(event)} joined the workspace`,
+    tone: "team",
+  }),
+  "profile.workspace_left": (event) => ({
+    title: "Profile left workspace",
+    description: `${actorName(event)} left the workspace`,
+    tone: "team",
+  }),
+  "profile.artist_profile_created": (event) => ({
+    title: "Artist profile created",
+    description: `${entityName(event, "An artist profile")} was created`,
+    tone: "artist",
+  }),
+  "profile.artist_profile_updated": (event) => ({
+    title: "Artist profile updated",
+    description: `${entityName(event, "An artist profile")} was updated`,
+    tone: "artist",
+  }),
+  "invitation.sent": (event) => ({
+    title: "Invitation sent",
+    description: `${actorName(event)} sent a workspace invitation`,
+    tone: "team",
+  }),
+  "invitation.accepted": (event) => ({
+    title: "Invitation accepted",
+    description: `${actorName(event)} accepted a workspace invitation`,
+    tone: "team",
+  }),
   "member.invited": (event) => ({
     title: "Member invited",
     description: `${textValue(event.payload, ["email", "memberEmail", "displayName"], "A teammate")} was invited`,

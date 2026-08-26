@@ -675,6 +675,8 @@ def test_active_workspace_uses_workos_organization_membership() -> None:
     )
 
     assert context.active_workspace_id == active_organization_id
+    assert context.active_membership is not None
+    assert context.active_membership.workspace_id == active_organization_id
     assert context.workspace_memberships == context.memberships
     assert require_active_workspace_id(context) == active_organization_id
 

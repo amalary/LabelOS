@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 from labelos_database.config import DatabaseSettings
 from labelos_database.departments import (
@@ -14,6 +16,7 @@ from labelos_database.models import (
     AIAgent,
     AnalyticsEvent,
     Artist,
+    ArtistProfile,
     AuthIdentity,
     Campaign,
     Contract,
@@ -52,6 +55,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+REPO_ROOT = Path(__file__).resolve().parents[3]
+
 
 def test_database_url_accepts_standard_postgres_scheme() -> None:
     settings = DatabaseSettings(
@@ -72,6 +77,7 @@ def test_foundational_models_are_registered() -> None:
         ProfessionalRole.__tablename__,
         Department.__tablename__,
         Artist.__tablename__,
+        ArtistProfile.__tablename__,
         Release.__tablename__,
         Campaign.__tablename__,
         Contract.__tablename__,
@@ -102,6 +108,7 @@ def test_foundational_models_are_registered() -> None:
         "professional_roles",
         "departments",
         "artists",
+        "artist_profiles",
         "releases",
         "campaigns",
         "contracts",
@@ -198,6 +205,67 @@ def test_universal_profiles_define_user_profile_contract() -> None:
     assert UniversalProfile.attributes.property.uselist is True
     assert UniversalProfile.links.property.uselist is True
     assert UniversalProfile.preference.property.uselist is False
+    assert UniversalProfile.artist_profiles.property.uselist is True
+
+
+def test_artist_profiles_define_domain_extension_contract() -> None:
+    table = ArtistProfile.__table__
+    constraint_names = {constraint.name for constraint in table.constraints}
+    index_names = {index.name for index in table.indexes}
+    foreign_key_deletions = {
+        foreign_key.parent.name: foreign_key.ondelete
+        for foreign_key in table.foreign_keys
+    }
+
+    assert "artist_id" in table.columns
+    assert "universal_profile_id" in table.columns
+    assert "stage_name" in table.columns
+    assert "genres" in table.columns
+    assert "influences" in table.columns
+    assert "biography" not in table.columns
+    assert "imagery" in table.columns
+    assert "dsp_links" in table.columns
+    assert "catalog_references" in table.columns
+    assert "creative_metadata" in table.columns
+    assert "career_stage" in table.columns
+    assert "audience" in table.columns
+    assert "preferences" in table.columns
+    assert "uq_artist_profiles_artist_id" in constraint_names
+    assert "ix_artist_profiles_artist_id" in index_names
+    assert "ix_artist_profiles_universal_profile_id" in index_names
+    assert "ix_artist_profiles_stage_name" in index_names
+    assert "ix_artist_profiles_career_stage" in index_names
+    assert table.c.universal_profile_id.nullable is False
+    assert foreign_key_deletions == {
+        "artist_id": "CASCADE",
+        "universal_profile_id": "CASCADE",
+    }
+    assert table.c.genres.server_default is not None
+    assert table.c.imagery.server_default is not None
+    assert Artist.profile.property.uselist is False
+    assert ArtistProfile.artist.property.uselist is False
+    assert ArtistProfile.universal_profile.property.uselist is False
+
+
+def test_artist_profile_migrations_do_not_delete_unlinked_catalog_data() -> None:
+    artist_profile_migration = (
+        REPO_ROOT
+        / "packages/database/alembic/versions/202608250200_artist_profiles.py"
+    ).read_text()
+    module_architecture_migration = (
+        REPO_ROOT / "packages/database/alembic/versions"
+        / "202608250300_profile_module_architecture.py"
+    ).read_text()
+
+    assert "SELECT id, name FROM artists" not in artist_profile_migration
+    assert "DELETE FROM artist_profiles" not in module_architecture_migration
+    assert "universal_profile_id IS NULL" in module_architecture_migration
+    assert "Cannot make artist_profiles.universal_profile_id non-null" in (
+        module_architecture_migration
+    )
+    assert "SET biography = (" in (
+        module_architecture_migration
+    )
 
 
 def test_profile_attributes_define_extensible_profile_metadata() -> None:
@@ -312,6 +380,7 @@ def test_workspace_memberships_define_profile_workspace_contract() -> None:
     assert "joined_at" in table.columns
     assert "created_at" in table.columns
     assert "updated_at" in table.columns
+    assert "user_id" not in table.columns
     assert "uq_workspace_memberships_workspace_id_profile_id" in constraint_names
     assert "uq_workspace_memberships_organization_membership_id" in constraint_names
     assert "ix_workspace_memberships_workspace_id" in index_names
@@ -539,6 +608,7 @@ def test_workspace_membership_derives_capabilities_from_assigned_roles() -> None
 
         assert membership.role_keys == ("legal",)
         assert membership.capability_keys == ("contract.approve",)
+    engine.dispose()
 
 
 def test_universal_profile_creation_and_relationship() -> None:
@@ -563,6 +633,54 @@ def test_universal_profile_creation_and_relationship() -> None:
         assert profile.user == user
         assert profile.profile_status == "active"
         assert profile.onboarding_status == "not_started"
+    engine.dispose()
+
+
+def test_artist_profile_extends_universal_profile_without_replacing_artist() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    ArtistProfile.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        owner = User(email="owner@example.com")
+        universal_profile = UniversalProfile(
+            user=User(email="artist@example.com"),
+            display_name="Legal Name",
+            slug="artist-legal-profile",
+            primary_email="artist@example.com",
+        )
+        organization = Organization(
+            name="Example Label",
+            slug="example-label",
+            owner=owner,
+        )
+        artist = Artist(name="Legacy Artist Name", organization=organization)
+        artist_profile = ArtistProfile(
+            artist=artist,
+            universal_profile=universal_profile,
+            stage_name="Stage Name",
+            genres=["pop", "dance"],
+            influences=["classic disco"],
+            imagery={"avatar": "https://cdn.example.com/artist.jpg"},
+            dsp_links={"spotify": "https://open.spotify.com/artist/example"},
+            catalog_references=["cat-001"],
+            creative_metadata={"mood": "bright"},
+            career_stage="emerging",
+            audience={"markets": ["US"]},
+            preferences={"release_cadence": "monthly"},
+        )
+        session.add(artist_profile)
+        session.commit()
+        session.refresh(artist)
+        session.refresh(universal_profile)
+
+        assert artist.name == "Legacy Artist Name"
+        assert artist.profile == artist_profile
+        assert artist.profile.stage_name == "Stage Name"
+        assert artist.profile.genres == ["pop", "dance"]
+        assert universal_profile.display_name == "Legal Name"
+        assert universal_profile.artist_profiles == [artist_profile]
+        assert universal_profile.profile_modules == {"artist": [artist_profile]}
+    engine.dispose()
 
 
 def test_universal_profiles_enforce_one_profile_per_user() -> None:
@@ -580,6 +698,7 @@ def test_universal_profiles_enforce_one_profile_per_user() -> None:
 
         with pytest.raises(IntegrityError):
             session.commit()
+    engine.dispose()
 
 
 def test_universal_profiles_enforce_unique_slug() -> None:
@@ -602,6 +721,7 @@ def test_universal_profiles_enforce_unique_slug() -> None:
 
         with pytest.raises(IntegrityError):
             session.commit()
+    engine.dispose()
 
 
 def test_organizations_define_workos_external_identifier_index() -> None:
@@ -863,6 +983,7 @@ def test_role_department_relationship_is_not_authorization() -> None:
         assert role.department_links[0].department.key == "marketing"
         assert role.department_links[0].access_level == "responsibility"
         assert "permission" not in RoleDepartment.__table__.columns
+    engine.dispose()
 
 
 def test_membership_professional_roles_define_many_to_many_assignment() -> None:

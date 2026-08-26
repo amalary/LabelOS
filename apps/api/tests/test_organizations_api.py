@@ -48,8 +48,10 @@ class SeededOrganizations:
     member_membership_id: UUID
     joiner_id: UUID
     artist_role_id: UUID
+    manager_role_id: UUID
     producer_role_id: UUID
     ar_role_id: UUID
+    legal_role_id: UUID
 
 
 @pytest.fixture
@@ -134,10 +136,22 @@ def organizations_client(
                 description="Producer role.",
                 system_role=True,
             )
+            workspace_manager_role = Role(
+                key="manager",
+                display_name="Manager",
+                description="Manager role.",
+                system_role=True,
+            )
             workspace_ar_role = Role(
                 key="a&r",
                 display_name="A&R",
                 description="A&R role.",
+                system_role=True,
+            )
+            workspace_legal_role = Role(
+                key="legal",
+                display_name="Legal",
+                description="Legal role.",
                 system_role=True,
             )
             owner_membership = OrganizationMembership(
@@ -181,7 +195,9 @@ def organizations_client(
                     songwriter_role,
                     workspace_artist_role,
                     workspace_producer_role,
+                    workspace_manager_role,
                     workspace_ar_role,
+                    workspace_legal_role,
                     owner_membership,
                     member_membership,
                     MembershipProfessionalRole(
@@ -256,8 +272,10 @@ def organizations_client(
                 member_membership_id=member_membership.id,
                 joiner_id=joiner.id,
                 artist_role_id=workspace_artist_role.id,
+                manager_role_id=workspace_manager_role.id,
                 producer_role_id=workspace_producer_role.id,
                 ar_role_id=workspace_ar_role.id,
+                legal_role_id=workspace_legal_role.id,
             )
 
     seeded = asyncio.run(prepare_database())
@@ -284,6 +302,8 @@ def _set_context(
     role_for_org_a: MembershipRole = MembershipRole.owner,
     role_for_org_b: MembershipRole = MembershipRole.member,
     permissions: tuple[str, ...] = ("organization:manage", "members:manage"),
+    capability_permissions: tuple[str, ...] = (),
+    role_capabilities: tuple[str, ...] = (),
 ) -> None:
     memberships = [
         MembershipContext(
@@ -292,6 +312,8 @@ def _set_context(
             organization_slug="alpha-label",
             workos_organization_id="org_ALPHA",
             role=role_for_org_a,
+            capability_permissions=capability_permissions,
+            role_capabilities=role_capabilities,
         ),
         MembershipContext(
             organization_id=seeded.org_b_id,
@@ -801,10 +823,23 @@ def test_assign_and_list_multiple_workspace_roles(
     events = asyncio.run(_realtime_events(sessionmaker, seeded.org_a_id))
     assert [event.event_type for event in events] == [
         "member.role_changed",
+        "profile.role_added",
+        "profile.roles_updated",
         "member.role_changed",
+        "profile.role_added",
+        "profile.roles_updated",
     ]
     assert events[0].payload["action"] == "assigned"
     assert events[0].payload["roleKey"] == "artist"
+    assert events[1].entity_type == "profile"
+    assert events[1].payload["workspaceId"] == str(seeded.org_a_id)
+    assert events[1].payload["roleKey"] == "artist"
+    assert events[2].entity_type == "profile"
+    assert events[2].payload["workspaceId"] == str(seeded.org_a_id)
+    assert events[2].payload["roleKey"] == "artist"
+    assert events[2].payload["action"] == "assigned"
+    assert "member@example.com" not in str(events[1].payload)
+    assert "member@example.com" not in str(events[2].payload)
 
 
 def test_duplicate_workspace_role_assignment_is_rejected(
@@ -839,6 +874,140 @@ def test_duplicate_workspace_role_assignment_is_rejected(
     ) == ["artist"]
 
 
+def test_assign_workspace_role_requires_labelos_role_assign_capability(
+    organizations_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededOrganizations,
+    ],
+) -> None:
+    client, _sessionmaker, seeded = organizations_client
+    _set_context(
+        client,
+        seeded,
+        role_for_org_a=MembershipRole.member,
+        permissions=("members:manage",),
+    )
+
+    denied_response = client.post(
+        f"/api/v1/organizations/{seeded.org_a_id}/members/"
+        f"{seeded.member_membership_id}/roles",
+        json={"role_id": str(seeded.artist_role_id)},
+    )
+
+    _set_context(
+        client,
+        seeded,
+        role_for_org_a=MembershipRole.member,
+        permissions=(),
+        capability_permissions=("role.assign",),
+    )
+    allowed_response = client.post(
+        f"/api/v1/organizations/{seeded.org_a_id}/members/"
+        f"{seeded.member_membership_id}/roles",
+        json={"role_id": str(seeded.artist_role_id)},
+    )
+
+    assert denied_response.status_code == 403
+    assert denied_response.json() == {"detail": "Insufficient capability permission"}
+    assert allowed_response.status_code == 201
+
+
+def test_assign_workspace_role_rejects_self_escalation(
+    organizations_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededOrganizations,
+    ],
+) -> None:
+    client, sessionmaker, seeded = organizations_client
+    _set_context(client, seeded)
+
+    async def owner_membership_id() -> UUID:
+        async with sessionmaker() as session:
+            membership_id = await session.scalar(
+                select(OrganizationMembership.id)
+                .where(OrganizationMembership.organization_id == seeded.org_a_id)
+                .where(OrganizationMembership.user_id == seeded.user_id)
+            )
+            assert membership_id is not None
+            return membership_id
+
+    response = client.post(
+        f"/api/v1/organizations/{seeded.org_a_id}/members/"
+        f"{asyncio.run(owner_membership_id())}/roles",
+        json={"role_id": str(seeded.legal_role_id)},
+    )
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Cannot assign workspace roles to yourself"}
+
+
+def test_assign_workspace_role_rejects_removed_target_membership(
+    organizations_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededOrganizations,
+    ],
+) -> None:
+    client, sessionmaker, seeded = organizations_client
+    _set_context(client, seeded)
+
+    async def remove_member() -> None:
+        async with sessionmaker() as session:
+            membership = await session.get(
+                OrganizationMembership,
+                seeded.member_membership_id,
+            )
+            assert membership is not None
+            membership.status = "removed"
+            await session.commit()
+
+    asyncio.run(remove_member())
+
+    response = client.post(
+        f"/api/v1/organizations/{seeded.org_a_id}/members/"
+        f"{seeded.member_membership_id}/roles",
+        json={"role_id": str(seeded.artist_role_id)},
+    )
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Not found"}
+
+
+def test_assign_workspace_role_rechecks_removed_actor_membership(
+    organizations_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededOrganizations,
+    ],
+) -> None:
+    client, sessionmaker, seeded = organizations_client
+    _set_context(client, seeded)
+
+    async def remove_actor() -> None:
+        async with sessionmaker() as session:
+            membership = await session.scalar(
+                select(OrganizationMembership)
+                .where(OrganizationMembership.organization_id == seeded.org_a_id)
+                .where(OrganizationMembership.user_id == seeded.user_id)
+            )
+            assert membership is not None
+            membership.status = "removed"
+            await session.commit()
+
+    asyncio.run(remove_actor())
+
+    response = client.post(
+        f"/api/v1/organizations/{seeded.org_a_id}/members/"
+        f"{seeded.member_membership_id}/roles",
+        json={"role_id": str(seeded.artist_role_id)},
+    )
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Not found"}
+
+
 def test_workspace_role_assignments_can_differ_between_workspaces(
     organizations_client: tuple[
         TestClient,
@@ -851,13 +1020,20 @@ def test_workspace_role_assignments_can_differ_between_workspaces(
 
     async def beta_membership_id() -> UUID:
         async with sessionmaker() as session:
-            membership_id = await session.scalar(
-                select(OrganizationMembership.id)
-                .where(OrganizationMembership.organization_id == seeded.org_b_id)
-                .where(OrganizationMembership.user_id == seeded.user_id)
+            organization = await session.get(Organization, seeded.org_b_id)
+            assert organization is not None
+            beta_member = User(
+                email="beta-member@example.com",
+                display_name="Beta Member",
             )
-            assert membership_id is not None
-            return membership_id
+            membership = OrganizationMembership(
+                organization=organization,
+                user=beta_member,
+                role=MembershipRole.member,
+            )
+            session.add(membership)
+            await session.commit()
+            return membership.id
 
     beta_member_id = asyncio.run(beta_membership_id())
     client.post(
@@ -910,8 +1086,23 @@ def test_remove_workspace_role_keeps_universal_profile_and_publishes_activity(
     )
     assert asyncio.run(_universal_profile_count(sessionmaker)) == profile_count
     events = asyncio.run(_realtime_events(sessionmaker, seeded.org_a_id))
-    assert [event.payload["action"] for event in events] == ["assigned", "removed"]
-    assert events[-1].event_type == "member.role_changed"
+    member_role_events = [
+        event for event in events if event.event_type == "member.role_changed"
+    ]
+    profile_role_events = [
+        event
+        for event in events
+        if event.event_type in {"profile.role_added", "profile.role_removed"}
+    ]
+    assert [event.payload["action"] for event in member_role_events] == [
+        "assigned",
+        "removed",
+    ]
+    assert [event.event_type for event in profile_role_events] == [
+        "profile.role_added",
+        "profile.role_removed",
+    ]
+    assert profile_role_events[-1].payload["roleKey"] == "artist"
 
 
 def test_cross_organization_members_returns_not_found(
@@ -937,7 +1128,7 @@ def test_create_workspace_invite_returns_general_join_link(
         SeededOrganizations,
     ],
 ) -> None:
-    client, _sessionmaker, seeded = organizations_client
+    client, sessionmaker, seeded = organizations_client
     _set_context(client, seeded)
 
     response = client.post(
@@ -968,6 +1159,7 @@ def test_create_workspace_invite_returns_general_join_link(
     assert body["join_path"] == f"/join/{body['token']}"
     assert body["email"] == "sarah@example.com"
     assert body["professional_roles"] == ["Legal", "Management"]
+    assert body["workspace_roles"] == ["legal", "manager"]
     assert body["proposed_department_access"] == [
         "legal",
         "contracts",
@@ -978,6 +1170,19 @@ def test_create_workspace_invite_returns_general_join_link(
         "marketing",
         "analytics",
     ]
+    events = asyncio.run(_realtime_events(sessionmaker, seeded.org_a_id))
+    assert len(events) == 1
+    event = events[0]
+    assert event.event_type == "invitation.sent"
+    assert event.actor_user_id == seeded.user_id
+    assert event.entity_type == "invitation"
+    assert event.entity_id == body["id"]
+    assert event.created_at is not None
+    assert event.payload["inviteId"] == body["id"]
+    assert event.payload["workspaceId"] == str(seeded.org_a_id)
+    assert event.payload["professionalRoles"] == ["Legal", "Management"]
+    assert "sarah@example.com" not in str(event.payload)
+    assert body["token"] not in str(event.payload)
 
 
 def test_create_workspace_invite_accepts_explicit_department_access(
@@ -1031,7 +1236,82 @@ def test_create_workspace_invite_requires_member_management(
     response = client.post(f"/api/v1/organizations/{seeded.org_a_id}/invites", json={})
 
     assert response.status_code == 403
-    assert response.json() == {"detail": "Insufficient organization role"}
+    assert response.json() == {"detail": "Insufficient capability permission"}
+
+
+def test_create_workspace_invite_allows_member_with_invite_capability(
+    organizations_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededOrganizations,
+    ],
+) -> None:
+    client, _sessionmaker, seeded = organizations_client
+    _set_context(
+        client,
+        seeded,
+        role_for_org_a=MembershipRole.member,
+        capability_permissions=("member.invite",),
+    )
+
+    response = client.post(
+        f"/api/v1/organizations/{seeded.org_a_id}/invites",
+        json={"email": "capability-inviter@example.com"},
+    )
+
+    assert response.status_code == 201
+    assert response.json()["email"] == "capability-inviter@example.com"
+
+
+def test_create_workspace_invite_requires_role_assign_for_selected_roles(
+    organizations_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededOrganizations,
+    ],
+) -> None:
+    client, _sessionmaker, seeded = organizations_client
+    _set_context(
+        client,
+        seeded,
+        role_for_org_a=MembershipRole.member,
+        capability_permissions=("member.invite",),
+    )
+
+    response = client.post(
+        f"/api/v1/organizations/{seeded.org_a_id}/invites",
+        json={"email": "artist@example.com", "professional_roles": ["Artist"]},
+    )
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Insufficient capability permission"}
+
+
+def test_duplicate_active_workspace_invite_for_email_is_rejected(
+    organizations_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededOrganizations,
+    ],
+) -> None:
+    client, _sessionmaker, seeded = organizations_client
+    _set_context(client, seeded)
+    payload = {"email": "duplicate@example.com", "professional_roles": ["Artist"]}
+
+    first_response = client.post(
+        f"/api/v1/organizations/{seeded.org_a_id}/invites",
+        json=payload,
+    )
+    duplicate_response = client.post(
+        f"/api/v1/organizations/{seeded.org_a_id}/invites",
+        json={"email": "DUPLICATE@example.com", "professional_roles": ["Legal"]},
+    )
+
+    assert first_response.status_code == 201
+    assert duplicate_response.status_code == 409
+    assert duplicate_response.json() == {
+        "detail": "An active invite already exists for this email"
+    }
 
 
 def test_get_workspace_invite_returns_public_invite_fields(
@@ -1071,6 +1351,7 @@ def test_get_workspace_invite_returns_public_invite_fields(
     assert body["status"] == "active"
     assert body["email"] is None
     assert body["professional_roles"] == []
+    assert body["workspace_roles"] == []
     assert body["proposed_department_access"] == []
 
 
@@ -1165,6 +1446,100 @@ def test_accept_workspace_invite_assigns_invitation_professional_roles(
         _membership_professional_roles(sessionmaker, membership_id)
     )
     assert professional_roles == ["Legal", "Management"]
+    assert asyncio.run(_workspace_role_keys(sessionmaker, membership_id)) == [
+        "legal",
+        "manager",
+    ]
+    events = asyncio.run(_realtime_events(sessionmaker, seeded.org_a_id))
+    assert [event.event_type for event in events] == [
+        "invitation.sent",
+        "profile.created",
+        "profile.workspace_joined",
+        "profile.membership_updated",
+        "invitation.accepted",
+        "member.joined",
+        "profile.roles_updated",
+    ]
+    assert events[1].entity_type == "profile"
+    assert events[1].payload["workspaceId"] == str(seeded.org_a_id)
+    assert events[2].payload["profileId"] == events[1].payload["profileId"]
+    assert events[3].payload["profileId"] == events[1].payload["profileId"]
+    assert events[3].payload["status"] == "active"
+    assert events[4].payload["profileId"] == events[1].payload["profileId"]
+    assert "sarah@example.com" not in str(events[3].payload)
+    assert "sarah@example.com" not in str(events[4].payload)
+    assert events[-2].event_type == "member.joined"
+    assert events[-2].payload["professionalRoles"] == ["Legal", "Management"]
+    assert [role["key"] for role in events[-2].payload["workspaceRoles"]] == [
+        "legal",
+        "manager",
+    ]
+    assert events[-1].payload["professionalRoles"] == ["Legal", "Management"]
+
+
+def test_accept_workspace_invite_for_existing_user_adds_second_workspace_roles(
+    organizations_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededOrganizations,
+    ],
+) -> None:
+    client, sessionmaker, seeded = organizations_client
+    _set_context(
+        client,
+        seeded,
+        active_organization_id=seeded.org_b_id,
+        role_for_org_b=MembershipRole.admin,
+    )
+    invite_response = client.post(
+        f"/api/v1/organizations/{seeded.org_b_id}/invites",
+        json={
+            "email": "joiner@example.com",
+            "professional_roles": ["Artist", "Producer"],
+            "maximum_uses": 1,
+        },
+    )
+    token = invite_response.json()["token"]
+    _set_joiner_context(client, seeded)
+
+    response = client.post(f"/api/v1/organizations/invites/{token}/accept")
+
+    assert response.status_code == 200
+    membership_id = UUID(response.json()["membership_id"])
+    assert response.json()["workspace"]["id"] == str(seeded.org_b_id)
+    assert asyncio.run(_workspace_role_keys(sessionmaker, membership_id)) == [
+        "artist",
+        "producer",
+    ]
+
+
+def test_accept_workspace_invite_is_idempotent_for_existing_active_member(
+    organizations_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededOrganizations,
+    ],
+) -> None:
+    client, sessionmaker, seeded = organizations_client
+    _set_context(client, seeded)
+    invite_response = client.post(
+        f"/api/v1/organizations/{seeded.org_a_id}/invites",
+        json={
+            "email": "joiner@example.com",
+            "professional_roles": ["Artist"],
+            "maximum_uses": 2,
+        },
+    )
+    token = invite_response.json()["token"]
+    _set_joiner_context(client, seeded)
+
+    first_response = client.post(f"/api/v1/organizations/invites/{token}/accept")
+    second_response = client.post(f"/api/v1/organizations/invites/{token}/accept")
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 200
+    membership_id = UUID(second_response.json()["membership_id"])
+    assert asyncio.run(_workspace_role_keys(sessionmaker, membership_id)) == ["artist"]
 
 
 def test_accept_workspace_invite_grants_invitation_department_access(

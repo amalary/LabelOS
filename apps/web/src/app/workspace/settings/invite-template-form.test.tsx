@@ -7,53 +7,85 @@ vi.mock("./actions", () => ({
 }));
 
 describe("InviteTemplateForm", () => {
-  it("starts from the artist preset", async () => {
-    const { InviteTemplateForm } = await import("./invite-template-form");
-
-    render(<InviteTemplateForm organizationId="org_01" />);
-
-    expect(screen.getByRole("button", { name: /^Artist/ })).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByRole("checkbox", { name: "Role Artist" })).toBeChecked();
-    expect(screen.getByRole("checkbox", { name: "Department Creative" })).toBeChecked();
-    expect(screen.getByRole("checkbox", { name: "Department Releases" })).toBeChecked();
-    expect(screen.getByRole("checkbox", { name: "Department Analytics" })).toBeChecked();
-  });
-
-  it("applies a template while leaving roles and departments customizable", async () => {
+  it("opens a role-aware invitation dialog with friendly role explanations", async () => {
     const user = userEvent.setup();
     const { InviteTemplateForm } = await import("./invite-template-form");
 
-    render(<InviteTemplateForm organizationId="org_01" />);
+    render(<InviteTemplateForm canAssignInviteRoles canInviteMembers organizationId="org_01" />);
 
-    await user.click(screen.getByRole("button", { name: /^Producer/ }));
+    await user.click(screen.getByRole("button", { name: "Invite person" }));
 
-    expect(screen.getByRole("checkbox", { name: "Role Producer" })).toBeChecked();
-    expect(screen.getByRole("checkbox", { name: "Department Production" })).toBeChecked();
-    expect(screen.getByRole("checkbox", { name: "Department Songs" })).toBeChecked();
-    expect(screen.getByRole("checkbox", { name: "Department Sessions" })).toBeChecked();
-    expect(screen.getByRole("checkbox", { name: "Department Credits" })).toBeChecked();
-    expect(screen.getByRole("checkbox", { name: "Role Artist" })).not.toBeChecked();
-
-    await user.click(screen.getByRole("checkbox", { name: "Role Artist" }));
-    await user.click(screen.getByRole("checkbox", { name: "Department Credits" }));
-
+    expect(screen.getByRole("dialog", { name: "Invite person" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Email")).toHaveAttribute("placeholder", "sarah@example.com");
     expect(screen.getByRole("checkbox", { name: "Role Artist" })).toBeChecked();
-    expect(screen.getByRole("checkbox", { name: "Department Credits" })).not.toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "Role Manager" })).not.toBeChecked();
+    expect(screen.getByText("For campaign, launch, and audience growth work.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Send invitation" })).toBeEnabled();
   });
 
-  it("marks the legal template as sensitive access", async () => {
+  it("allows one or more invited roles", async () => {
     const user = userEvent.setup();
     const { InviteTemplateForm } = await import("./invite-template-form");
 
-    render(<InviteTemplateForm organizationId="org_01" />);
+    render(<InviteTemplateForm canAssignInviteRoles canInviteMembers organizationId="org_01" />);
 
-    await user.click(screen.getByRole("button", { name: /^Legal/ }));
+    await user.click(screen.getByRole("button", { name: "Invite person" }));
+    await user.click(screen.getByRole("checkbox", { name: "Role Manager" }));
+    await user.click(screen.getByRole("checkbox", { name: "Role Legal" }));
 
-    expect(screen.getByText("Sensitive access: Requires approval")).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "Role Artist" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "Role Manager" })).toBeChecked();
     expect(screen.getByRole("checkbox", { name: "Role Legal" })).toBeChecked();
-    expect(screen.getByRole("checkbox", { name: "Department Contracts" })).toBeChecked();
+  });
+
+  it("disables invitation entry when the member cannot invite people", async () => {
+    const { InviteTemplateForm } = await import("./invite-template-form");
+
+    render(
+      <InviteTemplateForm
+        canAssignInviteRoles={false}
+        canInviteMembers={false}
+        organizationId="org_01"
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Invite person" })).toBeDisabled();
     expect(
-      screen.getByRole("checkbox", { name: "Department Agreement Reviews" }),
-    ).not.toBeChecked();
+      screen.getByText("Ask a workspace owner or admin to invite new people."),
+    ).toBeInTheDocument();
+  });
+
+  it("shows role assignment as unavailable without exposing capability names", async () => {
+    const user = userEvent.setup();
+    const { InviteTemplateForm } = await import("./invite-template-form");
+
+    render(
+      <InviteTemplateForm canAssignInviteRoles={false} canInviteMembers organizationId="org_01" />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Invite person" }));
+
+    expect(screen.getByRole("checkbox", { name: "Role Artist" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Send invitation" })).toBeDisabled();
+    expect(
+      screen.getByText("Ask a workspace owner or admin to choose starting roles for invitees."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/role\.assign|member\.invite/)).not.toBeInTheDocument();
+  });
+
+  it("renders the success state with an invite link", async () => {
+    const { InviteTemplateForm } = await import("./invite-template-form");
+
+    render(
+      <InviteTemplateForm
+        canAssignInviteRoles
+        canInviteMembers
+        initialInviteLink="http://localhost:3000/join/token_01"
+        organizationId="org_01"
+      />,
+    );
+
+    expect(screen.getByText("Invitation ready")).toBeInTheDocument();
+    expect(screen.getByText("http://localhost:3000/join/token_01")).toBeInTheDocument();
   });
 });

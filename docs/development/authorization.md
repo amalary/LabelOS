@@ -65,13 +65,19 @@ Authorization decisions should use this layered model:
 
 ```text
 Universal Profile
--> active Workspace Membership
+-> active Workspace Membership by workspace_id
 -> Workspace Roles
 -> Role Capabilities
 + explicit Membership Capability Permission
 + Department Access for resource-scoped actions
 = Authorization
 ```
+
+Workspace authorization code should compare requested scopes through
+`workspace_id` rather than assuming the current WorkOS organization-backed
+storage model is the permanent enterprise shape. See
+`docs/development/enterprise-hierarchy-extension.md` for the hierarchy extension
+boundary.
 
 Application code should not inline access rules such as
 `user.role == "legal"` or department-specific role checks. Backend access
@@ -89,7 +95,7 @@ authorization_service.can(
 Frontend helpers expose the same convention for presentation-only decisions:
 
 ```ts
-can(subject, workspace, capabilities.contractEdit, { department: "legal" });
+can(subject, workspace, capabilities.contractUpload, { department: "legal" });
 ```
 
 ## Departments
@@ -262,10 +268,10 @@ Capability example:
 async def create_contract_example(
     _context: Annotated[
         CurrentUserContext,
-        Depends(require_capability(Capability.contract_create, department="legal")),
+        Depends(require_capability(Capability.contract_upload, department="legal")),
     ],
 ) -> ProtectedRouteResponse:
-    return ProtectedRouteResponse(ok=True, guard="contract.create")
+    return ProtectedRouteResponse(ok=True, guard="contract.upload")
 ```
 
 ## Frontend Helpers

@@ -17,6 +17,7 @@ from labelos_database.models import (
     Organization,
     OrganizationMembership,
     ProfessionalRole,
+    RealtimeEvent,
     UniversalProfile,
     User,
     WebhookEvent,
@@ -113,6 +114,19 @@ async def _scalar(
 ):
     async with sessionmaker() as session:
         return await session.scalar(statement)
+
+
+async def _realtime_events(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    organization_id,
+) -> list[RealtimeEvent]:
+    async with sessionmaker() as session:
+        rows = await session.scalars(
+            select(RealtimeEvent)
+            .where(RealtimeEvent.organization_id == organization_id)
+            .order_by(RealtimeEvent.created_at.asc(), RealtimeEvent.id.asc())
+        )
+        return list(rows.all())
 
 
 async def _membership_with_roles(
@@ -348,6 +362,29 @@ def test_workos_webhook_synchronizes_membership_event(
     assert workspace_membership.profile.primary_email == "ada@example.com"
     assert workspace_membership.organization_membership_id == membership.id
     assert workspace_membership.status == "active"
+    events = asyncio.run(_realtime_events(sessionmaker, membership.organization_id))
+    assert [event.event_type for event in events] == [
+        "profile.created",
+        "profile.workspace_joined",
+        "profile.membership_updated",
+        "profile.roles_updated",
+    ]
+    assert events[0].entity_type == "profile"
+    assert events[0].entity_id == str(workspace_membership.profile_id)
+    assert events[0].actor_user_id is None
+    assert events[0].created_at is not None
+    assert events[1].payload["profileId"] == str(workspace_membership.profile_id)
+    assert events[1].payload["workspaceId"] == str(membership.organization_id)
+    assert events[1].payload["status"] == "active"
+    assert events[2].payload["profileId"] == str(workspace_membership.profile_id)
+    assert events[2].payload["workspaceId"] == str(membership.organization_id)
+    assert events[2].payload["status"] == "active"
+    assert events[3].payload["profileId"] == str(workspace_membership.profile_id)
+    assert events[3].payload["professionalRoles"] == ["A&R", "Product Manager"]
+    assert "ada@example.com" not in str(events[0].payload)
+    assert "ada@example.com" not in str(events[1].payload)
+    assert "ada@example.com" not in str(events[2].payload)
+    assert "ada@example.com" not in str(events[3].payload)
 
 
 def test_workos_webhook_requests_department_access_from_professional_roles(
@@ -390,6 +427,55 @@ def test_workos_webhook_requests_department_access_from_professional_roles(
         "marketing",
     )
     assert membership.pending_department_access == ()
+
+
+def test_workos_webhook_membership_delete_publishes_workspace_left_activity(
+    webhook_client: tuple[TestClient, async_sessionmaker[AsyncSession]],
+) -> None:
+    client, sessionmaker = webhook_client
+    create_body = _event(
+        "organization_membership.created",
+        {
+            "object": "organization_membership",
+            "id": "om_delete_activity",
+            "user_id": "user_01TEST",
+            "organization_id": "org_01TEST",
+            "organization_name": "Delete Activity Label",
+            "status": "active",
+            "role": {"slug": "member"},
+            "user": _user_data(email="left@example.com"),
+        },
+        event_id="event_delete_activity_create",
+    )
+    create_response = _post_webhook(client, create_body, _signature(create_body))
+    membership = asyncio.run(_membership_with_roles(sessionmaker, "om_delete_activity"))
+    assert create_response.status_code == 200
+    assert membership is not None
+
+    delete_body = _event(
+        "organization_membership.deleted",
+        {
+            "object": "organization_membership",
+            "id": "om_delete_activity",
+        },
+        event_id="event_delete_activity_delete",
+    )
+    delete_response = _post_webhook(client, delete_body, _signature(delete_body))
+
+    assert delete_response.status_code == 200
+    events = asyncio.run(_realtime_events(sessionmaker, membership.organization_id))
+    assert events[-2].event_type == "profile.workspace_left"
+    assert events[-1].event_type == "profile.membership_updated"
+    assert events[-2].entity_type == "profile"
+    assert events[-1].entity_type == "profile"
+    assert events[-2].payload["workspaceId"] == str(membership.organization_id)
+    assert events[-1].payload["workspaceId"] == str(membership.organization_id)
+    assert events[-2].payload["membershipId"] == str(membership.id)
+    assert events[-1].payload["membershipId"] == str(membership.id)
+    assert events[-2].payload["status"] == "removed"
+    assert events[-1].payload["status"] == "removed"
+    assert "left@example.com" not in str(events[-2].payload)
+    assert "left@example.com" not in str(events[-1].payload)
 
 
 def test_workos_webhook_separates_requested_roles_from_granted_access(

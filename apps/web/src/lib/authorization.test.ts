@@ -54,6 +54,18 @@ describe("frontend authorization helpers", () => {
     expect(canUseCapability(subject, capabilities.contractUpload, "production")).toBe(false);
   });
 
+  it("applies default capability departments when no resource department is provided", () => {
+    const subject = {
+      workspacePermission: "member",
+      departmentAccess: ["marketing"],
+      capabilities: [capabilities.contractUpload, capabilities.campaignCreate],
+    };
+
+    expect(hasCapability(subject, capabilities.contractUpload)).toBe(false);
+    expect(hasCapability(subject, capabilities.campaignCreate)).toBe(true);
+    expect(can(subject, null, capabilities.contractUpload, { department: "legal" })).toBe(false);
+  });
+
   it("uses can as the central authorization resolver", () => {
     const subject = {
       role: "member",

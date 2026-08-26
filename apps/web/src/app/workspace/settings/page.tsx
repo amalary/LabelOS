@@ -1,8 +1,9 @@
 import { redirect } from "next/navigation";
 
 import { AppShell } from "../../../components/app-shell";
+import { can, capabilities } from "../../../lib/authorization";
 import { requireDashboardSession } from "../../../lib/dashboard-session";
-import { getOrganizationSelection } from "../../../lib/organizations";
+import { getOrganizationSelection, type OrganizationSummary } from "../../../lib/organizations";
 import { InviteTemplateForm } from "./invite-template-form";
 
 type WorkspaceSettingsPageProps = {
@@ -17,6 +18,15 @@ function joinUrl(token: string): string {
   return new URL(`/join/${token}`, baseUrl).toString();
 }
 
+function workspaceSubject(activeOrganization: OrganizationSummary) {
+  return {
+    workspacePermission: activeOrganization.workspace_permission ?? activeOrganization.role,
+    role: activeOrganization.role,
+    departmentAccess: activeOrganization.department_access ?? [],
+    capabilities: activeOrganization.capability_permissions ?? [],
+  };
+}
+
 export default async function WorkspaceSettingsPage({ searchParams }: WorkspaceSettingsPageProps) {
   await requireDashboardSession();
   const params = await searchParams;
@@ -28,6 +38,9 @@ export default async function WorkspaceSettingsPage({ searchParams }: WorkspaceS
   }
 
   const inviteLink = params?.invite ? joinUrl(params.invite) : null;
+  const subject = activeOrganization ? workspaceSubject(activeOrganization) : null;
+  const canInviteMembers = subject ? can(subject, null, capabilities.memberInvite) : false;
+  const canAssignInviteRoles = subject ? can(subject, null, capabilities.roleAssign) : false;
 
   return (
     <AppShell>
@@ -57,14 +70,12 @@ export default async function WorkspaceSettingsPage({ searchParams }: WorkspaceS
               </p>
             </div>
 
-            <InviteTemplateForm organizationId={activeOrganization.id} />
-
-            {inviteLink ? (
-              <div className="grid gap-2 border border-emerald-200 bg-emerald-50 p-4">
-                <div className="text-sm font-semibold text-emerald-950">Invite link created</div>
-                <div className="break-all font-mono text-sm text-emerald-900">{inviteLink}</div>
-              </div>
-            ) : null}
+            <InviteTemplateForm
+              canAssignInviteRoles={canAssignInviteRoles}
+              canInviteMembers={canInviteMembers}
+              initialInviteLink={inviteLink}
+              organizationId={activeOrganization.id}
+            />
 
             {params?.inviteError ? (
               <div

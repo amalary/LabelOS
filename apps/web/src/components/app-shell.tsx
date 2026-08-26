@@ -5,6 +5,7 @@ import { getNavigationAuthState } from "./auth/auth-session";
 import { DashboardShellHeader } from "./dashboard-shell-header";
 import { OrganizationSwitcher } from "./organization-switcher";
 import { RealtimeWorkspaceSync } from "./realtime-workspace-sync";
+import { WorkspaceNavigation } from "./workspace-navigation";
 import { ApiClientError } from "../lib/api-client";
 import { getOrganizationSelection, type OrganizationSelection } from "../lib/organizations";
 import { OrganizationRealtimeProvider } from "../lib/realtime/use-organization-realtime";
@@ -41,33 +42,20 @@ export async function AppShell({ children }: AppShellProps) {
       >
         Skip to main content
       </a>
-      <div className="grid min-h-screen lg:grid-cols-[240px_1fr]">
-        <aside className="border-b border-white/70 bg-white/50 p-3 shadow-[inset_-1px_0_0_rgba(255,255,255,0.72)] backdrop-blur-xl sm:p-4 lg:border-b-0 lg:border-r lg:backdrop-blur-2xl">
-          <div className="flex items-center gap-3 rounded-[16px] border border-white/75 bg-white/65 p-3 shadow-[0_14px_44px_rgba(15,23,42,0.07)] sm:rounded-[20px]">
-            <span className="flex h-10 w-10 items-center justify-center rounded-[14px] bg-slate-950 text-xs font-semibold text-white">
-              LO
-            </span>
-            <div>
-              <div className="text-sm font-semibold text-slate-950">Label OS</div>
-              <div className="text-xs text-slate-500">Operations</div>
+      <ActiveWorkspaceProvider selection={organizationSelection}>
+        <div className="grid min-h-screen lg:grid-cols-[240px_1fr]">
+          <aside className="border-b border-white/70 bg-white/50 p-3 shadow-[inset_-1px_0_0_rgba(255,255,255,0.72)] backdrop-blur-xl sm:p-4 lg:border-b-0 lg:border-r lg:backdrop-blur-2xl">
+            <div className="flex items-center gap-3 rounded-[16px] border border-white/75 bg-white/65 p-3 shadow-[0_14px_44px_rgba(15,23,42,0.07)] sm:rounded-[20px]">
+              <span className="flex h-10 w-10 items-center justify-center rounded-[14px] bg-slate-950 text-xs font-semibold text-white">
+                LO
+              </span>
+              <div>
+                <div className="text-sm font-semibold text-slate-950">Label OS</div>
+                <div className="text-xs text-slate-500">Operations</div>
+              </div>
             </div>
-          </div>
-          <nav aria-label="Workspace" className="mt-4 grid gap-1">
-            <a
-              className="rounded-md px-3 py-2 text-sm font-medium text-slate-700 transition hover:bg-white/70 hover:text-slate-950 focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500"
-              href="/dashboard"
-            >
-              Dashboard
-            </a>
-            <a
-              className="rounded-md px-3 py-2 text-sm font-medium text-slate-700 transition hover:bg-white/70 hover:text-slate-950 focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500"
-              href="/workspace/settings"
-            >
-              Workspace Settings
-            </a>
-          </nav>
-        </aside>
-        <ActiveWorkspaceProvider selection={organizationSelection}>
+            <WorkspaceNavigation />
+          </aside>
           <OrganizationRealtimeProvider
             organizationId={organizationSelection.activeOrganization?.id ?? null}
           >
@@ -91,8 +79,8 @@ export async function AppShell({ children }: AppShellProps) {
               </main>
             </div>
           </OrganizationRealtimeProvider>
-        </ActiveWorkspaceProvider>
-      </div>
+        </div>
+      </ActiveWorkspaceProvider>
     </div>
   );
 }

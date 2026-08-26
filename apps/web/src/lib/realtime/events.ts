@@ -1,5 +1,16 @@
 export type RealtimeEventType =
   | "organization.updated"
+  | "profile.created"
+  | "profile.updated"
+  | "profile.roles_updated"
+  | "profile.membership_updated"
+  | "profile.artist_updated"
+  | "profile.role_added"
+  | "profile.role_removed"
+  | "profile.workspace_joined"
+  | "profile.workspace_left"
+  | "profile.artist_profile_created"
+  | "profile.artist_profile_updated"
   | "member.updated"
   | "member.role_changed"
   | "member.joined"
@@ -35,6 +46,17 @@ export type RealtimeEventEnvelope = {
 
 export const activityEventTypes = new Set<RealtimeEventType>([
   "organization.updated",
+  "profile.created",
+  "profile.updated",
+  "profile.roles_updated",
+  "profile.membership_updated",
+  "profile.artist_updated",
+  "profile.role_added",
+  "profile.role_removed",
+  "profile.workspace_joined",
+  "profile.workspace_left",
+  "profile.artist_profile_created",
+  "profile.artist_profile_updated",
   "member.updated",
   "member.role_changed",
   "member.joined",
@@ -52,6 +74,17 @@ export const activityEventTypes = new Set<RealtimeEventType>([
 
 export const refetchEventTypes = new Set<RealtimeEventType>([
   "organization.updated",
+  "profile.created",
+  "profile.updated",
+  "profile.roles_updated",
+  "profile.membership_updated",
+  "profile.artist_updated",
+  "profile.role_added",
+  "profile.role_removed",
+  "profile.workspace_joined",
+  "profile.workspace_left",
+  "profile.artist_profile_created",
+  "profile.artist_profile_updated",
   "member.updated",
   "member.role_changed",
   "member.joined",

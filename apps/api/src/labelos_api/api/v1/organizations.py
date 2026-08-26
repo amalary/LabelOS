@@ -17,11 +17,13 @@ from labelos_database.models import (
     OrganizationMembership,
     ProfessionalRole,
     Role,
+    UniversalProfile,
     WorkspaceInvite,
     WorkspaceMembership,
     WorkspaceMembershipRole,
     WorkspacePermission,
 )
+from labelos_database.roles import DEFAULT_ROLES
 from labelos_database.workspace_memberships import (
     ensure_workspace_membership_for_organization_membership,
     get_or_create_profile_for_user,
@@ -39,7 +41,7 @@ from labelos_api.auth import (
     get_current_user_context,
     has_role_at_least,
 )
-from labelos_api.authorization import Permission
+from labelos_api.authorization import Capability, Permission, authorization_service
 from labelos_api.realtime import RealtimeEventType, RealtimePublisher
 
 router = APIRouter(prefix="/organizations", tags=["organizations"])
@@ -54,6 +56,12 @@ ALLOWED_PROFESSIONAL_ROLES = {
     "legal": "Legal",
     "marketing": "Marketing",
     "finance": "Finance",
+}
+ALLOWED_WORKSPACE_ROLES = {
+    default_role.key: default_role.display_name for default_role in DEFAULT_ROLES
+}
+WORKSPACE_ROLE_ALIASES = {
+    "management": "manager",
 }
 ALLOWED_DEPARTMENT_ACCESS = {
     department.slug: department.display_name for department in DEFAULT_DEPARTMENTS
@@ -186,6 +194,7 @@ class OrganizationActivationResponse(BaseModel):
 class WorkspaceInviteCreateRequest(BaseModel):
     email: str | None = Field(default=None, min_length=3, max_length=320)
     professional_roles: list[str] = Field(default_factory=list, max_length=8)
+    workspace_roles: list[str] = Field(default_factory=list, max_length=8)
     department_access: list[str] | None = Field(default=None, max_length=32)
     expires_in_days: int = Field(default=7, ge=1, le=90)
     maximum_uses: int | None = Field(default=None, ge=1, le=1000)
@@ -205,12 +214,25 @@ class WorkspaceInviteCreateRequest(BaseModel):
     def validate_professional_roles(cls, value: list[str]) -> list[str]:
         return _normalize_professional_roles(value)
 
+    @field_validator("workspace_roles")
+    @classmethod
+    def validate_workspace_roles(cls, value: list[str]) -> list[str]:
+        return _normalize_workspace_roles(value)
+
     @field_validator("department_access")
     @classmethod
     def validate_department_access(cls, value: list[str] | None) -> list[str] | None:
         if value is None:
             return None
         return _normalize_department_access(value)
+
+    @model_validator(mode="after")
+    def default_workspace_roles_from_professional_roles(
+        self,
+    ) -> "WorkspaceInviteCreateRequest":
+        if not self.workspace_roles and self.professional_roles:
+            self.workspace_roles = _normalize_workspace_roles(self.professional_roles)
+        return self
 
 
 class WorkspaceInviteAcceptRequest(BaseModel):
@@ -241,6 +263,7 @@ class WorkspaceInviteResponse(BaseModel):
     workspace: WorkspaceInviteWorkspaceResponse
     inviter: WorkspaceInviteInviterResponse | None
     professional_roles: list[str] = Field(default_factory=list)
+    workspace_roles: list[str] = Field(default_factory=list)
     proposed_department_access: list[str] = Field(default_factory=list)
     expiration: datetime
     maximum_uses: int | None
@@ -300,6 +323,18 @@ def _require_membership(
 def _require_permission(context: CurrentUserContext, permission: Permission) -> None:
     if permission.value not in context.principal.permissions:
         raise _forbidden("Insufficient permission")
+
+
+def _require_capability(
+    context: CurrentUserContext,
+    organization_id: UUID,
+    capability: Capability,
+) -> None:
+    if capability not in authorization_service.effective_capabilities(
+        context,
+        workspace=organization_id,
+    ):
+        raise _forbidden("Insufficient capability permission")
 
 
 def _organization_response(
@@ -370,6 +405,23 @@ def _normalize_professional_roles(value: list[str]) -> list[str]:
         if normalized in seen:
             continue
         normalized_roles.append(ALLOWED_PROFESSIONAL_ROLES[normalized])
+        seen.add(normalized)
+
+    return normalized_roles
+
+
+def _normalize_workspace_roles(value: list[str]) -> list[str]:
+    normalized_roles: list[str] = []
+    seen: set[str] = set()
+
+    for role in value:
+        normalized = _professional_role_slug(role)
+        normalized = WORKSPACE_ROLE_ALIASES.get(normalized, normalized)
+        if normalized not in ALLOWED_WORKSPACE_ROLES:
+            raise ValueError("Unsupported workspace role")
+        if normalized in seen:
+            continue
+        normalized_roles.append(normalized)
         seen.add(normalized)
 
     return normalized_roles
@@ -533,6 +585,53 @@ async def _replace_membership_department_access(
         )
 
 
+async def _assign_workspace_roles(
+    session: AsyncSession,
+    *,
+    workspace_membership: WorkspaceMembership,
+    role_keys: list[str],
+    assigned_by: UUID | None,
+) -> list[Role]:
+    if not role_keys:
+        return []
+
+    roles = (
+        await session.scalars(select(Role).where(Role.key.in_(role_keys)))
+    ).all()
+    roles_by_key = {role.key: role for role in roles}
+    missing_roles = [role_key for role_key in role_keys if role_key not in roles_by_key]
+    if missing_roles:
+        raise _conflict("Invite references unavailable workspace roles")
+
+    existing_role_ids = set(
+        (
+            await session.scalars(
+                select(WorkspaceMembershipRole.role_id).where(
+                    WorkspaceMembershipRole.membership_id == workspace_membership.id
+                )
+            )
+        ).all()
+    )
+    assigned_roles: list[Role] = []
+    for role_key in role_keys:
+        role = roles_by_key[role_key]
+        assigned_roles.append(role)
+        if role.id in existing_role_ids:
+            continue
+        session.add(
+            WorkspaceMembershipRole(
+                membership_id=workspace_membership.id,
+                role_id=role.id,
+                assigned_by=assigned_by,
+                assigned_at=_utc_now(),
+                metadata_json={"source": "workspace_invite"},
+            )
+        )
+        existing_role_ids.add(role.id)
+    await session.flush()
+    return assigned_roles
+
+
 def _workspace_invite_response(invite: WorkspaceInvite) -> WorkspaceInviteResponse:
     status_value = _invite_status(invite)
     return WorkspaceInviteResponse(
@@ -554,6 +653,7 @@ def _workspace_invite_response(invite: WorkspaceInvite) -> WorkspaceInviteRespon
             else None
         ),
         professional_roles=list(invite.professional_roles),
+        workspace_roles=list(invite.workspace_roles),
         proposed_department_access=list(invite.proposed_department_access),
         expiration=invite.expires_at,
         maximum_uses=invite.maximum_uses,
@@ -602,12 +702,70 @@ def _member_role_payload(
     }
 
 
+def _profile_role_payload(
+    *,
+    profile_id: UUID,
+    workspace_id: UUID,
+    membership: OrganizationMembership,
+    role: Role,
+) -> dict[str, Any]:
+    return {
+        "profileId": str(profile_id),
+        "workspaceId": str(workspace_id),
+        "membershipId": str(membership.id),
+        "roleId": str(role.id),
+        "role": role.display_name,
+        "roleKey": role.key,
+    }
+
+
+def _profile_roles_updated_payload(
+    *,
+    profile_id: UUID,
+    workspace_id: UUID,
+    membership: OrganizationMembership,
+    action: str,
+    role: Role | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "profileId": str(profile_id),
+        "workspaceId": str(workspace_id),
+        "membershipId": str(membership.id),
+        "action": action,
+    }
+    if role is not None:
+        payload.update(
+            {
+                "roleId": str(role.id),
+                "role": role.display_name,
+                "roleKey": role.key,
+            }
+        )
+    return payload
+
+
+def _profile_workspace_payload(
+    *,
+    profile_id: UUID,
+    workspace_id: UUID,
+    membership_id: UUID,
+    status: str,
+) -> dict[str, Any]:
+    return {
+        "profileId": str(profile_id),
+        "workspaceId": str(workspace_id),
+        "membershipId": str(membership_id),
+        "status": status,
+    }
+
+
 async def _workspace_membership_for_organization_member(
     session: AsyncSession,
     *,
     organization_id: UUID,
     member_id: UUID,
     ensure: bool = True,
+    active_only: bool = False,
 ) -> tuple[OrganizationMembership, WorkspaceMembership | None]:
     membership = await session.scalar(
         select(OrganizationMembership)
@@ -617,12 +775,20 @@ async def _workspace_membership_for_organization_member(
     )
     if membership is None:
         raise _not_found()
+    if active_only and membership.status != "active":
+        raise _not_found()
 
     workspace_membership = await session.scalar(
         select(WorkspaceMembership)
         .where(WorkspaceMembership.organization_membership_id == membership.id)
         .where(WorkspaceMembership.workspace_id == organization_id)
     )
+    if (
+        active_only
+        and workspace_membership is not None
+        and workspace_membership.status != "active"
+    ):
+        raise _not_found()
     if workspace_membership is None and ensure:
         workspace_membership = (
             await ensure_workspace_membership_for_organization_membership(
@@ -792,12 +958,25 @@ async def create_workspace_invite(
     session: SessionDep,
     context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
 ) -> WorkspaceInviteResponse:
-    _require_membership(context, organization_id, MembershipRole.admin)
-    _require_permission(context, Permission.members_manage)
+    _require_membership(context, organization_id, MembershipRole.member)
+    _require_capability(context, organization_id, Capability.member_invite)
+    if payload.workspace_roles:
+        _require_capability(context, organization_id, Capability.role_assign)
 
     organization = await session.get(Organization, organization_id)
     if organization is None:
         raise _not_found()
+
+    if payload.email is not None:
+        duplicate_invite = await session.scalar(
+            select(WorkspaceInvite)
+            .where(WorkspaceInvite.organization_id == organization_id)
+            .where(WorkspaceInvite.invitee_email == payload.email)
+            .where(WorkspaceInvite.status == "active")
+            .where(WorkspaceInvite.expires_at > _utc_now())
+        )
+        if duplicate_invite is not None:
+            raise _conflict("An active invite already exists for this email")
 
     for _attempt in range(5):
         proposed_department_access = (
@@ -811,6 +990,7 @@ async def create_workspace_invite(
             inviter_user_id=context.user.id,
             invitee_email=payload.email,
             professional_roles=payload.professional_roles,
+            workspace_roles=payload.workspace_roles,
             proposed_department_access=proposed_department_access,
             expires_at=_utc_now() + timedelta(days=payload.expires_in_days),
             maximum_uses=payload.maximum_uses,
@@ -818,6 +998,22 @@ async def create_workspace_invite(
         )
         session.add(invite)
         try:
+            await session.flush()
+            await RealtimePublisher(session).publish(
+                organization_id=organization_id,
+                event_type=RealtimeEventType.invitation_sent,
+                actor=context.user,
+                entity_type="invitation",
+                entity_id=invite.id,
+                payload={
+                    "inviteId": str(invite.id),
+                    "workspaceId": str(organization_id),
+                    "professionalRoles": list(invite.professional_roles),
+                    "workspaceRoles": list(invite.workspace_roles),
+                    "departmentAccess": list(invite.proposed_department_access),
+                    "expiresAt": invite.expires_at.isoformat(),
+                },
+            )
             await session.commit()
             await session.refresh(invite, attribute_names=["organization", "inviter"])
             return _workspace_invite_response(invite)
@@ -862,6 +1058,7 @@ async def accept_workspace_invite(
         .where(OrganizationMembership.organization_id == invite.organization_id)
         .where(OrganizationMembership.user_id == context.user.id)
     )
+    membership_activated = False
     if membership is None:
         membership = OrganizationMembership(
             organization_id=invite.organization_id,
@@ -872,20 +1069,27 @@ async def accept_workspace_invite(
         )
         session.add(membership)
         invite.use_count += 1
+        membership_activated = True
     elif membership.status != "active":
         membership.status = "active"
         membership.role = MembershipRole.member
         membership.workspace_permission = WorkspacePermission.member
         invite.use_count += 1
+        membership_activated = True
     await session.flush()
+    existing_profile_id = await session.scalar(
+        select(UniversalProfile.id).where(UniversalProfile.user_id == context.user.id)
+    )
     inviter_profile_id = None
     if invite.inviter is not None:
         inviter_profile = await get_or_create_profile_for_user(session, invite.inviter)
         inviter_profile_id = inviter_profile.id
-    await ensure_workspace_membership_for_organization_membership(
-        session,
-        membership,
-        invited_by_profile_id=inviter_profile_id,
+    workspace_membership = (
+        await ensure_workspace_membership_for_organization_membership(
+            session,
+            membership,
+            invited_by_profile_id=inviter_profile_id,
+        )
     )
 
     invite_roles = list(invite.professional_roles)
@@ -898,6 +1102,15 @@ async def accept_workspace_invite(
             membership,
             accepted_roles,
         )
+    workspace_role_keys = list(invite.workspace_roles) or _normalize_workspace_roles(
+        accepted_roles
+    )
+    assigned_workspace_roles = await _assign_workspace_roles(
+        session,
+        workspace_membership=workspace_membership,
+        role_keys=workspace_role_keys,
+        assigned_by=invite.inviter_user_id,
+    )
     invited_department_access = list(invite.proposed_department_access)
     if invited_department_access:
         await _replace_membership_department_access(
@@ -911,6 +1124,101 @@ async def accept_workspace_invite(
         invite.status = "exhausted"
 
     try:
+        if existing_profile_id is None:
+            await RealtimePublisher(session).publish(
+                organization_id=invite.organization_id,
+                event_type=RealtimeEventType.profile_created,
+                actor=context.user,
+                entity_type="profile",
+                entity_id=workspace_membership.profile_id,
+                payload={
+                    "profileId": str(workspace_membership.profile_id),
+                    "workspaceId": str(invite.organization_id),
+                },
+            )
+        if membership_activated:
+            await RealtimePublisher(session).publish(
+                organization_id=invite.organization_id,
+                event_type=RealtimeEventType.profile_workspace_joined,
+                actor=context.user,
+                entity_type="profile",
+                entity_id=workspace_membership.profile_id,
+                payload=_profile_workspace_payload(
+                    profile_id=workspace_membership.profile_id,
+                    workspace_id=invite.organization_id,
+                    membership_id=membership.id,
+                    status=membership.status,
+                ),
+            )
+            await RealtimePublisher(session).publish(
+                organization_id=invite.organization_id,
+                event_type=RealtimeEventType.profile_membership_updated,
+                actor=context.user,
+                entity_type="profile",
+                entity_id=workspace_membership.profile_id,
+                payload=_profile_workspace_payload(
+                    profile_id=workspace_membership.profile_id,
+                    workspace_id=invite.organization_id,
+                    membership_id=membership.id,
+                    status=membership.status,
+                ),
+            )
+            await RealtimePublisher(session).publish(
+                organization_id=invite.organization_id,
+                event_type=RealtimeEventType.invitation_accepted,
+                actor=context.user,
+                entity_type="invitation",
+                entity_id=invite.id,
+                payload={
+                    "inviteId": str(invite.id),
+                    "profileId": str(workspace_membership.profile_id),
+                    "workspaceId": str(invite.organization_id),
+                    "membershipId": str(membership.id),
+                    "professionalRoles": accepted_roles,
+                    "workspaceRoles": [
+                        {"id": str(role.id), "key": role.key, "name": role.display_name}
+                        for role in assigned_workspace_roles
+                    ],
+                },
+            )
+        await RealtimePublisher(session).publish(
+            organization_id=invite.organization_id,
+            event_type=RealtimeEventType.member_joined,
+            actor=invite.inviter,
+            entity_type="member",
+            entity_id=membership.id,
+            payload={
+                "membershipId": str(membership.id),
+                "userId": str(membership.user_id),
+                "email": context.user.email,
+                "status": membership.status,
+                "professionalRoles": accepted_roles,
+                "workspaceRoles": [
+                    {"id": str(role.id), "key": role.key, "name": role.display_name}
+                    for role in assigned_workspace_roles
+                ],
+                "inviteId": str(invite.id),
+            },
+        )
+        if accepted_roles or assigned_workspace_roles:
+            await RealtimePublisher(session).publish(
+                organization_id=invite.organization_id,
+                event_type=RealtimeEventType.profile_roles_updated,
+                actor=context.user,
+                entity_type="profile",
+                entity_id=workspace_membership.profile_id,
+                payload={
+                    "profileId": str(workspace_membership.profile_id),
+                    "workspaceId": str(invite.organization_id),
+                    "membershipId": str(membership.id),
+                    "action": "assigned",
+                    "professionalRoles": accepted_roles,
+                    "workspaceRoles": [
+                        {"id": str(role.id), "key": role.key, "name": role.display_name}
+                        for role in assigned_workspace_roles
+                    ],
+                },
+            )
         await session.commit()
     except IntegrityError as exc:
         await session.rollback()
@@ -957,9 +1265,14 @@ async def create_organization(
     )
     session.add(owner_membership)
     await session.flush()
-    await ensure_workspace_membership_for_organization_membership(
-        session,
-        owner_membership,
+    existing_profile_id = await session.scalar(
+        select(UniversalProfile.id).where(UniversalProfile.user_id == context.user.id)
+    )
+    workspace_membership = (
+        await ensure_workspace_membership_for_organization_membership(
+            session,
+            owner_membership,
+        )
     )
     departments = (
         await session.scalars(select(Department).where(Department.is_active.is_(True)))
@@ -977,6 +1290,44 @@ async def create_organization(
         )
 
     try:
+        if existing_profile_id is None:
+            await RealtimePublisher(session).publish(
+                organization_id=organization.id,
+                event_type=RealtimeEventType.profile_created,
+                actor=context.user,
+                entity_type="profile",
+                entity_id=workspace_membership.profile_id,
+                payload={
+                    "profileId": str(workspace_membership.profile_id),
+                    "workspaceId": str(organization.id),
+                },
+            )
+        await RealtimePublisher(session).publish(
+            organization_id=organization.id,
+            event_type=RealtimeEventType.profile_workspace_joined,
+            actor=context.user,
+            entity_type="profile",
+            entity_id=workspace_membership.profile_id,
+            payload=_profile_workspace_payload(
+                profile_id=workspace_membership.profile_id,
+                workspace_id=organization.id,
+                membership_id=owner_membership.id,
+                status=owner_membership.status,
+            ),
+        )
+        await RealtimePublisher(session).publish(
+            organization_id=organization.id,
+            event_type=RealtimeEventType.profile_membership_updated,
+            actor=context.user,
+            entity_type="profile",
+            entity_id=workspace_membership.profile_id,
+            payload=_profile_workspace_payload(
+                profile_id=workspace_membership.profile_id,
+                workspace_id=organization.id,
+                membership_id=owner_membership.id,
+                status=owner_membership.status,
+            ),
+        )
         await session.commit()
     except IntegrityError as exc:
         await session.rollback()
@@ -1166,18 +1517,22 @@ async def assign_member_workspace_role(
     session: SessionDep,
     context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
 ) -> WorkspaceRoleAssignmentResponse:
-    _require_membership(context, organization_id, MembershipRole.admin)
-    _require_permission(context, Permission.members_manage)
+    if await _active_membership_row(session, context, organization_id) is None:
+        raise _not_found()
+    _require_capability(context, organization_id, Capability.role_assign)
 
     membership, workspace_membership = (
         await _workspace_membership_for_organization_member(
             session,
             organization_id=organization_id,
             member_id=member_id,
+            active_only=True,
         )
     )
     if workspace_membership is None:
         raise _not_found()
+    if membership.user_id == context.user.id:
+        raise _forbidden("Cannot assign workspace roles to yourself")
     role = await session.get(Role, payload.role_id)
     if role is None:
         raise _not_found()
@@ -1212,6 +1567,33 @@ async def assign_member_workspace_role(
                 action="assigned",
             ),
         )
+        await RealtimePublisher(session).publish(
+            organization_id=organization_id,
+            event_type=RealtimeEventType.profile_role_added,
+            actor=context.user,
+            entity_type="profile",
+            entity_id=workspace_membership.profile_id,
+            payload=_profile_role_payload(
+                profile_id=workspace_membership.profile_id,
+                workspace_id=organization_id,
+                membership=membership,
+                role=role,
+            ),
+        )
+        await RealtimePublisher(session).publish(
+            organization_id=organization_id,
+            event_type=RealtimeEventType.profile_roles_updated,
+            actor=context.user,
+            entity_type="profile",
+            entity_id=workspace_membership.profile_id,
+            payload=_profile_roles_updated_payload(
+                profile_id=workspace_membership.profile_id,
+                workspace_id=organization_id,
+                membership=membership,
+                action="assigned",
+                role=role,
+            ),
+        )
         await session.commit()
     except IntegrityError as exc:
         await session.rollback()
@@ -1232,18 +1614,22 @@ async def remove_member_workspace_role(
     session: SessionDep,
     context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
 ) -> None:
-    _require_membership(context, organization_id, MembershipRole.admin)
-    _require_permission(context, Permission.members_manage)
+    if await _active_membership_row(session, context, organization_id) is None:
+        raise _not_found()
+    _require_capability(context, organization_id, Capability.role_assign)
 
     membership, workspace_membership = (
         await _workspace_membership_for_organization_member(
             session,
             organization_id=organization_id,
             member_id=member_id,
+            active_only=True,
         )
     )
     if workspace_membership is None:
         raise _not_found()
+    if membership.user_id == context.user.id:
+        raise _forbidden("Cannot remove workspace roles from yourself")
     assignment = await session.scalar(
         select(WorkspaceMembershipRole)
         .options(selectinload(WorkspaceMembershipRole.role))
@@ -1265,6 +1651,33 @@ async def remove_member_workspace_role(
             membership=membership,
             role=role,
             action="removed",
+        ),
+    )
+    await RealtimePublisher(session).publish(
+        organization_id=organization_id,
+        event_type=RealtimeEventType.profile_role_removed,
+        actor=context.user,
+        entity_type="profile",
+        entity_id=workspace_membership.profile_id,
+        payload=_profile_role_payload(
+            profile_id=workspace_membership.profile_id,
+            workspace_id=organization_id,
+            membership=membership,
+            role=role,
+        ),
+    )
+    await RealtimePublisher(session).publish(
+        organization_id=organization_id,
+        event_type=RealtimeEventType.profile_roles_updated,
+        actor=context.user,
+        entity_type="profile",
+        entity_id=workspace_membership.profile_id,
+        payload=_profile_roles_updated_payload(
+            profile_id=workspace_membership.profile_id,
+            workspace_id=organization_id,
+            membership=membership,
+            action="removed",
+            role=role,
         ),
     )
     await session.commit()

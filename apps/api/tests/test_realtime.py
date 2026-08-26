@@ -12,7 +12,9 @@ from labelos_database.models import (
     Organization,
     OrganizationMembership,
     RealtimeEvent,
+    UniversalProfile,
     User,
+    WorkspaceMembership,
 )
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -37,6 +39,7 @@ class RealtimeSeed:
     organization_id: UUID
     outside_organization_id: UUID
     artist_id: UUID
+    profile_id: UUID
 
 
 @pytest.fixture
@@ -71,6 +74,17 @@ def realtime_client(
                 owner=other_user,
             )
             artist = Artist(name="Artist A", organization=organization)
+            profile = UniversalProfile(
+                user=user,
+                display_name="Owner Profile",
+                primary_email="owner@example.com",
+            )
+            membership = OrganizationMembership(
+                organization=organization,
+                user=user,
+                role=MembershipRole.owner,
+                status="active",
+            )
             session.add_all(
                 [
                     user,
@@ -78,10 +92,12 @@ def realtime_client(
                     organization,
                     outside_organization,
                     artist,
-                    OrganizationMembership(
-                        organization=organization,
-                        user=user,
-                        role=MembershipRole.owner,
+                    profile,
+                    membership,
+                    WorkspaceMembership(
+                        workspace=organization,
+                        profile=profile,
+                        organization_membership=membership,
                         status="active",
                     ),
                     OrganizationMembership(
@@ -99,6 +115,7 @@ def realtime_client(
                 organization_id=organization.id,
                 outside_organization_id=outside_organization.id,
                 artist_id=artist.id,
+                profile_id=profile.id,
             )
 
     seeded = asyncio.run(prepare_database())
@@ -192,6 +209,59 @@ def test_artist_mutation_publishes_committed_organization_event(
     assert event.actor_user_id == seeded.user_id
     assert event.actor_display_name == "Owner"
     assert event.payload["artist"]["name"] == "Renamed Artist"
+
+
+def test_artist_profile_module_mutations_publish_profile_activity(
+    realtime_client: tuple[TestClient, async_sessionmaker[AsyncSession], RealtimeSeed],
+) -> None:
+    client, sessionmaker, seeded = realtime_client
+    _set_context(client, seeded)
+
+    create_response = client.post(
+        "/api/v1/artists",
+        json={
+            "name": "Profile Artist",
+            "universal_profile_id": str(seeded.profile_id),
+            "stage_name": "Profile Artist",
+            "genres": ["pop"],
+            "dsp_links": {"spotify": "https://open.spotify.com/artist/example"},
+        },
+    )
+    artist_id = create_response.json()["id"]
+    update_response = client.patch(
+        f"/api/v1/artists/{artist_id}",
+        json={
+            "name": "Profile Artist",
+            "universal_profile_id": str(seeded.profile_id),
+            "stage_name": "Profile Artist Updated",
+            "career_stage": "emerging",
+        },
+    )
+
+    assert create_response.status_code == 201
+    assert update_response.status_code == 200
+    events = asyncio.run(_realtime_events(sessionmaker, seeded.organization_id))
+    profile_events = [
+        event
+        for event in events
+        if event.event_type.startswith("profile.artist_profile_")
+    ]
+    assert [event.event_type for event in profile_events] == [
+        "profile.artist_profile_created",
+        "profile.artist_profile_updated",
+    ]
+    assert profile_events[0].entity_type == "profile"
+    assert profile_events[0].entity_id == str(seeded.profile_id)
+    assert profile_events[0].payload["profileId"] == str(seeded.profile_id)
+    assert profile_events[0].payload["workspaceId"] == str(seeded.organization_id)
+    assert profile_events[1].payload["changedFields"] == [
+        "career_stage",
+        "stage_name",
+        "universal_profile_id",
+    ]
+    assert "https://open.spotify.com/artist/example" not in str(
+        profile_events[0].payload
+    )
 
 
 def test_realtime_subscription_requires_database_membership(

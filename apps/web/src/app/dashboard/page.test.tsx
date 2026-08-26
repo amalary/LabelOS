@@ -20,9 +20,14 @@ const dashboardData = vi.hoisted(() => ({
   getEmptyDashboardData: vi.fn(),
 }));
 
+const profiles = vi.hoisted(() => ({
+  getCurrentUniversalProfile: vi.fn(),
+}));
+
 vi.mock("@workos-inc/authkit-nextjs", () => authkit);
 vi.mock("next/navigation", () => navigation);
 vi.mock("../../lib/organizations", () => organizations);
+vi.mock("../../lib/profiles.server", () => profiles);
 vi.mock("./dashboard-data", () => dashboardData);
 vi.mock("../../components/app-shell", () => ({
   AppShell: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
@@ -48,6 +53,7 @@ describe("DashboardPage", () => {
     authkit.withAuth.mockReset();
     navigation.redirect.mockClear();
     organizations.getOrganizationSelection.mockReset();
+    profiles.getCurrentUniversalProfile.mockReset();
     dashboardData.getDashboardData.mockReset();
     dashboardData.getEmptyDashboardData.mockReset();
     organizations.getOrganizationSelection.mockResolvedValue({
@@ -167,6 +173,33 @@ describe("DashboardPage", () => {
       releasePipeline: { stages: [], emptyOrganization: true },
       recentActivity: { events: [] },
     });
+    profiles.getCurrentUniversalProfile.mockResolvedValue({
+      id: "profile_01",
+      user_id: "user_01SECRET",
+      display_name: "Mara Chen",
+      headline: null,
+      biography: null,
+      avatar_url: null,
+      location: null,
+      profile_status: "active",
+      onboarding_status: "complete",
+      links: [],
+      attributes: [],
+      preferences: {
+        locale: null,
+        timezone: null,
+        default_workspace_id: null,
+        email_notifications_enabled: true,
+        push_notifications_enabled: true,
+        sms_notifications_enabled: false,
+        marketing_notifications_enabled: false,
+        interface_theme: null,
+        interface_density: null,
+        notification_preferences: {},
+        interface_preferences: {},
+        integration_preferences: {},
+      },
+    });
   });
 
   it("requires a signed-in WorkOS session and renders Dashboard V1 in the active organization", async () => {
@@ -214,6 +247,58 @@ describe("DashboardPage", () => {
     const { default: DashboardPage } = await import("./page");
 
     await expect(DashboardPage()).rejects.toThrow("NEXT_REDIRECT:/onboarding/workspace");
+  });
+
+  it("shows optional Universal Profile completion guidance without blocking the dashboard", async () => {
+    authkit.withAuth.mockResolvedValue(authenticatedSession);
+    profiles.getCurrentUniversalProfile.mockResolvedValue({
+      id: "profile_01",
+      user_id: "user_01SECRET",
+      display_name: null,
+      headline: null,
+      biography: null,
+      avatar_url: null,
+      location: null,
+      profile_status: "active",
+      onboarding_status: "not_started",
+      links: [],
+      attributes: [],
+      preferences: {
+        locale: null,
+        timezone: null,
+        default_workspace_id: null,
+        email_notifications_enabled: true,
+        push_notifications_enabled: true,
+        sms_notifications_enabled: false,
+        marketing_notifications_enabled: false,
+        interface_theme: null,
+        interface_density: null,
+        notification_preferences: {},
+        interface_preferences: {},
+        integration_preferences: {},
+      },
+      profile_completion: {
+        ruleset: "artist",
+        is_complete: false,
+        percent: 25,
+        completed_fields: ["Artist name"],
+        missing_fields: ["Artist image", "Biography", "DSP links"],
+        guidance: "Complete your artist profile",
+        is_blocking: false,
+      },
+    });
+
+    const { default: DashboardPage } = await import("./page");
+    render(await DashboardPage());
+
+    expect(screen.getByText("Complete your artist profile")).toBeInTheDocument();
+    expect(screen.getByText(/Missing: Artist image, Biography, DSP links/i)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Update profile" })).toHaveAttribute(
+      "href",
+      "/profile",
+    );
+    expect(dashboardData.getDashboardData).toHaveBeenCalled();
+    expect(screen.getByRole("heading", { level: 1, name: "Dashboard" })).toBeInTheDocument();
   });
 
   it("does not trust a stale active organization claim when backend access is gone", async () => {

@@ -1,6 +1,7 @@
 import re
 from datetime import UTC, datetime
 from enum import StrEnum
+from typing import ClassVar
 from urllib.parse import urlparse
 from uuid import UUID
 
@@ -18,11 +19,12 @@ from sqlalchemy import (
     func,
     true,
 )
-from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
+from sqlalchemy.orm import Mapped, declared_attr, mapped_column, relationship, validates
 
 from labelos_database.base import Base, TimestampMixin, UUIDPrimaryKey
 
 _LOCALE_PATTERN = re.compile(r"^[A-Za-z]{2,3}(?:[-_][A-Za-z0-9]{2,8})*$")
+PROFILE_MODULE_RELATIONSHIPS = ("artist_profiles",)
 
 
 def _required_text(value: str | None, field_name: str) -> str:
@@ -46,6 +48,14 @@ def _json_object(value: dict | None, field_name: str) -> dict:
         return {}
     if not isinstance(value, dict):
         raise ValueError(f"{field_name} must be a JSON object")
+    return value
+
+
+def _json_list(value: list | None, field_name: str) -> list:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"{field_name} must be a JSON array")
     return value
 
 
@@ -178,6 +188,19 @@ class UniversalProfile(Base, TimestampMixin):
         cascade="all, delete-orphan",
         foreign_keys="WorkspaceMembership.profile_id",
     )
+    artist_profiles: Mapped[list["ArtistProfile"]] = relationship(
+        back_populates="universal_profile",
+        cascade="all, delete-orphan",
+    )
+
+    @property
+    def profile_modules(self) -> dict[str, list[object]]:
+        return {
+            relationship_name.removesuffix("_profiles"): list(
+                getattr(self, relationship_name)
+            )
+            for relationship_name in PROFILE_MODULE_RELATIONSHIPS
+        }
 
     __table_args__ = (
         UniqueConstraint("user_id", name="uq_universal_profiles_user_id"),
@@ -965,6 +988,12 @@ class WorkspaceInvite(Base, TimestampMixin):
         default=list,
         server_default="[]",
     )
+    workspace_roles: Mapped[list[str]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+        server_default="[]",
+    )
     proposed_department_access: Mapped[list[str]] = mapped_column(
         JSON,
         nullable=False,
@@ -1328,12 +1357,127 @@ class Artist(Base, TimestampMixin, OrganizationOwnedMixin):
     name: Mapped[str] = mapped_column(String(200), nullable=False)
 
     organization: Mapped[Organization] = relationship(back_populates="artists")
+    profile: Mapped["ArtistProfile | None"] = relationship(
+        back_populates="artist",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
 
     __table_args__ = (
         UniqueConstraint(
             "organization_id", "name", name="uq_artists_organization_id_name"
         ),
         Index("ix_artists_organization_id", "organization_id"),
+    )
+
+
+class ProfileModuleMixin:
+    __profile_module_key__: ClassVar[str]
+    __universal_profile_relationship__: ClassVar[str]
+
+    id: Mapped[UUIDPrimaryKey]
+    universal_profile_id: Mapped[UUID] = mapped_column(
+        ForeignKey("universal_profiles.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    @declared_attr
+    def universal_profile(cls) -> Mapped[UniversalProfile]:
+        return relationship(back_populates=cls.__universal_profile_relationship__)
+
+
+class ArtistProfile(Base, TimestampMixin, ProfileModuleMixin):
+    """Person-backed artist module linked to a workspace catalog artist.
+
+    Catalog artists may exist without this module. When this row exists it
+    represents a known UniversalProfile acting as that artist identity.
+    """
+
+    __tablename__ = "artist_profiles"
+    __profile_module_key__ = "artist"
+    __universal_profile_relationship__ = "artist_profiles"
+
+    artist_id: Mapped[UUID] = mapped_column(
+        ForeignKey("artists.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    stage_name: Mapped[str | None] = mapped_column(String(200))
+    genres: Mapped[list[str]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+        server_default="[]",
+    )
+    influences: Mapped[list[str]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+        server_default="[]",
+    )
+    imagery: Mapped[dict] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+        server_default="{}",
+    )
+    dsp_links: Mapped[dict] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+        server_default="{}",
+    )
+    catalog_references: Mapped[list[str]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+        server_default="[]",
+    )
+    creative_metadata: Mapped[dict] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+        server_default="{}",
+    )
+    career_stage: Mapped[str | None] = mapped_column(String(120))
+    audience: Mapped[dict] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+        server_default="{}",
+    )
+    preferences: Mapped[dict] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+        server_default="{}",
+    )
+
+    artist: Mapped[Artist] = relationship(back_populates="profile")
+
+    @validates("stage_name", "career_stage")
+    def _validate_optional_text(self, _key: str, value: str | None) -> str | None:
+        return _optional_text(value)
+
+    @validates(
+        "imagery",
+        "dsp_links",
+        "creative_metadata",
+        "audience",
+        "preferences",
+    )
+    def _validate_json_objects(self, key: str, value: dict | None) -> dict:
+        return _json_object(value, key)
+
+    @validates("genres", "influences", "catalog_references")
+    def _validate_json_lists(self, key: str, value: list | None) -> list:
+        return _json_list(value, key)
+
+    __table_args__ = (
+        UniqueConstraint("artist_id", name="uq_artist_profiles_artist_id"),
+        Index("ix_artist_profiles_artist_id", "artist_id"),
+        Index("ix_artist_profiles_universal_profile_id", "universal_profile_id"),
+        Index("ix_artist_profiles_stage_name", "stage_name"),
+        Index("ix_artist_profiles_career_stage", "career_stage"),
     )
 
 
