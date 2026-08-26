@@ -300,6 +300,114 @@ async def _profile_count_for_user(
         return count or 0
 
 
+async def _set_workspace_permission(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    user_id: UUID,
+    workspace_id: UUID,
+    permission: WorkspacePermission,
+) -> None:
+    async with sessionmaker() as session:
+        membership = await session.scalar(
+            select(OrganizationMembership)
+            .where(OrganizationMembership.user_id == user_id)
+            .where(OrganizationMembership.organization_id == workspace_id)
+        )
+        assert membership is not None
+        membership.role = MembershipRole(permission.value)
+        membership.workspace_permission = permission
+        await session.commit()
+
+
+async def _grant_workspace_role(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    profile_id: UUID,
+    workspace_id: UUID,
+    role_key: str,
+    capability_keys: tuple[str, ...],
+    departments: tuple[str, ...] = (),
+) -> None:
+    async with sessionmaker() as session:
+        workspace_membership = await session.scalar(
+            select(WorkspaceMembership)
+            .where(WorkspaceMembership.workspace_id == workspace_id)
+            .where(WorkspaceMembership.profile_id == profile_id)
+        )
+        assert workspace_membership is not None
+        role = Role(
+            key=role_key,
+            display_name=role_key.replace("_", " ").title(),
+            description=f"{role_key} test role.",
+        )
+        session.add(role)
+        await session.flush()
+        for capability_key in capability_keys:
+            capability = await session.scalar(
+                select(Capability).where(Capability.key == capability_key)
+            )
+            if capability is None:
+                capability = Capability(
+                    key=capability_key,
+                    display_name=capability_key,
+                    description=f"{capability_key} capability.",
+                    system_capability=True,
+                )
+                session.add(capability)
+                await session.flush()
+            session.add(RoleCapability(role=role, capability=capability))
+        session.add(
+            WorkspaceMembershipRole(
+                workspace_membership=workspace_membership,
+                role=role,
+            )
+        )
+        if workspace_membership.organization_membership_id is not None:
+            for department_slug in departments:
+                department = await session.scalar(
+                    select(Department).where(Department.slug == department_slug)
+                )
+                if department is None:
+                    department = Department(
+                        slug=department_slug,
+                        display_name=department_slug.title(),
+                        description=f"{department_slug} department.",
+                    )
+                    session.add(department)
+                    await session.flush()
+                session.add(
+                    MembershipDepartmentAccess(
+                        membership_id=workspace_membership.organization_membership_id,
+                        department=department,
+                        access_level="member",
+                        source="test",
+                    )
+                )
+        await session.commit()
+
+
+async def _seed_artist_profile_for_member(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    seeded: SeededProfiles,
+) -> tuple[UUID, UUID]:
+    async with sessionmaker() as session:
+        workspace = await session.get(Organization, seeded.workspace_id)
+        member_profile = await session.get(UniversalProfile, seeded.member_profile_id)
+        assert workspace is not None
+        assert member_profile is not None
+        artist = Artist(name="Member Artist", organization=workspace)
+        session.add(artist)
+        await session.flush()
+        artist_profile = ArtistProfile(
+            artist=artist,
+            universal_profile=member_profile,
+            stage_name="Member Artist",
+        )
+        session.add(artist_profile)
+        await session.commit()
+        return artist.id, artist_profile.id
+
+
 def test_profiles_require_authentication(client: TestClient) -> None:
     response = client.get(f"/api/v1/profiles/{uuid4()}")
 
@@ -518,6 +626,45 @@ def test_patch_my_profile_updates_allowed_fields_and_replaces_metadata(
     ]
     assert "Updated biography" not in str(event.payload)
     assert "https://open.spotify.com/artist/example" not in str(event.payload)
+
+
+def test_patch_my_profile_requires_database_profile_edit_capability(
+    profiles_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededProfiles,
+    ],
+) -> None:
+    client, sessionmaker, seeded = profiles_client
+    asyncio.run(
+        _set_workspace_permission(
+            sessionmaker,
+            user_id=seeded.user_id,
+            workspace_id=seeded.workspace_id,
+            permission=WorkspacePermission.guest,
+        )
+    )
+    _set_context(
+        client,
+        seeded,
+        memberships=(
+            MembershipContext(
+                organization_id=seeded.workspace_id,
+                organization_name="Alpha Label",
+                organization_slug="alpha-label",
+                workos_organization_id="org_ALPHA",
+                workspace_permission=WorkspacePermission.guest,
+            ),
+        ),
+    )
+
+    response = client.patch(
+        "/api/v1/profiles/me",
+        json={"display_name": "Blocked Owner"},
+    )
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Insufficient capability permission"}
 
 
 def test_patch_my_profile_without_active_workspace_does_not_publish_activity(
@@ -1197,6 +1344,42 @@ def test_direct_profile_read_allows_shared_workspace_member(
     assert "Sensitive member attribute" not in response.text
 
 
+def test_direct_profile_read_requires_database_profile_view_capability(
+    profiles_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededProfiles,
+    ],
+) -> None:
+    client, sessionmaker, seeded = profiles_client
+    asyncio.run(
+        _set_workspace_permission(
+            sessionmaker,
+            user_id=seeded.user_id,
+            workspace_id=seeded.workspace_id,
+            permission=WorkspacePermission.guest,
+        )
+    )
+    _set_context(
+        client,
+        seeded,
+        memberships=(
+            MembershipContext(
+                organization_id=seeded.workspace_id,
+                organization_name="Alpha Label",
+                organization_slug="alpha-label",
+                workos_organization_id="org_ALPHA",
+                workspace_permission=WorkspacePermission.owner,
+            ),
+        ),
+    )
+
+    response = client.get(f"/api/v1/profiles/{seeded.member_profile_id}")
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Insufficient capability permission"}
+
+
 def test_direct_profile_read_rechecks_removed_actor_workspace_membership(
     profiles_client: tuple[
         TestClient,
@@ -1265,6 +1448,99 @@ def test_get_workspace_profile_returns_membership_context(
     assert "Member private biography" not in response.text
     assert "https://member.example.com/private" not in response.text
     assert "Sensitive member attribute" not in response.text
+
+
+def test_workspace_profile_view_allows_admin_profile_capability(
+    profiles_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededProfiles,
+    ],
+) -> None:
+    client, sessionmaker, seeded = profiles_client
+    asyncio.run(
+        _set_workspace_permission(
+            sessionmaker,
+            user_id=seeded.user_id,
+            workspace_id=seeded.workspace_id,
+            permission=WorkspacePermission.admin,
+        )
+    )
+    _set_context(
+        client,
+        seeded,
+        memberships=(
+            MembershipContext(
+                organization_id=seeded.workspace_id,
+                organization_name="Alpha Label",
+                organization_slug="alpha-label",
+                workos_organization_id="org_ALPHA",
+                workspace_permission=WorkspacePermission.admin,
+            ),
+        ),
+    )
+
+    response = client.get(f"/api/v1/workspaces/{seeded.workspace_id}/profiles")
+
+    assert response.status_code == 200
+    assert response.json()["total"] == 2
+
+
+def test_workspace_profile_view_unions_multiple_roles(
+    profiles_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededProfiles,
+    ],
+) -> None:
+    client, sessionmaker, seeded = profiles_client
+    asyncio.run(
+        _set_workspace_permission(
+            sessionmaker,
+            user_id=seeded.member_user_id,
+            workspace_id=seeded.workspace_id,
+            permission=WorkspacePermission.guest,
+        )
+    )
+    asyncio.run(
+        _grant_workspace_role(
+            sessionmaker,
+            profile_id=seeded.member_profile_id,
+            workspace_id=seeded.workspace_id,
+            role_key="release_editor",
+            capability_keys=("release.edit",),
+        )
+    )
+    asyncio.run(
+        _grant_workspace_role(
+            sessionmaker,
+            profile_id=seeded.member_profile_id,
+            workspace_id=seeded.workspace_id,
+            role_key="profile_reader",
+            capability_keys=("profile.view",),
+        )
+    )
+    _set_context(
+        client,
+        seeded,
+        user_id=seeded.member_user_id,
+        email="member@example.com",
+        display_name="Member",
+        memberships=(
+            MembershipContext(
+                organization_id=seeded.workspace_id,
+                organization_name="Alpha Label",
+                organization_slug="alpha-label",
+                workos_organization_id="org_ALPHA",
+                workspace_permission=WorkspacePermission.guest,
+            ),
+        ),
+    )
+
+    response = client.get(f"/api/v1/profiles/{seeded.profile_id}")
+
+    assert response.status_code == 200
+    assert response.json()["id"] == str(seeded.profile_id)
 
 
 def test_workspace_switch_resolves_different_profile_context_without_duplication(
@@ -1422,6 +1698,135 @@ def test_workspace_switch_resolves_different_profile_context_without_duplication
     assert beta["department_access"] == ["contracts"]
     assert alpha["capability_permissions"] == ["artist.profile.view"]
     assert beta["capability_permissions"] == ["contract.view"]
+
+
+def test_artist_role_can_view_and_edit_linked_artist_profile(
+    profiles_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededProfiles,
+    ],
+) -> None:
+    client, sessionmaker, seeded = profiles_client
+    _artist_id, artist_profile_id = asyncio.run(
+        _seed_artist_profile_for_member(sessionmaker, seeded)
+    )
+    asyncio.run(
+        _set_workspace_permission(
+            sessionmaker,
+            user_id=seeded.member_user_id,
+            workspace_id=seeded.workspace_id,
+            permission=WorkspacePermission.guest,
+        )
+    )
+    asyncio.run(
+        _grant_workspace_role(
+            sessionmaker,
+            profile_id=seeded.member_profile_id,
+            workspace_id=seeded.workspace_id,
+            role_key="artist",
+            capability_keys=("artist.profile.view", "artist.profile.edit"),
+            departments=("artist",),
+        )
+    )
+    _set_context(
+        client,
+        seeded,
+        user_id=seeded.member_user_id,
+        email="member@example.com",
+        display_name="Member",
+        memberships=(
+            MembershipContext(
+                organization_id=seeded.workspace_id,
+                organization_name="Alpha Label",
+                organization_slug="alpha-label",
+                workos_organization_id="org_ALPHA",
+                workspace_permission=WorkspacePermission.guest,
+            ),
+        ),
+    )
+
+    view_response = client.get(
+        f"/api/v1/workspaces/{seeded.workspace_id}/artist-profiles/"
+        f"{artist_profile_id}"
+    )
+    update_response = client.patch(
+        f"/api/v1/workspaces/{seeded.workspace_id}/artist-profiles/"
+        f"{artist_profile_id}",
+        json={"stage_name": "Updated Member Artist"},
+    )
+
+    assert view_response.status_code == 200
+    assert view_response.json()["id"] == str(artist_profile_id)
+    assert update_response.status_code == 200
+    assert update_response.json()["stage_name"] == "Updated Member Artist"
+
+
+def test_artist_profile_create_requires_create_capability(
+    profiles_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededProfiles,
+    ],
+) -> None:
+    client, sessionmaker, seeded = profiles_client
+
+    async def seed_unlinked_artist() -> UUID:
+        async with sessionmaker() as session:
+            workspace = await session.get(Organization, seeded.workspace_id)
+            assert workspace is not None
+            artist = Artist(name="New Artist", organization=workspace)
+            session.add(artist)
+            await session.commit()
+            return artist.id
+
+    artist_id = asyncio.run(seed_unlinked_artist())
+    asyncio.run(
+        _set_workspace_permission(
+            sessionmaker,
+            user_id=seeded.member_user_id,
+            workspace_id=seeded.workspace_id,
+            permission=WorkspacePermission.guest,
+        )
+    )
+    asyncio.run(
+        _grant_workspace_role(
+            sessionmaker,
+            profile_id=seeded.member_profile_id,
+            workspace_id=seeded.workspace_id,
+            role_key="artist_editor_only",
+            capability_keys=("artist.profile.edit",),
+            departments=("a&r",),
+        )
+    )
+    _set_context(
+        client,
+        seeded,
+        user_id=seeded.member_user_id,
+        email="member@example.com",
+        display_name="Member",
+        memberships=(
+            MembershipContext(
+                organization_id=seeded.workspace_id,
+                organization_name="Alpha Label",
+                organization_slug="alpha-label",
+                workos_organization_id="org_ALPHA",
+                workspace_permission=WorkspacePermission.guest,
+            ),
+        ),
+    )
+
+    denied_response = client.post(
+        f"/api/v1/workspaces/{seeded.workspace_id}/artist-profiles",
+        json={
+            "artist_id": str(artist_id),
+            "universal_profile_id": str(seeded.member_profile_id),
+            "stage_name": "New Artist",
+        },
+    )
+
+    assert denied_response.status_code == 403
+    assert denied_response.json() == {"detail": "Insufficient capability permission"}
 
 
 def test_profile_openapi_contract_exposes_stable_response_fields(

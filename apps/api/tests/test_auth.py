@@ -991,6 +991,22 @@ def test_capability_route_allows_department_and_capability(
         capability_permissions=("contract.create",),
     )
 
+    async def decide_capability(session, *, actor, workspace, capability, resource):
+        return AuthorizationDecision(
+            actor=AuthorizationActor(kind=ActorKind.user, subject="user_01TEST"),
+            action=Capability.contract_create,
+            workspace_id=None,
+            resource=None,
+            allowed=True,
+            reason="capability_allowed",
+        )
+
+    monkeypatch.setattr(
+        authorization_service,
+        "decide_capability",
+        decide_capability,
+    )
+
     with TestClient(app) as test_client:
         response = test_client.post("/api/v1/authorization/examples/contracts")
 
@@ -1009,6 +1025,22 @@ def test_capability_route_rejects_missing_department(
         capability_permissions=("contract.create",),
     )
 
+    async def decide_capability(session, *, actor, workspace, capability, resource):
+        return AuthorizationDecision(
+            actor=AuthorizationActor(kind=ActorKind.user, subject="user_01TEST"),
+            action=Capability.contract_create,
+            workspace_id=None,
+            resource=None,
+            allowed=False,
+            reason="insufficient_department_access",
+        )
+
+    monkeypatch.setattr(
+        authorization_service,
+        "decide_capability",
+        decide_capability,
+    )
+
     with TestClient(app) as test_client:
         response = test_client.post("/api/v1/authorization/examples/contracts")
 
@@ -1025,6 +1057,22 @@ def test_capability_route_rejects_missing_capability(
         app,
         workspace_permission=WorkspacePermission.guest,
         department_access=("legal",),
+    )
+
+    async def decide_capability(session, *, actor, workspace, capability, resource):
+        return AuthorizationDecision(
+            actor=AuthorizationActor(kind=ActorKind.user, subject="user_01TEST"),
+            action=Capability.contract_create,
+            workspace_id=None,
+            resource=None,
+            allowed=False,
+            reason="missing_capability",
+        )
+
+    monkeypatch.setattr(
+        authorization_service,
+        "decide_capability",
+        decide_capability,
     )
 
     with TestClient(app) as test_client:

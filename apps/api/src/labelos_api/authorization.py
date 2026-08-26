@@ -3,10 +3,11 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
+from inspect import isawaitable
 from typing import Annotated, Any, Protocol
 from uuid import UUID
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from labelos_database.capabilities import Capability
 from labelos_database.models import (
     Artist,
@@ -30,6 +31,7 @@ from labelos_api.auth import (
     AuthenticatedPrincipal,
     CurrentUserContext,
     MembershipContext,
+    SessionDep,
     get_current_principal,
     get_current_user_context,
     has_role_at_least,
@@ -248,6 +250,16 @@ class AuthorizationDecision:
     reason: str
 
 
+@dataclass(frozen=True)
+class LegacyWorkspaceAuthorizationMembership:
+    workspace_permission: WorkspacePermission = WorkspacePermission.member
+    capability_permissions: tuple[str, ...] = ()
+
+    @property
+    def approved_department_access(self) -> tuple[str, ...]:
+        return ()
+
+
 class WorkspaceAuthorizationContext(Protocol):
     principal: AuthenticatedPrincipal
     memberships: tuple[MembershipContext, ...]
@@ -262,10 +274,53 @@ AuthorizationWorkspace = MembershipContext | UUID | None
 AuthorizationActorInput = (
     WorkspaceAuthorizationContext | CurrentUserContext | User | UUID
 )
+WorkspaceContextResolver = Callable[
+    [Request, CurrentUserContext],
+    AuthorizationWorkspace,
+]
+ResourceContextResolver = Callable[
+    [Request, CurrentUserContext],
+    AuthorizationResource | dict[str, Any] | None,
+]
 
 
 def _forbidden(detail: str) -> HTTPException:
     return HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
+
+
+def _not_found() -> HTTPException:
+    return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+
+
+def _request_value(request: Request, name: str) -> str | None:
+    value = request.path_params.get(name)
+    if value is None:
+        value = request.query_params.get(name)
+    return str(value) if value is not None else None
+
+
+def _request_uuid(request: Request, name: str) -> UUID | None:
+    value = _request_value(request, name)
+    if value is None:
+        return None
+    try:
+        return UUID(value)
+    except ValueError:
+        return None
+
+
+async def _resolve_dependency_value(
+    resolver: Callable[..., Any],
+    request: Request,
+    context: CurrentUserContext,
+) -> Any:
+    try:
+        value = resolver(request, context)
+    except TypeError:
+        value = resolver(request)
+    if isawaitable(value):
+        return await value
+    return value
 
 
 def _principal_roles(principal: AuthenticatedPrincipal) -> tuple[MembershipRole, ...]:
@@ -624,7 +679,13 @@ class AuthorizationService:
         *,
         actor: AuthorizationActorInput,
         workspace_id: UUID,
-    ) -> tuple[OrganizationMembership, WorkspaceMembership] | None:
+    ) -> (
+        tuple[
+            OrganizationMembership | LegacyWorkspaceAuthorizationMembership,
+            WorkspaceMembership,
+        ]
+        | None
+    ):
         actor_user_id = self._actor_user_id(actor)
         if actor_user_id is None:
             return None
@@ -654,12 +715,31 @@ class AuthorizationService:
             or membership.workspace_membership is None
             or membership.workspace_membership.status != "active"
         ):
-            return None
+            legacy_workspace_membership = await session.scalar(
+                select(WorkspaceMembership)
+                .options(
+                    selectinload(WorkspaceMembership.role_assignments)
+                    .selectinload(WorkspaceMembershipRole.role)
+                    .selectinload(Role.capability_links)
+                    .selectinload(RoleCapability.capability),
+                )
+                .join(WorkspaceMembership.profile)
+                .where(WorkspaceMembership.workspace_id == workspace_id)
+                .where(WorkspaceMembership.status == "active")
+                .where(WorkspaceMembership.organization_membership_id.is_(None))
+                .where(WorkspaceMembership.profile.has(user_id=actor_user_id))
+            )
+            if legacy_workspace_membership is None:
+                return None
+            return (
+                LegacyWorkspaceAuthorizationMembership(),
+                legacy_workspace_membership,
+            )
         return membership, membership.workspace_membership
 
     def _effective_capabilities_for_membership(
         self,
-        membership: OrganizationMembership,
+        membership: OrganizationMembership | LegacyWorkspaceAuthorizationMembership,
         workspace_membership: WorkspaceMembership,
         *,
         workspace_id: UUID,
@@ -1016,7 +1096,16 @@ def require_permission(
 def require_capability(
     required_capability: Capability | str,
     *,
+    workspace: AuthorizationWorkspace | None = None,
+    workspace_param: str | None = None,
+    workspace_context: WorkspaceContextResolver | None = None,
+    resource: AuthorizationResource | dict[str, Any] | None = None,
+    resource_context: ResourceContextResolver | None = None,
+    resource_kind: ResourceKind | str | None = None,
+    resource_id_param: str | None = None,
+    resource_workspace_param: str | None = None,
     department: str | None = None,
+    hide_resource_existence: bool = False,
 ) -> Callable[..., CurrentUserContext]:
     required = (
         required_capability
@@ -1025,28 +1114,70 @@ def require_capability(
     )
 
     async def dependency(
+        request: Request,
+        session: SessionDep,
         context: Annotated[CurrentUserContext, Depends(require_workspace())],
     ) -> CurrentUserContext:
-        membership = context.active_membership
-        if membership is None:
+        resolved_workspace = workspace
+        if workspace_context is not None:
+            resolved_workspace = await _resolve_dependency_value(
+                workspace_context,
+                request,
+                context,
+            )
+        elif workspace_param is not None:
+            resolved_workspace = _request_uuid(request, workspace_param)
+        if resolved_workspace is None:
+            resolved_workspace = context.active_membership
+        if resolved_workspace is None:
             raise _forbidden("Workspace context required")
-        allowed_departments = (
-            frozenset({department})
-            if department is not None
-            else CAPABILITY_DEPARTMENTS.get(required, frozenset())
+
+        resolved_resource = resource
+        if resource_context is not None:
+            resolved_resource = await _resolve_dependency_value(
+                resource_context,
+                request,
+                context,
+            )
+        elif (
+            resource_kind is not None
+            or resource_id_param is not None
+            or resource_workspace_param is not None
+            or department is not None
+        ):
+            resolved_resource = AuthorizationResource(
+                kind=resource_kind,
+                id=(
+                    _request_uuid(request, resource_id_param)
+                    if resource_id_param is not None
+                    else None
+                ),
+                workspace_id=(
+                    _request_uuid(request, resource_workspace_param)
+                    if resource_workspace_param is not None
+                    else None
+                ),
+                department=department,
+            )
+
+        decision = await authorization_service.decide_capability(
+            session,
+            actor=context,
+            workspace=resolved_workspace,
+            capability=required,
+            resource=resolved_resource,
         )
-        if allowed_departments and not any(
-            authorization_service.can_access_department(context, slug)
-            for slug in allowed_departments
-        ):
+        if decision.allowed:
+            return context
+        if hide_resource_existence and decision.reason in {
+            "invalid_resource_scope",
+            "membership_not_found",
+        }:
+            raise _not_found()
+        if decision.reason == "insufficient_department_access":
             raise _forbidden("Insufficient department access")
-        if not authorization_service.can(
-            context,
-            membership,
-            required,
-            AuthorizationResource(department=department),
-        ):
-            raise _forbidden("Insufficient capability permission")
-        return context
+        if decision.reason == "invalid_workspace":
+            raise _forbidden("Workspace context required")
+        raise _forbidden("Insufficient capability permission")
 
     return dependency
