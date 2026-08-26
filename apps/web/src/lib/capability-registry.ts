@@ -173,7 +173,11 @@ export const capabilityRegistry: readonly CapabilityDefinition[] = [
   defineCapability(capabilities.contractEdit, "Edit contracts", "Edit contract records."),
   defineCapability(capabilities.contractReview, "Review contracts", "Review contract terms."),
   defineCapability(capabilities.contractApprove, "Approve contracts", "Approve contract records."),
-  defineCapability(capabilities.contractExecute, "Execute contracts", "Execute approved contracts."),
+  defineCapability(
+    capabilities.contractExecute,
+    "Execute contracts",
+    "Execute approved contracts.",
+  ),
   defineCapability(capabilities.royaltyView, "View royalties", "View royalty data."),
   defineCapability(
     capabilities.royaltyCalculate,
@@ -198,7 +202,11 @@ export const capabilityRegistry: readonly CapabilityDefinition[] = [
     "Approve payments",
     "Approve payment records.",
   ),
-  defineCapability(capabilities.analyticsView, "View analytics", "View analytics data and reports."),
+  defineCapability(
+    capabilities.analyticsView,
+    "View analytics",
+    "View analytics data and reports.",
+  ),
 ] as const;
 
 export const capabilityKeys = capabilityRegistry.map((capability) => capability.key);

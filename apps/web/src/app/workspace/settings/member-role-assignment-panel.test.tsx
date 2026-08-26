@@ -183,11 +183,11 @@ describe("MemberRoleAssignmentPanel", () => {
     await user.click(screen.getByRole("button", { name: "Save roles" }));
 
     await waitFor(() =>
-      expect(mocks.replaceMemberWorkspaceRoles).toHaveBeenCalledWith(
-        "workspace_01",
-        "member_01",
-        ["role_manager", "role_artist", "role_producer"],
-      ),
+      expect(mocks.replaceMemberWorkspaceRoles).toHaveBeenCalledWith("workspace_01", "member_01", [
+        "role_manager",
+        "role_artist",
+        "role_producer",
+      ]),
     );
     expect(mocks.assignmentsReload).toHaveBeenCalled();
   });
@@ -222,6 +222,8 @@ describe("MemberRoleAssignmentPanel", () => {
       ).toBeInTheDocument(),
     );
     expect(screen.getByRole("checkbox", { name: "Anthony Malary role Artist" })).toBeChecked();
-    expect(screen.getByRole("checkbox", { name: "Anthony Malary role Producer" })).not.toBeChecked();
+    expect(
+      screen.getByRole("checkbox", { name: "Anthony Malary role Producer" }),
+    ).not.toBeChecked();
   });
 });

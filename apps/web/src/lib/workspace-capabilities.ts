@@ -2,10 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useSyncExternalStore } from "react";
 
-import {
-  type AuthorizationSubject,
-  type Capability,
-} from "./authorization";
+import { type AuthorizationSubject, type Capability } from "./authorization";
 
 export type WorkspaceCapabilityApiErrorCode =
   "unauthorized" | "forbidden" | "not_found" | "network_failure";
@@ -366,9 +363,7 @@ export function getWorkspaceMembers(
   );
 }
 
-export function getMemberRoleAssignments(
-  workspaceId: string,
-): Promise<MemberRoleAssignmentsList> {
+export function getMemberRoleAssignments(workspaceId: string): Promise<MemberRoleAssignmentsList> {
   return workspaceCapabilityJson<MemberRoleAssignmentsList>(
     `/api/workspaces/${workspaceId}/member-role-assignments`,
   );
@@ -386,9 +381,10 @@ export function replaceMemberWorkspaceRoles(
       body: JSON.stringify({ role_ids: roleIds }),
     },
   ).then((result) => {
-    invalidateWorkspaceCapabilityCache((key) =>
-      key === workspaceCapabilityQueryKeys.memberRoleAssignments(workspaceId) ||
-      key.startsWith(`workspace-capabilities:members:${workspaceId}:`),
+    invalidateWorkspaceCapabilityCache(
+      (key) =>
+        key === workspaceCapabilityQueryKeys.memberRoleAssignments(workspaceId) ||
+        key.startsWith(`workspace-capabilities:members:${workspaceId}:`),
     );
     return result;
   });
@@ -397,9 +393,7 @@ export function replaceMemberWorkspaceRoles(
 export function useWorkspaceAuthorizationContext(
   workspaceId: string | null,
 ): WorkspaceCapabilityState<WorkspaceAuthorizationContext> {
-  const key = workspaceId
-    ? workspaceCapabilityQueryKeys.authorizationContext(workspaceId)
-    : null;
+  const key = workspaceId ? workspaceCapabilityQueryKeys.authorizationContext(workspaceId) : null;
   const fetcher = useCallback(
     () => getCurrentWorkspaceAuthorization(workspaceId ?? ""),
     [workspaceId],
@@ -442,10 +436,7 @@ export function useEffectiveCapabilities(workspaceId: string | null): EffectiveC
       workspacePermission === "owner" || capabilities.includes(capability),
     [capabilities, workspacePermission],
   );
-  const hasCapability = useCallback(
-    (capability: Capability | string) => can(capability),
-    [can],
-  );
+  const hasCapability = useCallback((capability: Capability | string) => can(capability), [can]);
 
   return {
     ...authorization,

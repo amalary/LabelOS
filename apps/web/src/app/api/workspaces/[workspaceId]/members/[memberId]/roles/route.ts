@@ -9,17 +9,14 @@ export function PUT(
 ) {
   return context.params.then(({ memberId, workspaceId }) =>
     request.text().then((body) =>
-      proxyWorkspaceRequest(
-        `/api/v1/organizations/${workspaceId}/members/${memberId}/roles`,
-        {
-          body,
-          headers: {
-            Accept: "application/json",
-            "Content-Type": request.headers.get("content-type") ?? "application/json",
-          },
-          method: "PUT",
+      proxyWorkspaceRequest(`/api/v1/organizations/${workspaceId}/members/${memberId}/roles`, {
+        body,
+        headers: {
+          Accept: "application/json",
+          "Content-Type": request.headers.get("content-type") ?? "application/json",
         },
-      ),
+        method: "PUT",
+      }),
     ),
   );
 }

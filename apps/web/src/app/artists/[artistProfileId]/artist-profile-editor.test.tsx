@@ -105,10 +105,7 @@ describe("ArtistProfileEditor", () => {
         if (url === "/api/profiles/workspaces/workspace_01/profiles/profile_01") {
           return Promise.resolve(Response.json(membership));
         }
-        if (
-          url ===
-          "/api/profiles/workspaces/workspace_01/artist-profiles/artist_profile_01"
-        ) {
+        if (url === "/api/profiles/workspaces/workspace_01/artist-profiles/artist_profile_01") {
           return Promise.resolve(Response.json(artistProfile));
         }
         return Promise.resolve(Response.json({}, { status: 404 }));

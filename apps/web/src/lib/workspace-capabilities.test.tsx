@@ -141,9 +141,7 @@ describe("workspace capability data layer", () => {
 
     await expect(getWorkspaceRoles("workspace_01")).resolves.toEqual(workspaceRoles);
     await expect(getWorkspaceMembers("workspace_01")).resolves.toEqual(workspaceMembers);
-    await expect(getMemberRoleAssignments("workspace_01")).resolves.toEqual(
-      memberRoleAssignments,
-    );
+    await expect(getMemberRoleAssignments("workspace_01")).resolves.toEqual(memberRoleAssignments);
 
     expect(fetch).toHaveBeenNthCalledWith(
       1,
@@ -170,9 +168,7 @@ describe("workspace capability data layer", () => {
     await expect(
       replaceMemberWorkspaceRoles("workspace_01", "member_01", ["role_artist", "role_manager"]),
     ).resolves.toEqual({ roles: [] });
-    await expect(getMemberRoleAssignments("workspace_01")).resolves.toEqual(
-      memberRoleAssignments,
-    );
+    await expect(getMemberRoleAssignments("workspace_01")).resolves.toEqual(memberRoleAssignments);
 
     expect(fetch).toHaveBeenNthCalledWith(
       1,
@@ -206,10 +202,7 @@ describe("workspace capability data layer", () => {
 
     expect(result.current.isLoading).toBe(true);
     await waitFor(() =>
-      expect(result.current.capabilities).toEqual([
-        "artist.profile.view",
-        "artist.profile.edit",
-      ]),
+      expect(result.current.capabilities).toEqual(["artist.profile.view", "artist.profile.edit"]),
     );
     expect(result.current.can("artist.profile.edit")).toBe(true);
     expect(result.current.hasCapability("artist.profile.delete")).toBe(false);

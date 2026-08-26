@@ -570,9 +570,9 @@ def test_backfill_maps_representative_legacy_membership_roles(
                         selectinload(
                             WorkspaceMembership.organization_membership
                         ).selectinload(OrganizationMembership.user),
-                        selectinload(
-                            WorkspaceMembership.role_assignments
-                        ).selectinload(WorkspaceMembershipRole.role),
+                        selectinload(WorkspaceMembership.role_assignments).selectinload(
+                            WorkspaceMembershipRole.role
+                        ),
                     )
                     .where(
                         WorkspaceMembership.organization_membership_id == membership.id

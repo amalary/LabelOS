@@ -51,9 +51,7 @@ function roleKeysFor(
   allowedKeys: ReadonlySet<string>,
 ) {
   return new Set(
-    (assignment?.roles ?? [])
-      .map((role) => role.key)
-      .filter((roleKey) => allowedKeys.has(roleKey)),
+    (assignment?.roles ?? []).map((role) => role.key).filter((roleKey) => allowedKeys.has(roleKey)),
   );
 }
 

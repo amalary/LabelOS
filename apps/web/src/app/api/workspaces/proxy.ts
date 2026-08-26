@@ -7,7 +7,10 @@ function responseHeaders(contentType = "application/json") {
   };
 }
 
-export async function proxyWorkspaceRequest(path: string, init: RequestInit = {}): Promise<Response> {
+export async function proxyWorkspaceRequest(
+  path: string,
+  init: RequestInit = {},
+): Promise<Response> {
   try {
     const upstream = await apiFetch(path, init);
     const body = upstream.status === 204 ? null : await upstream.text();

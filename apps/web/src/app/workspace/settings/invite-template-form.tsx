@@ -108,8 +108,7 @@ export function InviteTemplateForm({
   const [state, formAction] = useActionState(createWorkspaceInviteAction, initialActionState);
   const [selectedRoles, setSelectedRoles] = useState<Set<RoleName>>(() => new Set(["Artist"]));
   const selectedDepartments = useMemo(() => uniqueDepartmentsFor(selectedRoles), [selectedRoles]);
-  const canSubmit =
-    canInviteMembers && (canAssignInviteRoles ? selectedRoles.size > 0 : true);
+  const canSubmit = canInviteMembers && (canAssignInviteRoles ? selectedRoles.size > 0 : true);
 
   useEffect(() => {
     if (!isOpen) {
