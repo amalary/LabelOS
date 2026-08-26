@@ -8,13 +8,16 @@ import {
   getCurrentWorkspaceRoles,
   getEffectiveCapabilities,
   getMemberRoleAssignments,
+  getWorkspaceMembers,
   getWorkspaceRoles,
   invalidateWorkspaceCapabilityCache,
+  replaceMemberWorkspaceRoles,
   shouldInvalidateWorkspaceCapabilityRealtimeCacheKey,
   useCapabilities,
   useCurrentWorkspaceRoles,
   useEffectiveCapabilities,
   useMemberRoleAssignments,
+  useWorkspaceMembers,
   useWorkspaceRoles,
 } from "./workspace-capabilities";
 
@@ -55,6 +58,28 @@ const workspaceRoles = {
       capabilities: ["artist.profile.view"],
     },
   ],
+};
+
+const workspaceMembers = {
+  members: [
+    {
+      id: "member_01",
+      user_id: "user_01",
+      email: "anthony@example.com",
+      display_name: "Anthony Malary",
+      workspace_permission: "member",
+      role: "member",
+      professional_roles: ["Artist"],
+      department_access: [],
+      pending_department_access: [],
+      denied_department_access: [],
+      capability_permissions: [],
+      status: "active",
+    },
+  ],
+  limit: 100,
+  offset: 0,
+  total: 1,
 };
 
 const memberRoleAssignments = {
@@ -111,9 +136,11 @@ describe("workspace capability data layer", () => {
   it("fetches available workspace roles and member role assignments", async () => {
     vi.mocked(fetch)
       .mockResolvedValueOnce(Response.json(workspaceRoles))
+      .mockResolvedValueOnce(Response.json(workspaceMembers))
       .mockResolvedValueOnce(Response.json(memberRoleAssignments));
 
     await expect(getWorkspaceRoles("workspace_01")).resolves.toEqual(workspaceRoles);
+    await expect(getWorkspaceMembers("workspace_01")).resolves.toEqual(workspaceMembers);
     await expect(getMemberRoleAssignments("workspace_01")).resolves.toEqual(
       memberRoleAssignments,
     );
@@ -125,9 +152,39 @@ describe("workspace capability data layer", () => {
     );
     expect(fetch).toHaveBeenNthCalledWith(
       2,
+      "/api/workspaces/workspace_01/members?limit=100&offset=0",
+      expect.any(Object),
+    );
+    expect(fetch).toHaveBeenNthCalledWith(
+      3,
       "/api/workspaces/workspace_01/member-role-assignments",
       expect.any(Object),
     );
+  });
+
+  it("replaces member workspace roles through the frontend proxy", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(Response.json({ roles: [] }))
+      .mockResolvedValueOnce(Response.json(memberRoleAssignments));
+
+    await expect(
+      replaceMemberWorkspaceRoles("workspace_01", "member_01", ["role_artist", "role_manager"]),
+    ).resolves.toEqual({ roles: [] });
+    await expect(getMemberRoleAssignments("workspace_01")).resolves.toEqual(
+      memberRoleAssignments,
+    );
+
+    expect(fetch).toHaveBeenNthCalledWith(
+      1,
+      "/api/workspaces/workspace_01/members/member_01/roles",
+      expect.objectContaining({
+        body: JSON.stringify({ role_ids: ["role_artist", "role_manager"] }),
+        cache: "no-store",
+        method: "PUT",
+      }),
+    );
+    const headers = vi.mocked(fetch).mock.calls[0]?.[1]?.headers as Headers;
+    expect(headers.get("Content-Type")).toBe("application/json");
   });
 
   it("maps authorization failures to typed loading errors", async () => {
@@ -195,12 +252,15 @@ describe("workspace capability data layer", () => {
   it("loads available roles and authorized member role assignments with hook loading state", async () => {
     vi.mocked(fetch)
       .mockResolvedValueOnce(Response.json(workspaceRoles))
+      .mockResolvedValueOnce(Response.json(workspaceMembers))
       .mockResolvedValueOnce(Response.json(memberRoleAssignments));
 
     const roles = renderHook(() => useWorkspaceRoles("workspace_01"));
+    const members = renderHook(() => useWorkspaceMembers("workspace_01"));
     const assignments = renderHook(() => useMemberRoleAssignments("workspace_01"));
 
     await waitFor(() => expect(roles.result.current.data).toEqual(workspaceRoles));
+    await waitFor(() => expect(members.result.current.data).toEqual(workspaceMembers));
     await waitFor(() => expect(assignments.result.current.data).toEqual(memberRoleAssignments));
     expect(roles.result.current.isLoading).toBe(false);
     expect(assignments.result.current.error).toBeNull();
@@ -252,6 +312,12 @@ describe("workspace capability data layer", () => {
     expect(
       shouldInvalidateWorkspaceCapabilityRealtimeCacheKey({
         key: "workspace-capabilities:member-role-assignments:workspace_01",
+        organizationId: "workspace_01",
+      }),
+    ).toBe(true);
+    expect(
+      shouldInvalidateWorkspaceCapabilityRealtimeCacheKey({
+        key: "workspace-capabilities:members:workspace_01:100:0",
         organizationId: "workspace_01",
       }),
     ).toBe(true);

@@ -5,6 +5,7 @@ import { can, capabilities } from "../../../lib/authorization";
 import { requireDashboardSession } from "../../../lib/dashboard-session";
 import { getOrganizationSelection, type OrganizationSummary } from "../../../lib/organizations";
 import { InviteTemplateForm } from "./invite-template-form";
+import { MemberRoleAssignmentPanel } from "./member-role-assignment-panel";
 
 type WorkspaceSettingsPageProps = {
   searchParams?: Promise<{
@@ -49,12 +50,14 @@ export default async function WorkspaceSettingsPage({ searchParams }: WorkspaceS
 
   return (
     <AppShell>
-      <div className="mx-auto flex w-full max-w-4xl flex-col gap-6">
+      <div className="mx-auto flex w-full max-w-5xl flex-col gap-6">
         <header className="flex flex-col gap-2 border-b border-slate-200 pb-5">
           <p className="text-sm font-medium text-slate-500">Workspace Settings</p>
-          <h1 className="text-3xl font-semibold tracking-normal text-slate-950">Invite People</h1>
+          <h1 className="text-3xl font-semibold tracking-normal text-slate-950">
+            People Access
+          </h1>
           <p className="max-w-2xl text-sm leading-6 text-slate-600">
-            Create a general workspace invitation link for{" "}
+            Invite people and manage role assignments for{" "}
             {activeOrganization?.name ?? "this workspace"}.
           </p>
         </header>
@@ -92,6 +95,8 @@ export default async function WorkspaceSettingsPage({ searchParams }: WorkspaceS
             ) : null}
           </section>
         )}
+
+        {activeOrganization ? <MemberRoleAssignmentPanel /> : null}
       </div>
     </AppShell>
   );

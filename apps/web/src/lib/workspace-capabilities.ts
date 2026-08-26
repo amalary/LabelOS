@@ -46,6 +46,26 @@ export type WorkspaceRolesList = {
   roles: WorkspaceRoleDefinition[];
 };
 
+export type WorkspaceRoleAssignment = {
+  id: string;
+  membership_id: string;
+  role: {
+    id: string;
+    key: string;
+    display_name: string;
+    description: string;
+    system_role: boolean;
+  };
+  assigned_by: string | null;
+  assigned_at: string;
+  metadata: Record<string, unknown>;
+  created_at: string;
+};
+
+export type WorkspaceRoleAssignmentsList = {
+  roles: WorkspaceRoleAssignment[];
+};
+
 export type MemberRoleAssignmentSummary = {
   member_id: string;
   roles: WorkspaceRoleSummary[];
@@ -53,6 +73,28 @@ export type MemberRoleAssignmentSummary = {
 
 export type MemberRoleAssignmentsList = {
   assignments: MemberRoleAssignmentSummary[];
+};
+
+export type WorkspaceMember = {
+  id: string;
+  user_id: string;
+  email: string;
+  display_name: string | null;
+  workspace_permission: string;
+  role: string;
+  professional_roles: string[];
+  department_access: string[];
+  pending_department_access: string[];
+  denied_department_access: string[];
+  capability_permissions: string[];
+  status: string;
+};
+
+export type WorkspaceMembersList = {
+  members: WorkspaceMember[];
+  limit: number;
+  offset: number;
+  total: number;
 };
 
 export type WorkspaceCapabilityState<T> = {
@@ -86,6 +128,8 @@ export const workspaceCapabilityQueryKeys = {
   all: "workspace-capabilities",
   authorizationContext: (workspaceId: string) =>
     `workspace-capabilities:authorization-context:${workspaceId}`,
+  members: (workspaceId: string, limit = 100, offset = 0) =>
+    `workspace-capabilities:members:${workspaceId}:${limit}:${offset}`,
   roles: (workspaceId: string) => `workspace-capabilities:roles:${workspaceId}`,
   memberRoleAssignments: (workspaceId: string) =>
     `workspace-capabilities:member-role-assignments:${workspaceId}`,
@@ -147,6 +191,9 @@ function toWorkspaceCapabilityApiError(status: number): WorkspaceCapabilityApiEr
 async function workspaceCapabilityJson<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
   headers.set("Accept", "application/json");
+  if (init?.body && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
 
   let response: Response;
   try {
@@ -306,12 +353,45 @@ export function getWorkspaceRoles(workspaceId: string): Promise<WorkspaceRolesLi
   return workspaceCapabilityJson<WorkspaceRolesList>(`/api/workspaces/${workspaceId}/roles`);
 }
 
+export function getWorkspaceMembers(
+  workspaceId: string,
+  options: { limit?: number; offset?: number } = {},
+): Promise<WorkspaceMembersList> {
+  const params = new URLSearchParams({
+    limit: String(options.limit ?? 100),
+    offset: String(options.offset ?? 0),
+  });
+  return workspaceCapabilityJson<WorkspaceMembersList>(
+    `/api/workspaces/${workspaceId}/members?${params.toString()}`,
+  );
+}
+
 export function getMemberRoleAssignments(
   workspaceId: string,
 ): Promise<MemberRoleAssignmentsList> {
   return workspaceCapabilityJson<MemberRoleAssignmentsList>(
     `/api/workspaces/${workspaceId}/member-role-assignments`,
   );
+}
+
+export function replaceMemberWorkspaceRoles(
+  workspaceId: string,
+  memberId: string,
+  roleIds: string[],
+): Promise<WorkspaceRoleAssignmentsList> {
+  return workspaceCapabilityJson<WorkspaceRoleAssignmentsList>(
+    `/api/workspaces/${workspaceId}/members/${memberId}/roles`,
+    {
+      method: "PUT",
+      body: JSON.stringify({ role_ids: roleIds }),
+    },
+  ).then((result) => {
+    invalidateWorkspaceCapabilityCache((key) =>
+      key === workspaceCapabilityQueryKeys.memberRoleAssignments(workspaceId) ||
+      key.startsWith(`workspace-capabilities:members:${workspaceId}:`),
+    );
+    return result;
+  });
 }
 
 export function useWorkspaceAuthorizationContext(
@@ -406,6 +486,20 @@ export function useWorkspaceRoles(
   return useWorkspaceCapabilityResource(key, workspaceId ? fetcher : null);
 }
 
+export function useWorkspaceMembers(
+  workspaceId: string | null,
+  options: { limit?: number; offset?: number } = {},
+): WorkspaceCapabilityState<WorkspaceMembersList> {
+  const limit = options.limit ?? 100;
+  const offset = options.offset ?? 0;
+  const key = workspaceId ? workspaceCapabilityQueryKeys.members(workspaceId, limit, offset) : null;
+  const fetcher = useCallback(
+    () => getWorkspaceMembers(workspaceId ?? "", { limit, offset }),
+    [limit, offset, workspaceId],
+  );
+  return useWorkspaceCapabilityResource(key, workspaceId ? fetcher : null);
+}
+
 export function useMemberRoleAssignments(
   workspaceId: string | null,
 ): WorkspaceCapabilityState<MemberRoleAssignmentsList> {
@@ -424,6 +518,7 @@ export function shouldInvalidateWorkspaceCapabilityRealtimeCacheKey({
   return (
     key === workspaceCapabilityQueryKeys.authorizationContext(organizationId) ||
     key === workspaceCapabilityQueryKeys.roles(organizationId) ||
-    key === workspaceCapabilityQueryKeys.memberRoleAssignments(organizationId)
+    key === workspaceCapabilityQueryKeys.memberRoleAssignments(organizationId) ||
+    key.startsWith(`workspace-capabilities:members:${organizationId}:`)
   );
 }

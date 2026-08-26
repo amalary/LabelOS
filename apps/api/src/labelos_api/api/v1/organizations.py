@@ -166,6 +166,15 @@ class WorkspaceRoleAssignmentCreateRequest(BaseModel):
         return value
 
 
+class WorkspaceRoleAssignmentsReplaceRequest(BaseModel):
+    role_ids: list[UUID] = Field(default_factory=list, max_length=32)
+
+    @field_validator("role_ids")
+    @classmethod
+    def deduplicate_role_ids(cls, value: list[UUID]) -> list[UUID]:
+        return list(dict.fromkeys(value))
+
+
 class WorkspaceRoleResponse(BaseModel):
     id: UUID
     key: str
@@ -964,6 +973,52 @@ async def _active_owner_count(
     return count or 0
 
 
+async def _active_owner_access_count_excluding_member(
+    session: AsyncSession,
+    organization_id: UUID,
+    member_id: UUID,
+) -> int:
+    owner_membership_ids = {
+        membership_id
+        for membership_id in (
+            await session.scalars(
+                select(OrganizationMembership.id)
+                .where(OrganizationMembership.organization_id == organization_id)
+                .where(OrganizationMembership.status == "active")
+                .where(OrganizationMembership.id != member_id)
+                .where(
+                    OrganizationMembership.workspace_permission
+                    == WorkspacePermission.owner
+                )
+            )
+        ).all()
+    }
+    owner_role_membership_ids = {
+        membership_id
+        for membership_id in (
+            await session.scalars(
+                select(OrganizationMembership.id)
+                .join(
+                    WorkspaceMembership,
+                    WorkspaceMembership.organization_membership_id
+                    == OrganizationMembership.id,
+                )
+                .join(
+                    WorkspaceMembershipRole,
+                    WorkspaceMembershipRole.membership_id == WorkspaceMembership.id,
+                )
+                .join(Role, Role.id == WorkspaceMembershipRole.role_id)
+                .where(OrganizationMembership.organization_id == organization_id)
+                .where(OrganizationMembership.status == "active")
+                .where(WorkspaceMembership.status == "active")
+                .where(OrganizationMembership.id != member_id)
+                .where(Role.key == WorkspacePermission.owner.value)
+            )
+        ).all()
+    }
+    return len(owner_membership_ids | owner_role_membership_ids)
+
+
 async def _slug_exists(
     session: AsyncSession,
     slug: str,
@@ -1751,6 +1806,204 @@ async def list_member_workspace_roles(
     )
     if workspace_membership is None:
         return WorkspaceRoleAssignmentsListResponse(roles=[])
+    assignments = await session.scalars(
+        select(WorkspaceMembershipRole)
+        .options(selectinload(WorkspaceMembershipRole.role))
+        .where(WorkspaceMembershipRole.membership_id == workspace_membership.id)
+        .order_by(
+            WorkspaceMembershipRole.assigned_at.asc(),
+            WorkspaceMembershipRole.role_id.asc(),
+        )
+    )
+    return WorkspaceRoleAssignmentsListResponse(
+        roles=[
+            _role_assignment_response(assignment) for assignment in assignments.all()
+        ]
+    )
+
+
+@router.put(
+    "/{organization_id}/members/{member_id}/roles",
+    response_model=WorkspaceRoleAssignmentsListResponse,
+)
+async def replace_member_workspace_roles(
+    organization_id: UUID,
+    member_id: UUID,
+    payload: WorkspaceRoleAssignmentsReplaceRequest,
+    session: SessionDep,
+    context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
+) -> WorkspaceRoleAssignmentsListResponse:
+    if await _active_membership_row(session, context, organization_id) is None:
+        raise _not_found()
+    _require_capability(
+        context,
+        organization_id,
+        Capability.workspace_member_roles_manage,
+    )
+    _require_capability(context, organization_id, Capability.role_assign)
+
+    membership, workspace_membership = (
+        await _workspace_membership_for_organization_member(
+            session,
+            organization_id=organization_id,
+            member_id=member_id,
+            active_only=True,
+        )
+    )
+    if workspace_membership is None:
+        raise _not_found()
+    if membership.user_id == context.user.id:
+        raise _forbidden("Cannot replace workspace roles for yourself")
+
+    existing_assignments = list(
+        (
+            await session.scalars(
+                select(WorkspaceMembershipRole)
+                .options(selectinload(WorkspaceMembershipRole.role))
+                .where(WorkspaceMembershipRole.membership_id == workspace_membership.id)
+            )
+        ).all()
+    )
+    requested_role_ids = set(payload.role_ids)
+    roles: list[Role] = []
+    if requested_role_ids:
+        roles = list(
+            (
+                await session.scalars(
+                    select(Role)
+                    .options(
+                        selectinload(Role.capability_links).selectinload(
+                            RoleCapability.capability
+                        )
+                    )
+                    .where(Role.id.in_(requested_role_ids))
+                )
+            ).all()
+        )
+    if len(roles) != len(requested_role_ids):
+        raise _not_found()
+    for role in roles:
+        _require_role_capabilities_administerable(context, organization_id, role)
+
+    requested_owner = any(role.key == WorkspacePermission.owner.value for role in roles)
+    target_has_owner_access = (
+        membership.workspace_permission == WorkspacePermission.owner
+        or any(
+            assignment.role is not None
+            and assignment.role.key == WorkspacePermission.owner.value
+            for assignment in existing_assignments
+        )
+    )
+    if (
+        target_has_owner_access
+        and not requested_owner
+        and await _active_owner_access_count_excluding_member(
+            session,
+            organization_id,
+            member_id,
+        )
+        == 0
+    ):
+        raise _conflict("Cannot remove the last workspace owner role")
+
+    existing_by_role_id = {
+        assignment.role_id: assignment for assignment in existing_assignments
+    }
+    requested_by_role_id = {role.id: role for role in roles}
+    roles_to_add = [role for role in roles if role.id not in existing_by_role_id]
+    assignments_to_remove = [
+        assignment
+        for assignment in existing_assignments
+        if assignment.role_id not in requested_by_role_id
+    ]
+
+    try:
+        for assignment in assignments_to_remove:
+            await session.delete(assignment)
+        for role in roles_to_add:
+            session.add(
+                WorkspaceMembershipRole(
+                    membership_id=workspace_membership.id,
+                    role_id=role.id,
+                    assigned_by=context.user.id,
+                    assigned_at=_utc_now(),
+                    metadata_json={"source": "workspace_settings"},
+                )
+            )
+        await session.flush()
+
+        for assignment in assignments_to_remove:
+            role = assignment.role
+            await RealtimePublisher(session).publish(
+                organization_id=organization_id,
+                event_type=RealtimeEventType.member_role_changed,
+                actor=context.user,
+                entity_type="member",
+                entity_id=membership.id,
+                payload=_member_role_payload(
+                    membership=membership,
+                    role=role,
+                    action="removed",
+                ),
+            )
+            await RealtimePublisher(session).publish(
+                organization_id=organization_id,
+                event_type=RealtimeEventType.profile_role_removed,
+                actor=context.user,
+                entity_type="profile",
+                entity_id=workspace_membership.profile_id,
+                payload=_profile_role_payload(
+                    profile_id=workspace_membership.profile_id,
+                    workspace_id=organization_id,
+                    membership=membership,
+                    role=role,
+                ),
+            )
+        for role in roles_to_add:
+            await RealtimePublisher(session).publish(
+                organization_id=organization_id,
+                event_type=RealtimeEventType.member_role_changed,
+                actor=context.user,
+                entity_type="member",
+                entity_id=membership.id,
+                payload=_member_role_payload(
+                    membership=membership,
+                    role=role,
+                    action="assigned",
+                ),
+            )
+            await RealtimePublisher(session).publish(
+                organization_id=organization_id,
+                event_type=RealtimeEventType.profile_role_added,
+                actor=context.user,
+                entity_type="profile",
+                entity_id=workspace_membership.profile_id,
+                payload=_profile_role_payload(
+                    profile_id=workspace_membership.profile_id,
+                    workspace_id=organization_id,
+                    membership=membership,
+                    role=role,
+                ),
+            )
+        if assignments_to_remove or roles_to_add:
+            await RealtimePublisher(session).publish(
+                organization_id=organization_id,
+                event_type=RealtimeEventType.profile_roles_updated,
+                actor=context.user,
+                entity_type="profile",
+                entity_id=workspace_membership.profile_id,
+                payload=_profile_roles_updated_payload(
+                    profile_id=workspace_membership.profile_id,
+                    workspace_id=organization_id,
+                    membership=membership,
+                    action="replaced",
+                ),
+            )
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise _conflict("Workspace role assignment conflict") from exc
+
     assignments = await session.scalars(
         select(WorkspaceMembershipRole)
         .options(selectinload(WorkspaceMembershipRole.role))
