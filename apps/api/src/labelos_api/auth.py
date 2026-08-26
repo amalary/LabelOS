@@ -163,6 +163,9 @@ ROLE_ORDER: dict[MembershipRole, int] = {
     MembershipRole.owner: 3,
 }
 
+# TODO(remove after WorkOS emits explicit workspace_permission plus capability
+# claims for every session): map legacy WorkOS role slugs only while syncing
+# authenticated identities into local membership records.
 WORKOS_ROLE_MAP: dict[str, MembershipRole] = {
     "owner": MembershipRole.owner,
     "admin": MembershipRole.admin,
@@ -170,16 +173,6 @@ WORKOS_ROLE_MAP: dict[str, MembershipRole] = {
     "guest": MembershipRole.guest,
     "viewer": MembershipRole.guest,
 }
-
-
-def has_role_at_least(
-    actual: MembershipRole | WorkspacePermission,
-    required: MembershipRole | WorkspacePermission,
-) -> bool:
-    return (
-        ROLE_ORDER[MembershipRole(actual.value)]
-        >= ROLE_ORDER[MembershipRole(required.value)]
-    )
 
 
 def _workos_role_to_membership_role(role: str | None) -> MembershipRole:
@@ -387,22 +380,6 @@ def _workspace_permission_from_value(
     if isinstance(value, WorkspacePermission):
         return value
     return workspace_permission_from_role(value)
-
-
-def require_organization_role(
-    organization_id: UUID,
-    required_role: MembershipRole,
-    context: CurrentUserContext,
-) -> None:
-    for membership in context.memberships:
-        if membership.organization_id == organization_id and has_role_at_least(
-            membership.role, required_role
-        ):
-            return
-    raise HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN,
-        detail="Insufficient organization role",
-    )
 
 
 def require_active_organization_id(context: CurrentUserContext) -> UUID:

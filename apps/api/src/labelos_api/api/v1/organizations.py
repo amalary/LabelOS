@@ -40,9 +40,8 @@ from labelos_api.auth import (
     CurrentUserContext,
     SessionDep,
     get_current_user_context,
-    has_role_at_least,
 )
-from labelos_api.authorization import Capability, Permission, authorization_service
+from labelos_api.authorization import Capability, authorization_service
 from labelos_api.realtime import RealtimeEventType, RealtimePublisher
 
 router = APIRouter(prefix="/organizations", tags=["organizations"])
@@ -354,19 +353,11 @@ def _membership_for_context(
 def _require_membership(
     context: CurrentUserContext,
     organization_id: UUID,
-    required_role: MembershipRole,
 ) -> WorkspacePermission:
-    role = _membership_for_context(context, organization_id)
-    if role is None:
+    workspace_permission = _membership_for_context(context, organization_id)
+    if workspace_permission is None:
         raise _not_found()
-    if not has_role_at_least(role, required_role):
-        raise _forbidden("Insufficient organization role")
-    return role
-
-
-def _require_permission(context: CurrentUserContext, permission: Permission) -> None:
-    if permission.value not in context.principal.permissions:
-        raise _forbidden("Insufficient permission")
+    return workspace_permission
 
 
 def _require_capability(
@@ -388,9 +379,6 @@ def _require_role_capabilities_administerable(
 ) -> None:
     if role.workspace_id not in {None, organization_id}:
         raise _not_found()
-    if _membership_for_context(context, organization_id) == WorkspacePermission.owner:
-        return
-
     actor_capabilities = authorization_service.effective_capabilities(
         context,
         workspace=organization_id,
@@ -880,6 +868,54 @@ def _profile_roles_updated_payload(
     return payload
 
 
+def _authorization_role_audit_payload(
+    *,
+    workspace_id: UUID,
+    membership: OrganizationMembership,
+    workspace_membership: WorkspaceMembership,
+    role: Role,
+    action: str,
+) -> dict[str, Any]:
+    return {
+        "action": action,
+        "workspaceId": str(workspace_id),
+        "membershipId": str(membership.id),
+        "workspaceMembershipId": str(workspace_membership.id),
+        "memberUserId": str(membership.user_id),
+        "profileId": str(workspace_membership.profile_id),
+        "roleId": str(role.id),
+        "roleKey": role.key,
+        "role": role.display_name,
+    }
+
+
+def _authorization_roles_updated_audit_payload(
+    *,
+    workspace_id: UUID,
+    membership: OrganizationMembership,
+    workspace_membership: WorkspaceMembership,
+    action: str,
+    assigned_roles: list[Role] | None = None,
+    removed_roles: list[Role] | None = None,
+) -> dict[str, Any]:
+    return {
+        "action": action,
+        "workspaceId": str(workspace_id),
+        "membershipId": str(membership.id),
+        "workspaceMembershipId": str(workspace_membership.id),
+        "memberUserId": str(membership.user_id),
+        "profileId": str(workspace_membership.profile_id),
+        "assignedRoles": [
+            {"roleId": str(role.id), "roleKey": role.key, "role": role.display_name}
+            for role in assigned_roles or []
+        ],
+        "removedRoles": [
+            {"roleId": str(role.id), "roleKey": role.key, "role": role.display_name}
+            for role in removed_roles or []
+        ],
+    }
+
+
 def _profile_workspace_payload(
     *,
     profile_id: UUID,
@@ -1100,14 +1136,14 @@ async def get_current_organization(
     organization_id = context.active_organization_id
     if organization_id is None:
         raise _forbidden("Organization context required")
-    role = _require_membership(context, organization_id, MembershipRole.guest)
+    workspace_permission = _require_membership(context, organization_id)
     membership = context.active_membership
     organization = await session.get(Organization, organization_id)
     if organization is None:
         raise _not_found()
     return _organization_response(
         organization,
-        role,
+        workspace_permission,
         department_access=list(membership.department_access) if membership else [],
         capability_permissions=(
             list(membership.capability_permissions) if membership else []
@@ -1587,8 +1623,8 @@ async def update_organization(
     session: SessionDep,
     context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
 ) -> OrganizationResponse:
-    role = _require_membership(context, organization_id, MembershipRole.owner)
-    _require_permission(context, Permission.organization_manage)
+    workspace_permission = _require_membership(context, organization_id)
+    _require_capability(context, organization_id, Capability.workspace_update)
 
     organization = await session.get(Organization, organization_id)
     if organization is None:
@@ -1617,13 +1653,14 @@ async def update_organization(
         entity_type="organization",
         entity_id=organization.id,
         payload={
-            "organization": _organization_response(organization, role).model_dump(
-                mode="json"
-            )
+            "organization": _organization_response(
+                organization,
+                workspace_permission,
+            ).model_dump(mode="json")
         },
     )
     await session.commit()
-    return _organization_response(organization, role)
+    return _organization_response(organization, workspace_permission)
 
 
 @router.get(
@@ -1948,6 +1985,20 @@ async def replace_member_workspace_roles(
             )
             await RealtimePublisher(session).publish(
                 organization_id=organization_id,
+                event_type=RealtimeEventType.role_removed,
+                actor=context.user,
+                entity_type="workspace_membership",
+                entity_id=workspace_membership.id,
+                payload=_authorization_role_audit_payload(
+                    workspace_id=organization_id,
+                    membership=membership,
+                    workspace_membership=workspace_membership,
+                    role=role,
+                    action="removed",
+                ),
+            )
+            await RealtimePublisher(session).publish(
+                organization_id=organization_id,
                 event_type=RealtimeEventType.profile_role_removed,
                 actor=context.user,
                 entity_type="profile",
@@ -1974,6 +2025,20 @@ async def replace_member_workspace_roles(
             )
             await RealtimePublisher(session).publish(
                 organization_id=organization_id,
+                event_type=RealtimeEventType.role_assigned,
+                actor=context.user,
+                entity_type="workspace_membership",
+                entity_id=workspace_membership.id,
+                payload=_authorization_role_audit_payload(
+                    workspace_id=organization_id,
+                    membership=membership,
+                    workspace_membership=workspace_membership,
+                    role=role,
+                    action="assigned",
+                ),
+            )
+            await RealtimePublisher(session).publish(
+                organization_id=organization_id,
                 event_type=RealtimeEventType.profile_role_added,
                 actor=context.user,
                 entity_type="profile",
@@ -1986,6 +2051,23 @@ async def replace_member_workspace_roles(
                 ),
             )
         if assignments_to_remove or roles_to_add:
+            await RealtimePublisher(session).publish(
+                organization_id=organization_id,
+                event_type=RealtimeEventType.membership_roles_updated,
+                actor=context.user,
+                entity_type="workspace_membership",
+                entity_id=workspace_membership.id,
+                payload=_authorization_roles_updated_audit_payload(
+                    workspace_id=organization_id,
+                    membership=membership,
+                    workspace_membership=workspace_membership,
+                    action="replaced",
+                    assigned_roles=roles_to_add,
+                    removed_roles=[
+                        assignment.role for assignment in assignments_to_remove
+                    ],
+                ),
+            )
             await RealtimePublisher(session).publish(
                 organization_id=organization_id,
                 event_type=RealtimeEventType.profile_roles_updated,
@@ -2096,6 +2178,20 @@ async def assign_member_workspace_role(
         )
         await RealtimePublisher(session).publish(
             organization_id=organization_id,
+            event_type=RealtimeEventType.role_assigned,
+            actor=context.user,
+            entity_type="workspace_membership",
+            entity_id=workspace_membership.id,
+            payload=_authorization_role_audit_payload(
+                workspace_id=organization_id,
+                membership=membership,
+                workspace_membership=workspace_membership,
+                role=role,
+                action="assigned",
+            ),
+        )
+        await RealtimePublisher(session).publish(
+            organization_id=organization_id,
             event_type=RealtimeEventType.profile_role_added,
             actor=context.user,
             entity_type="profile",
@@ -2105,6 +2201,20 @@ async def assign_member_workspace_role(
                 workspace_id=organization_id,
                 membership=membership,
                 role=role,
+            ),
+        )
+        await RealtimePublisher(session).publish(
+            organization_id=organization_id,
+            event_type=RealtimeEventType.membership_roles_updated,
+            actor=context.user,
+            entity_type="workspace_membership",
+            entity_id=workspace_membership.id,
+            payload=_authorization_roles_updated_audit_payload(
+                workspace_id=organization_id,
+                membership=membership,
+                workspace_membership=workspace_membership,
+                action="assigned",
+                assigned_roles=[role],
             ),
         )
         await RealtimePublisher(session).publish(
@@ -2192,6 +2302,20 @@ async def remove_member_workspace_role(
     )
     await RealtimePublisher(session).publish(
         organization_id=organization_id,
+        event_type=RealtimeEventType.role_removed,
+        actor=context.user,
+        entity_type="workspace_membership",
+        entity_id=workspace_membership.id,
+        payload=_authorization_role_audit_payload(
+            workspace_id=organization_id,
+            membership=membership,
+            workspace_membership=workspace_membership,
+            role=role,
+            action="removed",
+        ),
+    )
+    await RealtimePublisher(session).publish(
+        organization_id=organization_id,
         event_type=RealtimeEventType.profile_role_removed,
         actor=context.user,
         entity_type="profile",
@@ -2201,6 +2325,20 @@ async def remove_member_workspace_role(
             workspace_id=organization_id,
             membership=membership,
             role=role,
+        ),
+    )
+    await RealtimePublisher(session).publish(
+        organization_id=organization_id,
+        event_type=RealtimeEventType.membership_roles_updated,
+        actor=context.user,
+        entity_type="workspace_membership",
+        entity_id=workspace_membership.id,
+        payload=_authorization_roles_updated_audit_payload(
+            workspace_id=organization_id,
+            membership=membership,
+            workspace_membership=workspace_membership,
+            action="removed",
+            removed_roles=[role],
         ),
     )
     await RealtimePublisher(session).publish(

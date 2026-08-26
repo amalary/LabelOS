@@ -9,11 +9,12 @@ from labelos_api.auth import (
     CurrentUserContext,
     MembershipContext,
     SessionDep,
-    has_role_at_least,
     require_active_organization_id,
 )
 from labelos_api.authorization import (
+    Capability,
     Permission,
+    has_capability,
     require_organization,
     require_permission,
 )
@@ -63,8 +64,8 @@ def _has_permission(context: CurrentUserContext, permission: Permission) -> bool
     return permission.value in context.principal.permissions
 
 
-def _is_admin_or_owner(membership: MembershipContext) -> bool:
-    return has_role_at_least(membership.role, MembershipRole.admin)
+def _has_capability(context: CurrentUserContext, capability: Capability) -> bool:
+    return has_capability(context, capability)
 
 
 def _authorization_response(
@@ -152,18 +153,12 @@ async def get_dashboard_summary(
     if _has_permission(context, Permission.campaigns_view):
         available_cards.append("active-campaigns")
         payload["active_campaigns"] = summary.active_campaigns
-    if _is_admin_or_owner(membership) and _has_permission(
-        context, Permission.contracts_view
-    ):
+    if _has_capability(context, Capability.contract_approve):
         available_cards.append("tasks-approvals")
         payload["pending_approvals"] = summary.pending_approvals
-    if _is_admin_or_owner(membership) and _has_permission(
-        context, Permission.analytics_view
-    ):
+    if _has_capability(context, Capability.finance_report_view):
         available_sections.append("label-performance")
-    if _is_admin_or_owner(membership) and _has_permission(
-        context, Permission.members_manage
-    ):
+    if _has_capability(context, Capability.workspace_member_view):
         available_sections.append("member-activity")
 
     return DashboardSummaryResponse.model_validate(payload)
@@ -179,11 +174,10 @@ async def get_label_performance(
     period: Annotated[LabelPerformancePeriod, Query()],
 ) -> LabelPerformanceResponse:
     organization_id = require_active_organization_id(context)
-    membership = _active_membership(context)
-    if not _is_admin_or_owner(membership):
+    if not _has_capability(context, Capability.finance_report_view):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Insufficient organization role",
+            detail="Insufficient capability permission",
         )
     if metric == LabelPerformanceMetric.revenue and not _has_permission(
         context,

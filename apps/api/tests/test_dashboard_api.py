@@ -147,6 +147,13 @@ def _set_active_organization(
         "contracts:view",
         "members:manage",
     ),
+    department_access: tuple[str, ...] = (
+        "administration",
+        "analytics",
+        "contracts",
+        "finance",
+        "legal",
+    ),
 ) -> None:
     async def override_context() -> CurrentUserContext:
         return CurrentUserContext(
@@ -167,6 +174,7 @@ def _set_active_organization(
                     organization_slug="active-label",
                     workos_organization_id=workos_organization_id,
                     role=role,
+                    department_access=department_access,
                 ),
             ),
         )
@@ -326,6 +334,7 @@ def test_dashboard_summary_omits_unauthorized_sensitive_cards(
         workos_organization_id="org_ALPHA",
         role=MembershipRole.member,
         permissions=("artists:view", "releases:view"),
+        department_access=(),
     )
 
     response = client.get("/api/v1/dashboard/summary")
@@ -423,7 +432,7 @@ def test_dashboard_performance_requires_analytics_permission(
     assert response.json() == {"detail": "Insufficient permission"}
 
 
-def test_dashboard_performance_requires_admin_role(
+def test_dashboard_performance_requires_report_capability(
     dashboard_client: tuple[TestClient, DashboardSeed],
 ) -> None:
     client, seeded = dashboard_client
@@ -434,12 +443,13 @@ def test_dashboard_performance_requires_admin_role(
         workos_organization_id="org_ALPHA",
         role=MembershipRole.member,
         permissions=("analytics:view",),
+        department_access=("analytics",),
     )
 
     response = client.get("/api/v1/dashboard/performance?metric=streams&period=30d")
 
     assert response.status_code == 403
-    assert response.json() == {"detail": "Insufficient organization role"}
+    assert response.json() == {"detail": "Insufficient capability permission"}
 
 
 def test_dashboard_revenue_performance_requires_royalties_permission(

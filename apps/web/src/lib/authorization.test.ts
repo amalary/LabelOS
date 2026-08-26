@@ -7,19 +7,11 @@ import {
   hasCapability,
   hasDepartmentAccess,
   hasPermission,
-  hasRole,
   permissions,
   unavailableActionProps,
 } from "./authorization";
 
 describe("frontend authorization helpers", () => {
-  it("checks the Owner/Admin/Member role hierarchy", () => {
-    expect(hasRole({ role: "owner" }, "admin")).toBe(true);
-    expect(hasRole({ role: "Admin" }, "member")).toBe(true);
-    expect(hasRole({ role: "member" }, "admin")).toBe(false);
-    expect(hasRole({ role: null }, "member")).toBe(false);
-  });
-
   it("checks explicit permissions from the backend token", () => {
     const subject = { permissions: [permissions.artistsView, permissions.releasesManage] };
 

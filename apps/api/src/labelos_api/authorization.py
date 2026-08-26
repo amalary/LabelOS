@@ -34,7 +34,6 @@ from labelos_api.auth import (
     SessionDep,
     get_current_principal,
     get_current_user_context,
-    has_role_at_least,
 )
 
 
@@ -77,12 +76,9 @@ class ResourceKind(StrEnum):
     universal_profile = "universal_profile"
 
 
-APP_ROLES: tuple[MembershipRole, ...] = (
-    MembershipRole.owner,
-    MembershipRole.admin,
-    MembershipRole.member,
-)
-
+# TODO(remove after WorkOS permission claims are backfilled independently of
+# role slugs): keep this compatibility map only for legacy session tests and
+# bootstrap paths that still receive role-derived WorkOS permissions.
 INITIAL_ROLE_PERMISSIONS: dict[MembershipRole, frozenset[Permission]] = {
     MembershipRole.owner: frozenset(Permission),
     MembershipRole.admin: frozenset(
@@ -116,6 +112,9 @@ INITIAL_ROLE_PERMISSIONS: dict[MembershipRole, frozenset[Permission]] = {
 }
 
 OWNER_CAPABILITIES = frozenset(Capability)
+# TODO(remove after every active workspace membership has explicit role
+# assignments and capability grants): this maps legacy workspace_permission rows
+# into the capability system without letting route handlers authorize by role.
 INITIAL_ROLE_CAPABILITIES: dict[MembershipRole, frozenset[Capability]] = {
     MembershipRole.owner: OWNER_CAPABILITIES,
     MembershipRole.admin: frozenset(
@@ -268,8 +267,8 @@ class WorkspaceAuthorizationContext(Protocol):
     def active_membership(self) -> MembershipContext | None: ...
 
 
-AuthorizationAction = Capability | Permission | MembershipRole | str
-ResolvedAuthorizationAction = Capability | Permission | MembershipRole | None
+AuthorizationAction = Capability | Permission | str
+ResolvedAuthorizationAction = Capability | Permission | None
 AuthorizationWorkspace = MembershipContext | UUID | None
 AuthorizationActorInput = (
     WorkspaceAuthorizationContext | CurrentUserContext | User | UUID
@@ -321,10 +320,6 @@ async def _resolve_dependency_value(
     if isawaitable(value):
         return await value
     return value
-
-
-def _principal_roles(principal: AuthenticatedPrincipal) -> tuple[MembershipRole, ...]:
-    return tuple(role for role in principal.membership_roles if role in APP_ROLES)
 
 
 def _workspace_role(workspace_permission: WorkspacePermission) -> MembershipRole:
@@ -542,16 +537,6 @@ class AuthorizationService:
                 allowed=allowed,
                 reason="permission_allowed" if allowed else "missing_permission",
             )
-        if isinstance(action, MembershipRole):
-            allowed = self.can_role(actor, action)
-            return AuthorizationDecision(
-                actor=actor_ref,
-                action=action,
-                workspace_id=workspace_id,
-                resource=normalized_resource,
-                allowed=allowed,
-                reason="role_allowed" if allowed else "insufficient_role",
-            )
         allowed = self.can_capability(
             actor,
             action,
@@ -566,17 +551,6 @@ class AuthorizationService:
             allowed=allowed,
             reason="capability_allowed" if allowed else "missing_capability",
         )
-
-    def can_role(
-        self,
-        actor: WorkspaceAuthorizationContext,
-        required_role: MembershipRole | str,
-    ) -> bool:
-        required = self._normalize_role(required_role)
-        if required is None:
-            return False
-        principal_roles = _principal_roles(actor.principal)
-        return any(has_role_at_least(actual, required) for actual in principal_roles)
 
     def can_permission(
         self,
@@ -598,6 +572,9 @@ class AuthorizationService:
         membership = self._resolve_workspace_membership(actor, workspace)
         if membership is None:
             return False
+        # TODO(remove after owner memberships receive explicit all-department
+        # access grants): owner remains a migration compatibility shortcut for
+        # department scope, while actions themselves are checked as capabilities.
         if membership.workspace_permission == WorkspacePermission.owner:
             return True
         return department_slug in membership.department_access
@@ -622,8 +599,6 @@ class AuthorizationService:
             workspace_id,
         ):
             return False
-        if membership.workspace_permission == WorkspacePermission.owner:
-            return True
         department = self._resource_department(resource)
         allowed_departments = (
             frozenset({department})
@@ -979,7 +954,7 @@ class AuthorizationService:
         self,
         action: AuthorizationAction,
     ) -> ResolvedAuthorizationAction:
-        if isinstance(action, Capability | Permission | MembershipRole):
+        if isinstance(action, Capability | Permission):
             return action
         capability = self._normalize_capability(action)
         if capability is not None:
@@ -987,9 +962,6 @@ class AuthorizationService:
         permission = self._normalize_permission(action)
         if permission is not None:
             return permission
-        role = self._normalize_role(action)
-        if role is not None:
-            return role
         return None
 
     def _normalize_capability(self, capability: Capability | str) -> Capability | None:
@@ -1004,13 +976,6 @@ class AuthorizationService:
             return permission
         if permission in Permission._value2member_map_:
             return Permission(permission)
-        return None
-
-    def _normalize_role(self, role: MembershipRole | str) -> MembershipRole | None:
-        if isinstance(role, MembershipRole):
-            return role
-        if role in MembershipRole._value2member_map_:
-            return MembershipRole(role)
         return None
 
 
@@ -1051,25 +1016,6 @@ def require_workspace() -> Callable[..., CurrentUserContext]:
         if context.active_workspace_id is None:
             raise _forbidden("Workspace context required")
         return context
-
-    return dependency
-
-
-def require_role(
-    required_role: MembershipRole | str,
-) -> Callable[..., CurrentUserContext]:
-    required = (
-        required_role
-        if isinstance(required_role, MembershipRole)
-        else MembershipRole(required_role)
-    )
-
-    async def dependency(
-        context: Annotated[CurrentUserContext, Depends(require_organization())],
-    ) -> CurrentUserContext:
-        if authorization_service.can(context, None, required):
-            return context
-        raise _forbidden("Insufficient role")
 
     return dependency
 

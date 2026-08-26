@@ -18,10 +18,8 @@ from labelos_api.auth import (
     AuthenticatedPrincipal,
     CurrentUserContext,
     MembershipContext,
-    has_role_at_least,
     principal_from_token,
     require_active_workspace_id,
-    require_organization_role,
     require_permission,
 )
 from labelos_api.authorization import (
@@ -372,12 +370,6 @@ def test_authenticated_me_response_uses_current_principal(
     }
 
 
-def test_role_checks_follow_membership_hierarchy() -> None:
-    assert has_role_at_least(MembershipRole.owner, MembershipRole.guest)
-    assert has_role_at_least(MembershipRole.admin, MembershipRole.member)
-    assert not has_role_at_least(MembershipRole.guest, MembershipRole.member)
-
-
 def test_initial_role_permission_mapping() -> None:
     owner_permissions = INITIAL_ROLE_PERMISSIONS[MembershipRole.owner]
     admin_permissions = INITIAL_ROLE_PERMISSIONS[MembershipRole.admin]
@@ -669,7 +661,6 @@ def test_authorization_service_denies_unknown_actions_by_default() -> None:
     assert not authorization_service.can(context, None, "unregistered.action")
     assert not authorization_service.can_capability(context, "unregistered.action")
     assert not authorization_service.can_permission(context, "unregistered:permission")
-    assert not authorization_service.can_role(context, "unregistered-role")
 
 
 def test_authorization_service_requires_active_workspace_membership() -> None:
@@ -748,32 +739,6 @@ def test_authorization_service_combines_capabilities_across_multiple_roles() -> 
         Capability.workspace_member_invite,
         AuthorizationResource(department="administration"),
     )
-
-
-def test_require_organization_role_rejects_insufficient_role() -> None:
-    organization_id = uuid4()
-    context = CurrentUserContext(
-        user=User(email="person@example.com"),
-        principal=AuthenticatedPrincipal(
-            provider="workos",
-            subject="user_01TEST",
-            session_id="session_01TEST",
-        ),
-        memberships=(
-            MembershipContext(
-                organization_id=organization_id,
-                organization_name="Example Label",
-                organization_slug="example-label",
-                workos_organization_id="org_01TEST",
-                role=MembershipRole.guest,
-            ),
-        ),
-    )
-
-    with pytest.raises(HTTPException) as exc_info:
-        require_organization_role(organization_id, MembershipRole.admin, context)
-
-    assert exc_info.value.status_code == 403
 
 
 def test_active_workspace_uses_workos_organization_membership() -> None:
@@ -923,21 +888,28 @@ def test_protected_route_allows_owner_with_permission(
     assert response.json() == {"ok": True, "guard": "artists:manage"}
 
 
-def test_protected_route_allows_admin_role(
+def test_protected_route_allows_workspace_update_capability(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("APP_ENV", "test")
     app = create_app()
-    _override_current_user_context(app, role="admin")
+    _override_current_user_context(
+        app,
+        role="member",
+        department_access=("administration",),
+        capability_permissions=("workspace.update",),
+    )
 
     with TestClient(app) as test_client:
-        response = test_client.get("/api/v1/authorization/examples/admin")
+        response = test_client.get(
+            "/api/v1/authorization/examples/workspace-administration"
+        )
 
     assert response.status_code == 200
-    assert response.json() == {"ok": True, "guard": "admin"}
+    assert response.json() == {"ok": True, "guard": "workspace.update"}
 
 
-def test_protected_route_rejects_member_role(
+def test_protected_route_rejects_missing_workspace_update_capability(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("APP_ENV", "test")
@@ -945,24 +917,28 @@ def test_protected_route_rejects_member_role(
     _override_current_user_context(app, role="member")
 
     with TestClient(app) as test_client:
-        response = test_client.get("/api/v1/authorization/examples/admin")
+        response = test_client.get(
+            "/api/v1/authorization/examples/workspace-administration"
+        )
 
     assert response.status_code == 403
-    assert response.json() == {"detail": "Insufficient role"}
+    assert response.json() == {"detail": "Insufficient capability permission"}
 
 
-def test_protected_route_rejects_missing_role(
+def test_protected_route_rejects_missing_workspace_context_for_capability(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("APP_ENV", "test")
     app = create_app()
-    _override_current_user_context(app, role=None, roles=())
+    _override_current_user_context(app, role=None, roles=(), organization_id=None)
 
     with TestClient(app) as test_client:
-        response = test_client.get("/api/v1/authorization/examples/admin")
+        response = test_client.get(
+            "/api/v1/authorization/examples/workspace-administration"
+        )
 
     assert response.status_code == 403
-    assert response.json() == {"detail": "Insufficient role"}
+    assert response.json() == {"detail": "Organization context required"}
 
 
 def test_protected_route_rejects_missing_permission(

@@ -494,6 +494,15 @@ async def _realtime_events(
         return list(rows.all())
 
 
+def _authorization_audit_events(events: list[RealtimeEvent]) -> list[RealtimeEvent]:
+    return [
+        event
+        for event in events
+        if event.event_type
+        in {"role.assigned", "role.removed", "membership.roles.updated"}
+    ]
+
+
 async def _universal_profile_count(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> int:
@@ -684,7 +693,7 @@ def test_create_organization_validates_slug(
     assert response.json() == {"detail": "Request validation failed"}
 
 
-def test_update_organization_requires_owner_role(
+def test_update_organization_allows_workspace_update_capability(
     organizations_client: tuple[
         TestClient,
         async_sessionmaker[AsyncSession],
@@ -699,11 +708,11 @@ def test_update_organization_requires_owner_role(
         json={"name": "Renamed Label"},
     )
 
-    assert response.status_code == 403
-    assert response.json() == {"detail": "Insufficient organization role"}
+    assert response.status_code == 200
+    assert response.json()["name"] == "Renamed Label"
 
 
-def test_update_organization_requires_manage_permission(
+def test_update_organization_requires_workspace_update_capability(
     organizations_client: tuple[
         TestClient,
         async_sessionmaker[AsyncSession],
@@ -711,7 +720,7 @@ def test_update_organization_requires_manage_permission(
     ],
 ) -> None:
     client, _sessionmaker, seeded = organizations_client
-    _set_context(client, seeded, permissions=("members:manage",))
+    _set_context(client, seeded, role_for_org_a=MembershipRole.member)
 
     response = client.patch(
         f"/api/v1/organizations/{seeded.org_a_id}",
@@ -719,7 +728,7 @@ def test_update_organization_requires_manage_permission(
     )
 
     assert response.status_code == 403
-    assert response.json() == {"detail": "Insufficient permission"}
+    assert response.json() == {"detail": "Insufficient capability permission"}
 
 
 def test_update_organization_changes_name_and_slug(
@@ -1038,7 +1047,13 @@ def test_assign_and_list_multiple_workspace_roles(
         _workspace_role_keys(sessionmaker, seeded.member_membership_id)
     ) == ["artist", "producer"]
     events = asyncio.run(_realtime_events(sessionmaker, seeded.org_a_id))
-    assert [event.event_type for event in events] == [
+    non_audit_events = [
+        event
+        for event in events
+        if event.event_type
+        not in {"role.assigned", "role.removed", "membership.roles.updated"}
+    ]
+    assert [event.event_type for event in non_audit_events] == [
         "member.role_changed",
         "profile.role_added",
         "profile.roles_updated",
@@ -1048,15 +1063,40 @@ def test_assign_and_list_multiple_workspace_roles(
     ]
     assert events[0].payload["action"] == "assigned"
     assert events[0].payload["roleKey"] == "artist"
-    assert events[1].entity_type == "profile"
-    assert events[1].payload["workspaceId"] == str(seeded.org_a_id)
-    assert events[1].payload["roleKey"] == "artist"
-    assert events[2].entity_type == "profile"
-    assert events[2].payload["workspaceId"] == str(seeded.org_a_id)
-    assert events[2].payload["roleKey"] == "artist"
-    assert events[2].payload["action"] == "assigned"
-    assert "member@example.com" not in str(events[1].payload)
-    assert "member@example.com" not in str(events[2].payload)
+    assert non_audit_events[1].entity_type == "profile"
+    assert non_audit_events[1].payload["workspaceId"] == str(seeded.org_a_id)
+    assert non_audit_events[1].payload["roleKey"] == "artist"
+    assert non_audit_events[2].entity_type == "profile"
+    assert non_audit_events[2].payload["workspaceId"] == str(seeded.org_a_id)
+    assert non_audit_events[2].payload["roleKey"] == "artist"
+    assert non_audit_events[2].payload["action"] == "assigned"
+    audit_events = _authorization_audit_events(events)
+    assert [event.event_type for event in audit_events] == [
+        "role.assigned",
+        "membership.roles.updated",
+        "role.assigned",
+        "membership.roles.updated",
+    ]
+    role_audit = audit_events[0]
+    assert role_audit.actor_user_id == seeded.user_id
+    assert role_audit.entity_type == "workspace_membership"
+    assert role_audit.created_at is not None
+    assert role_audit.payload["workspaceId"] == str(seeded.org_a_id)
+    assert role_audit.payload["membershipId"] == str(seeded.member_membership_id)
+    assert role_audit.payload["memberUserId"] == str(seeded.member_id)
+    assert role_audit.payload["roleId"] == str(seeded.artist_role_id)
+    assert role_audit.payload["roleKey"] == "artist"
+    assert audit_events[1].payload["assignedRoles"] == [
+        {
+            "roleId": str(seeded.artist_role_id),
+            "roleKey": "artist",
+            "role": "Artist",
+        }
+    ]
+    assert "member@example.com" not in str(audit_events[0].payload)
+    assert "session_SECRET" not in str(audit_events[0].payload)
+    assert "member@example.com" not in str(non_audit_events[1].payload)
+    assert "member@example.com" not in str(non_audit_events[2].payload)
 
 
 def test_duplicate_workspace_role_assignment_is_rejected(
@@ -1127,7 +1167,13 @@ def test_replace_workspace_roles_persists_multiple_roles_atomically(
         asyncio.run(_workspace_role_keys(sessionmaker, seeded.member_membership_id))
     ) == {"manager", "producer"}
     events = asyncio.run(_realtime_events(sessionmaker, seeded.org_a_id))
-    assert [event.event_type for event in events][-7:] == [
+    non_audit_events = [
+        event
+        for event in events
+        if event.event_type
+        not in {"role.assigned", "role.removed", "membership.roles.updated"}
+    ]
+    assert [event.event_type for event in non_audit_events][-7:] == [
         "member.role_changed",
         "profile.role_removed",
         "member.role_changed",
@@ -1136,7 +1182,31 @@ def test_replace_workspace_roles_persists_multiple_roles_atomically(
         "profile.role_added",
         "profile.roles_updated",
     ]
-    assert events[-1].payload["action"] == "replaced"
+    assert non_audit_events[-1].payload["action"] == "replaced"
+    audit_events = _authorization_audit_events(events)
+    assert [event.event_type for event in audit_events][-4:] == [
+        "role.removed",
+        "role.assigned",
+        "role.assigned",
+        "membership.roles.updated",
+    ]
+    roles_updated_audit = audit_events[-1]
+    assert roles_updated_audit.actor_user_id == seeded.user_id
+    assert roles_updated_audit.payload["workspaceId"] == str(seeded.org_a_id)
+    assert roles_updated_audit.payload["membershipId"] == str(
+        seeded.member_membership_id
+    )
+    assert roles_updated_audit.payload["memberUserId"] == str(seeded.member_id)
+    assert {
+        role["roleKey"] for role in roles_updated_audit.payload["assignedRoles"]
+    } == {
+        "producer",
+        "manager",
+    }
+    assert [
+        role["roleKey"] for role in roles_updated_audit.payload["removedRoles"]
+    ] == ["artist"]
+    assert "member@example.com" not in str(roles_updated_audit.payload)
 
 
 def test_replace_workspace_roles_requires_role_assignment_capabilities(
@@ -1522,6 +1592,23 @@ def test_remove_workspace_role_keeps_universal_profile_and_publishes_activity(
         "profile.role_removed",
     ]
     assert profile_role_events[-1].payload["roleKey"] == "artist"
+    audit_events = _authorization_audit_events(events)
+    assert [event.event_type for event in audit_events] == [
+        "role.assigned",
+        "membership.roles.updated",
+        "role.removed",
+        "membership.roles.updated",
+    ]
+    removal_audit = audit_events[-2]
+    assert removal_audit.actor_user_id == seeded.user_id
+    assert removal_audit.entity_type == "workspace_membership"
+    assert removal_audit.created_at is not None
+    assert removal_audit.payload["workspaceId"] == str(seeded.org_a_id)
+    assert removal_audit.payload["membershipId"] == str(seeded.member_membership_id)
+    assert removal_audit.payload["memberUserId"] == str(seeded.member_id)
+    assert removal_audit.payload["roleId"] == str(seeded.artist_role_id)
+    assert removal_audit.payload["roleKey"] == "artist"
+    assert "member@example.com" not in str(removal_audit.payload)
 
 
 def test_remove_member_requires_remove_capability(

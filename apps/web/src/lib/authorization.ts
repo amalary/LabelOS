@@ -22,8 +22,7 @@ export const permissions = {
 } as const;
 
 export type Permission = (typeof permissions)[keyof typeof permissions];
-export type AppRole = "owner" | "admin" | "member";
-export type WorkspacePermission = AppRole | "guest";
+export type WorkspacePermission = "owner" | "admin" | "member" | "guest";
 export type ActorKind = "user" | "service_account" | "ai_agent";
 export type ResourceKind =
   | "workspace"
@@ -68,7 +67,7 @@ export type AuthorizationResource = {
 
 export type AuthorizationDecision = {
   actor: AuthorizationActor;
-  action: Permission | Capability | AppRole | string | null;
+  action: Permission | Capability | string | null;
   workspaceId?: string | null;
   resource?: AuthorizationResource;
   allowed: boolean;
@@ -123,20 +122,6 @@ const capabilityDepartments: Partial<Record<Capability, readonly string[]>> = {
   [capabilities.analyticsView]: ["analytics", "management"],
 };
 
-const roleRanks: Record<AppRole, number> = {
-  member: 0,
-  admin: 1,
-  owner: 2,
-};
-
-function normalizeRole(role?: string | null): AppRole | null {
-  const normalized = role?.trim().toLowerCase();
-  if (normalized === "owner" || normalized === "admin" || normalized === "member") {
-    return normalized;
-  }
-  return null;
-}
-
 function normalizeWorkspacePermission(permission?: string | null): WorkspacePermission | null {
   const normalized = permission?.trim().toLowerCase();
   if (
@@ -148,11 +133,6 @@ function normalizeWorkspacePermission(permission?: string | null): WorkspacePerm
     return normalized;
   }
   return null;
-}
-
-export function hasRole(subject: AuthorizationSubject, minimumRole: AppRole): boolean {
-  const role = normalizeRole(subject.role);
-  return role !== null && roleRanks[role] >= roleRanks[minimumRole];
 }
 
 export function hasPermission(
@@ -176,7 +156,7 @@ export function hasCapability(
 export function can(
   subject: AuthorizationSubject,
   workspace: AuthorizationWorkspace,
-  capability: Permission | Capability | AppRole | string,
+  capability: Permission | Capability | string,
   resource: AuthorizationResource = null,
 ): boolean {
   if (isPermission(capability)) {
@@ -185,8 +165,7 @@ export function can(
   if (isCapability(capability)) {
     return canUseResolvedCapability(subject, workspace, capability, resource);
   }
-  const role = normalizeRole(capability);
-  return role !== null && hasRole(subject, role);
+  return false;
 }
 
 export function canAccessDepartment(
