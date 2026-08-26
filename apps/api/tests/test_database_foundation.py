@@ -2,8 +2,8 @@ from pathlib import Path
 from uuid import UUID
 
 import pytest
-from labelos_database.capabilities import is_valid_capability_identifier
 from labelos_database.bootstrap import seed_system_roles_and_capabilities
+from labelos_database.capabilities import is_valid_capability_identifier
 from labelos_database.config import DatabaseSettings
 from labelos_database.departments import (
     DEFAULT_DEPARTMENTS,
@@ -502,6 +502,7 @@ def test_default_roles_match_initial_system_catalog() -> None:
     assert tuple(roles_by_key) == (
         "owner",
         "admin",
+        "member",
         "artist",
         "a_and_r",
         "manager",

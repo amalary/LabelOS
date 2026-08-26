@@ -78,11 +78,14 @@ class MembershipRole(StrEnum):
     owner = "owner"
     admin = "admin"
     member = "member"
+    artist = "artist"
     guest = "guest"
     viewer = "viewer"
 
 
 def workspace_permission_from_role(role: MembershipRole) -> WorkspacePermission:
+    if role == MembershipRole.artist:
+        return WorkspacePermission.member
     if role == MembershipRole.viewer:
         return WorkspacePermission.guest
     return WorkspacePermission(role.value)

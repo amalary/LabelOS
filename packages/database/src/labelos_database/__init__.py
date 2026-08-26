@@ -15,6 +15,7 @@ from labelos_database.departments import (
     department_access_sensitivity_for_slug,
 )
 from labelos_database.models import (
+    PROFILE_MODULE_RELATIONSHIPS,
     AIAgent,
     AnalyticsEvent,
     Artist,
@@ -28,7 +29,6 @@ from labelos_database.models import (
     Organization,
     OrganizationMembership,
     ProfessionalRole,
-    PROFILE_MODULE_RELATIONSHIPS,
     ProfileAttribute,
     ProfileLink,
     ProfileModuleMixin,
@@ -48,8 +48,8 @@ from labelos_database.models import (
 )
 from labelos_database.roles import (
     DEFAULT_CAPABILITIES,
-    DEFAULT_ROLES,
     DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS,
+    DEFAULT_ROLES,
     DefaultCapability,
     DefaultRole,
 )
@@ -60,9 +60,14 @@ from labelos_database.session import (
     reset_engine,
 )
 from labelos_database.workspace_memberships import (
+    LEGACY_MEMBERSHIP_ROLE_ASSIGNMENT_SOURCE,
+    LEGACY_MEMBERSHIP_ROLE_MAPPINGS,
+    LegacyMembershipRoleBackfillReport,
+    backfill_workspace_membership_roles_from_legacy_memberships,
     ensure_workspace_membership_for_organization_membership,
     get_or_create_profile_for_user,
     mark_workspace_membership_removed,
+    workspace_membership_role_backfill_id,
 )
 
 __all__ = [
@@ -113,9 +118,14 @@ __all__ = [
     "WorkspaceMembershipRole",
     "role_capability_id",
     "seed_system_roles_and_capabilities",
+    "LEGACY_MEMBERSHIP_ROLE_ASSIGNMENT_SOURCE",
+    "LEGACY_MEMBERSHIP_ROLE_MAPPINGS",
+    "LegacyMembershipRoleBackfillReport",
+    "backfill_workspace_membership_roles_from_legacy_memberships",
     "ensure_workspace_membership_for_organization_membership",
     "get_or_create_profile_for_user",
     "mark_workspace_membership_removed",
+    "workspace_membership_role_backfill_id",
     "check_database_health",
     "get_async_session",
     "get_engine",

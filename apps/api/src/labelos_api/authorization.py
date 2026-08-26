@@ -8,7 +8,23 @@ from uuid import UUID
 
 from fastapi import Depends, HTTPException, status
 from labelos_database.capabilities import Capability
-from labelos_database.models import MembershipRole, WorkspacePermission
+from labelos_database.models import (
+    Artist,
+    ArtistProfile,
+    MembershipDepartmentAccess,
+    MembershipRole,
+    Organization,
+    OrganizationMembership,
+    Role,
+    RoleCapability,
+    User,
+    WorkspaceMembership,
+    WorkspaceMembershipRole,
+    WorkspacePermission,
+)
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from labelos_api.auth import (
     AuthenticatedPrincipal,
@@ -47,13 +63,16 @@ class ActorKind(StrEnum):
 
 class ResourceKind(StrEnum):
     workspace = "workspace"
+    workspace_membership = "workspace_membership"
     artist = "artist"
+    artist_profile = "artist_profile"
     release = "release"
     campaign = "campaign"
     contract = "contract"
     royalty = "royalty"
     analytics = "analytics"
     profile = "profile"
+    universal_profile = "universal_profile"
 
 
 APP_ROLES: tuple[MembershipRole, ...] = (
@@ -240,6 +259,9 @@ class WorkspaceAuthorizationContext(Protocol):
 AuthorizationAction = Capability | Permission | MembershipRole | str
 ResolvedAuthorizationAction = Capability | Permission | MembershipRole | None
 AuthorizationWorkspace = MembershipContext | UUID | None
+AuthorizationActorInput = (
+    WorkspaceAuthorizationContext | CurrentUserContext | User | UUID
+)
 
 
 def _forbidden(detail: str) -> HTTPException:
@@ -274,6 +296,158 @@ def actor_from_current_user(context: CurrentUserContext) -> AuthorizationActor:
 
 
 class AuthorizationService:
+    async def has_capability(
+        self,
+        session: AsyncSession,
+        actor: AuthorizationActorInput,
+        workspace: AuthorizationWorkspace,
+        capability: Capability | str,
+        resource: AuthorizationResource | dict[str, Any] | None = None,
+    ) -> bool:
+        return (
+            await self.decide_capability(
+                session,
+                actor=actor,
+                workspace=workspace,
+                capability=capability,
+                resource=resource,
+            )
+        ).allowed
+
+    async def require_capability(
+        self,
+        session: AsyncSession,
+        actor: AuthorizationActorInput,
+        workspace: AuthorizationWorkspace,
+        capability: Capability | str,
+        resource: AuthorizationResource | dict[str, Any] | None = None,
+    ) -> None:
+        if not await self.has_capability(
+            session,
+            actor=actor,
+            workspace=workspace,
+            capability=capability,
+            resource=resource,
+        ):
+            raise _forbidden("Insufficient capability permission")
+
+    async def decide_capability(
+        self,
+        session: AsyncSession,
+        *,
+        actor: AuthorizationActorInput,
+        workspace: AuthorizationWorkspace,
+        capability: Capability | str,
+        resource: AuthorizationResource | dict[str, Any] | None = None,
+    ) -> AuthorizationDecision:
+        actor_ref = self._actor_ref_from_input(actor)
+        workspace_id = self._workspace_id_from_input(actor, workspace)
+        normalized_resource = self._normalize_resource(resource)
+        required = self._normalize_capability(capability)
+        if required is None:
+            return AuthorizationDecision(
+                actor=actor_ref,
+                action=None,
+                workspace_id=workspace_id,
+                resource=normalized_resource,
+                allowed=False,
+                reason="unknown_capability",
+            )
+        if workspace_id is None:
+            return AuthorizationDecision(
+                actor=actor_ref,
+                action=required,
+                workspace_id=None,
+                resource=normalized_resource,
+                allowed=False,
+                reason="invalid_workspace",
+            )
+        if not self._resource_scope_is_valid(resource, workspace_id):
+            return AuthorizationDecision(
+                actor=actor_ref,
+                action=required,
+                workspace_id=workspace_id,
+                resource=normalized_resource,
+                allowed=False,
+                reason="invalid_resource_scope",
+            )
+        if not await self._resource_is_accessible_from_workspace(
+            session,
+            resource=normalized_resource,
+            workspace_id=workspace_id,
+        ):
+            return AuthorizationDecision(
+                actor=actor_ref,
+                action=required,
+                workspace_id=workspace_id,
+                resource=normalized_resource,
+                allowed=False,
+                reason="invalid_resource_scope",
+            )
+
+        result = await self._load_authorization_state(
+            session,
+            actor=actor,
+            workspace_id=workspace_id,
+        )
+        if result is None:
+            return AuthorizationDecision(
+                actor=actor_ref,
+                action=required,
+                workspace_id=workspace_id,
+                resource=normalized_resource,
+                allowed=False,
+                reason="membership_not_found",
+            )
+        membership, workspace_membership = result
+        if membership.workspace_permission == WorkspacePermission.owner:
+            return AuthorizationDecision(
+                actor=actor_ref,
+                action=required,
+                workspace_id=workspace_id,
+                resource=normalized_resource,
+                allowed=True,
+                reason="workspace_owner",
+            )
+
+        effective = self._effective_capabilities_for_membership(
+            membership,
+            workspace_membership,
+            workspace_id=workspace_id,
+        )
+        if effective is None:
+            return AuthorizationDecision(
+                actor=actor_ref,
+                action=required,
+                workspace_id=workspace_id,
+                resource=normalized_resource,
+                allowed=False,
+                reason="invalid_role_mapping",
+            )
+        if not self._has_department_scope(
+            membership,
+            required,
+            resource=normalized_resource,
+        ):
+            return AuthorizationDecision(
+                actor=actor_ref,
+                action=required,
+                workspace_id=workspace_id,
+                resource=normalized_resource,
+                allowed=False,
+                reason="insufficient_department_access",
+            )
+
+        allowed = required in effective
+        return AuthorizationDecision(
+            actor=actor_ref,
+            action=required,
+            workspace_id=workspace_id,
+            resource=normalized_resource,
+            allowed=allowed,
+            reason="capability_allowed" if allowed else "missing_capability",
+        )
+
     def can(
         self,
         actor: WorkspaceAuthorizationContext,
@@ -387,6 +561,12 @@ class AuthorizationService:
         membership = self._resolve_workspace_membership(actor, workspace)
         if membership is None:
             return False
+        workspace_id = self._workspace_id(actor, membership)
+        if workspace_id is None or not self._resource_scope_is_valid(
+            resource,
+            workspace_id,
+        ):
+            return False
         if membership.workspace_permission == WorkspacePermission.owner:
             return True
         department = self._resource_department(resource)
@@ -438,6 +618,95 @@ class AuthorizationService:
             return None
         return actor.active_membership
 
+    async def _load_authorization_state(
+        self,
+        session: AsyncSession,
+        *,
+        actor: AuthorizationActorInput,
+        workspace_id: UUID,
+    ) -> tuple[OrganizationMembership, WorkspaceMembership] | None:
+        actor_user_id = self._actor_user_id(actor)
+        if actor_user_id is None:
+            return None
+        workspace_exists = await session.scalar(
+            select(Organization.id).where(Organization.id == workspace_id)
+        )
+        if workspace_exists is None:
+            return None
+        membership = await session.scalar(
+            select(OrganizationMembership)
+            .options(
+                selectinload(
+                    OrganizationMembership.department_access_grants
+                ).selectinload(MembershipDepartmentAccess.department),
+                selectinload(OrganizationMembership.workspace_membership)
+                .selectinload(WorkspaceMembership.role_assignments)
+                .selectinload(WorkspaceMembershipRole.role)
+                .selectinload(Role.capability_links)
+                .selectinload(RoleCapability.capability),
+            )
+            .where(OrganizationMembership.organization_id == workspace_id)
+            .where(OrganizationMembership.user_id == actor_user_id)
+            .where(OrganizationMembership.status == "active")
+        )
+        if (
+            membership is None
+            or membership.workspace_membership is None
+            or membership.workspace_membership.status != "active"
+        ):
+            return None
+        return membership, membership.workspace_membership
+
+    def _effective_capabilities_for_membership(
+        self,
+        membership: OrganizationMembership,
+        workspace_membership: WorkspaceMembership,
+        *,
+        workspace_id: UUID,
+    ) -> frozenset[Capability] | None:
+        workspace_role = _workspace_role(membership.workspace_permission)
+        capabilities = set(INITIAL_ROLE_CAPABILITIES.get(workspace_role, frozenset()))
+        capabilities.update(
+            _valid_capabilities(tuple(membership.capability_permissions))
+        )
+        for role in workspace_membership.roles:
+            if role.workspace_id not in {None, workspace_id}:
+                return None
+            for db_capability in role.capabilities:
+                normalized = self._normalize_capability(db_capability.key)
+                if normalized is None:
+                    return None
+                capabilities.add(normalized)
+        return frozenset(capabilities)
+
+    def _has_department_scope(
+        self,
+        membership: OrganizationMembership,
+        capability: Capability,
+        *,
+        resource: AuthorizationResource | None,
+    ) -> bool:
+        department = resource.department if resource is not None else None
+        required_departments = (
+            frozenset({department})
+            if department is not None
+            else CAPABILITY_DEPARTMENTS.get(capability, frozenset())
+        )
+        if not required_departments:
+            return True
+        department_access = set(membership.approved_department_access)
+        return any(slug in department_access for slug in required_departments)
+
+    def _actor_user_id(self, actor: AuthorizationActorInput) -> UUID | None:
+        if isinstance(actor, UUID):
+            return actor
+        if isinstance(actor, User):
+            return actor.id
+        user = getattr(actor, "user", None)
+        if isinstance(user, User):
+            return user.id
+        return None
+
     def _resource_department(
         self,
         resource: AuthorizationResource | dict[str, Any] | None,
@@ -466,6 +735,110 @@ class AuthorizationService:
             attributes=attributes if isinstance(attributes, dict) else None,
         )
 
+    def _resource_scope_is_valid(
+        self,
+        resource: AuthorizationResource | dict[str, Any] | None,
+        workspace_id: UUID,
+    ) -> bool:
+        if resource is None:
+            return True
+        if isinstance(resource, AuthorizationResource):
+            if resource.workspace_id is not None and not isinstance(
+                resource.workspace_id,
+                UUID,
+            ):
+                return False
+            if resource.department is not None and not isinstance(
+                resource.department,
+                str,
+            ):
+                return False
+            if resource.kind is not None and not isinstance(resource.kind, str):
+                return False
+            if resource.id is not None and not isinstance(resource.id, UUID | str):
+                return False
+        if isinstance(resource, dict):
+            if "workspace_id" in resource and not isinstance(
+                resource.get("workspace_id"),
+                UUID,
+            ):
+                return False
+            if "department" in resource and not isinstance(
+                resource.get("department"),
+                str,
+            ):
+                return False
+            if "kind" in resource and not isinstance(resource.get("kind"), str):
+                return False
+            if "id" in resource and not isinstance(resource.get("id"), UUID | str):
+                return False
+        normalized = self._normalize_resource(resource)
+        if normalized is None or normalized.workspace_id is None:
+            return True
+        return normalized.workspace_id == workspace_id
+
+    async def _resource_is_accessible_from_workspace(
+        self,
+        session: AsyncSession,
+        *,
+        resource: AuthorizationResource | None,
+        workspace_id: UUID,
+    ) -> bool:
+        """Resolve known resources to the workspace before capability checks.
+
+        This intentionally covers only first-party resource relationships that exist
+        today. Future enterprise hierarchy or shared-resource rules can extend this
+        resolver without changing callers.
+        """
+
+        if resource is None or resource.id is None or resource.kind is None:
+            return True
+
+        kind = str(resource.kind)
+        resource_id = resource.id
+        if not isinstance(resource_id, UUID):
+            return False
+
+        if kind == ResourceKind.workspace:
+            return resource_id == workspace_id
+        if kind in {ResourceKind.profile, ResourceKind.universal_profile}:
+            return (
+                await session.scalar(
+                    select(WorkspaceMembership.id)
+                    .where(WorkspaceMembership.workspace_id == workspace_id)
+                    .where(WorkspaceMembership.profile_id == resource_id)
+                    .where(WorkspaceMembership.status == "active")
+                )
+            ) is not None
+        if kind == ResourceKind.workspace_membership:
+            return (
+                await session.scalar(
+                    select(WorkspaceMembership.id)
+                    .where(WorkspaceMembership.id == resource_id)
+                    .where(WorkspaceMembership.workspace_id == workspace_id)
+                    .where(WorkspaceMembership.status == "active")
+                )
+            ) is not None
+        if kind == ResourceKind.artist:
+            return (
+                await session.scalar(
+                    select(Artist.id)
+                    .where(Artist.id == resource_id)
+                    .where(Artist.organization_id == workspace_id)
+                )
+            ) is not None
+        if kind == ResourceKind.artist_profile:
+            return (
+                await session.scalar(
+                    select(ArtistProfile.id)
+                    .join(ArtistProfile.artist)
+                    .where(ArtistProfile.id == resource_id)
+                    .where(Artist.organization_id == workspace_id)
+                )
+            ) is not None
+
+        return False
+
     def _actor_ref(self, actor: WorkspaceAuthorizationContext) -> AuthorizationActor:
         actor_ref = getattr(actor, "authorization_actor", None)
         if isinstance(actor_ref, AuthorizationActor):
@@ -489,6 +862,38 @@ class AuthorizationService:
             return workspace
         active_membership = actor.active_membership
         return active_membership.workspace_id if active_membership is not None else None
+
+    def _actor_ref_from_input(
+        self,
+        actor: AuthorizationActorInput,
+    ) -> AuthorizationActor:
+        if isinstance(actor, UUID):
+            return AuthorizationActor(
+                kind=ActorKind.user,
+                subject=str(actor),
+                user_id=actor,
+            )
+        if isinstance(actor, User):
+            return AuthorizationActor(
+                kind=ActorKind.user,
+                subject=str(actor.id),
+                user_id=actor.id,
+                display_name=actor.display_name,
+            )
+        return self._actor_ref(actor)
+
+    def _workspace_id_from_input(
+        self,
+        actor: AuthorizationActorInput,
+        workspace: AuthorizationWorkspace,
+    ) -> UUID | None:
+        if isinstance(workspace, MembershipContext):
+            return workspace.workspace_id
+        if isinstance(workspace, UUID):
+            return workspace
+        if isinstance(actor, UUID | User):
+            return None
+        return self._workspace_id(actor, workspace)
 
     def _normalize_action(
         self,

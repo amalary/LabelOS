@@ -20,13 +20,22 @@ DEFAULT_ROLES: tuple[DefaultRole, ...] = (
         "c2915cf2-10ba-50ec-a8a6-e4a5e5519f24",
         "owner",
         "Owner",
-        "Workspace owner with full control over workspace configuration, access, and operations.",
+        "Workspace owner with full control over workspace configuration, access, "
+        "and operations.",
     ),
     DefaultRole(
         "d3f8c6e8-60f0-5902-9630-65f96f61c016",
         "admin",
         "Admin",
-        "Workspace administrator responsible for member operations, role assignment, and workspace administration.",
+        "Workspace administrator responsible for member operations, role assignment, "
+        "and workspace administration.",
+    ),
+    DefaultRole(
+        "e7450235-df07-503d-86e4-24977695ad9e",
+        "member",
+        "Member",
+        "Workspace member with baseline access to profiles, artist records, "
+        "releases, campaigns, and analytics.",
     ),
     DefaultRole(
         "d6c9e57c-6f3d-5177-a5dd-da5c1e16a79f",
@@ -106,6 +115,14 @@ DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS: dict[str, tuple[str, ...]] = {
         Capability.royalty_view.value,
         Capability.finance_view.value,
         Capability.finance_report_view.value,
+        Capability.analytics_view.value,
+    ),
+    "member": (
+        Capability.profile_view.value,
+        Capability.profile_edit.value,
+        Capability.artist_profile_view.value,
+        Capability.release_view.value,
+        Capability.marketing_campaign_view.value,
         Capability.analytics_view.value,
     ),
     "artist": (
