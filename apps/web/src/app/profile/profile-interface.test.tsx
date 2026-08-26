@@ -84,10 +84,14 @@ const membership: WorkspaceProfileMembership = {
   professional_roles: ["Artist Manager"],
   department_access: ["A&R", "Marketing"],
   workspace_roles: ["Workspace Admin"],
-  capability_permissions: ["profiles.write"],
+  capability_permissions: ["profile.edit"],
 };
 
-function renderProfileInterface() {
+function renderProfileInterface({
+  activeRole = "owner",
+}: {
+  activeRole?: "owner" | "admin" | "member" | "guest";
+} = {}) {
   return render(
     <ActiveWorkspaceProvider
       selection={{
@@ -95,7 +99,7 @@ function renderProfileInterface() {
           id: "workspace_01",
           name: "Northstar Audio",
           slug: "northstar-audio",
-          role: "owner",
+          role: activeRole,
           can_switch: true,
         },
         organizations: [],
@@ -203,5 +207,22 @@ describe("UniversalProfileInterface", () => {
         }),
       ]),
     });
+  });
+
+  it("hides profile editing controls without profile edit capability", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(Response.json(profile))
+      .mockResolvedValueOnce(
+        Response.json({
+          ...membership,
+          role: "member",
+          capability_permissions: [],
+        }),
+      );
+
+    renderProfileInterface({ activeRole: "member" });
+
+    expect(await screen.findByRole("heading", { name: "Mira Stone" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Edit Profile" })).not.toBeInTheDocument();
   });
 });

@@ -108,7 +108,9 @@ export const workspaceNavigationItems: readonly WorkspaceNavigationItem[] = [
     href: "/workspace/members",
     label: "Member Management",
     requiredCapabilities: [
+      capabilities.workspaceMemberView,
       capabilities.workspaceMemberInvite,
+      capabilities.workspaceMemberRolesManage,
       capabilities.workspaceMemberRemove,
     ],
     requiresActiveWorkspace: true,
@@ -116,7 +118,8 @@ export const workspaceNavigationItems: readonly WorkspaceNavigationItem[] = [
   {
     href: "/workspace/roles",
     label: "Roles",
-    requiredCapabilities: [capabilities.roleAssign],
+    requiredCapabilities: [capabilities.workspaceMemberRolesManage, capabilities.roleAssign],
+    requireAllCapabilities: true,
     requiresActiveWorkspace: true,
   },
 ];

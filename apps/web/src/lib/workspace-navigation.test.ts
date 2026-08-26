@@ -64,6 +64,7 @@ describe("workspace navigation visibility", () => {
       [
         capabilities.workspaceUpdate,
         capabilities.workspaceMemberInvite,
+        capabilities.workspaceMemberRolesManage,
         capabilities.roleAssign,
       ],
       ["administration"],
@@ -72,6 +73,12 @@ describe("workspace navigation visibility", () => {
     expect(labels).toEqual(
       expect.arrayContaining(["Workspace Settings", "Member Management", "Roles"]),
     );
+  });
+
+  it("hides role assignment navigation without member role management capability", () => {
+    const labels = labelsFor([capabilities.roleAssign], ["administration"]);
+
+    expect(labels).not.toContain("Roles");
   });
 
   it("keeps workspace-only areas hidden without an active workspace", () => {

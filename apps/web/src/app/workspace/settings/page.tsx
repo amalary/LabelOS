@@ -42,7 +42,10 @@ export default async function WorkspaceSettingsPage({ searchParams }: WorkspaceS
   const canInviteMembers = subject
     ? can(subject, null, capabilities.workspaceMemberInvite)
     : false;
-  const canAssignInviteRoles = subject ? can(subject, null, capabilities.roleAssign) : false;
+  const canAssignInviteRoles = subject
+    ? can(subject, null, capabilities.workspaceMemberRolesManage) &&
+      can(subject, null, capabilities.roleAssign)
+    : false;
 
   return (
     <AppShell>

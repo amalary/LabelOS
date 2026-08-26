@@ -103,7 +103,12 @@ describe("WorkspaceNavigation", () => {
         Response.json(
           membership(
             "workspace_admin",
-            ["workspace.update", "workspace.member.invite", "role.assign"],
+            [
+              "workspace.update",
+              "workspace.member.invite",
+              "workspace.member.roles.manage",
+              "role.assign",
+            ],
             ["administration"],
           ),
         ),
