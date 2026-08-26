@@ -364,7 +364,9 @@ def _profile_options():
         selectinload(UniversalProfile.links),
         selectinload(UniversalProfile.attributes),
         selectinload(UniversalProfile.preference),
-        selectinload(UniversalProfile.artist_profiles).selectinload(ArtistProfile.artist),
+        selectinload(UniversalProfile.artist_profiles).selectinload(
+            ArtistProfile.artist
+        ),
     )
 
 
@@ -473,38 +475,42 @@ def _profile_response(
         primary_email=profile.primary_email if is_owner_visible else None,
         profile_status=profile.profile_status if is_owner_visible else None,
         onboarding_status=profile.onboarding_status if is_owner_visible else None,
-        links=[
-            ProfileLinkResponse(
-                id=link.id,
-                link_type=link.link_type,
-                label=link.label,
-                url=link.url,
-                username=link.username,
-                external_id=link.external_id,
-                status=link.status,
-                is_primary=link.is_primary,
-                sort_order=link.sort_order,
-                metadata=dict(link.metadata_json),
-            )
-            for link in profile.links
-        ]
-        if is_owner_visible
-        else [],
-        attributes=[
-            ProfileAttributeResponse(
-                id=attribute.id,
-                attribute_type=attribute.attribute_type,
-                label=attribute.label,
-                value=attribute.value,
-                source=attribute.source,
-                is_primary=attribute.is_primary,
-                sort_order=attribute.sort_order,
-                metadata=dict(attribute.metadata_json),
-            )
-            for attribute in profile.attributes
-        ]
-        if is_owner_visible
-        else [],
+        links=(
+            [
+                ProfileLinkResponse(
+                    id=link.id,
+                    link_type=link.link_type,
+                    label=link.label,
+                    url=link.url,
+                    username=link.username,
+                    external_id=link.external_id,
+                    status=link.status,
+                    is_primary=link.is_primary,
+                    sort_order=link.sort_order,
+                    metadata=dict(link.metadata_json),
+                )
+                for link in profile.links
+            ]
+            if is_owner_visible
+            else []
+        ),
+        attributes=(
+            [
+                ProfileAttributeResponse(
+                    id=attribute.id,
+                    attribute_type=attribute.attribute_type,
+                    label=attribute.label,
+                    value=attribute.value,
+                    source=attribute.source,
+                    is_primary=attribute.is_primary,
+                    sort_order=attribute.sort_order,
+                    metadata=dict(attribute.metadata_json),
+                )
+                for attribute in profile.attributes
+            ]
+            if is_owner_visible
+            else []
+        ),
         preferences=_preferences_response(
             profile.preference if include_private_preferences else None
         ),
@@ -900,9 +906,9 @@ async def list_workspace_profiles(
             selectinload(WorkspaceMembership.profile).selectinload(
                 UniversalProfile.preference
             ),
-            selectinload(WorkspaceMembership.profile).selectinload(
-                UniversalProfile.artist_profiles
-            ).selectinload(ArtistProfile.artist),
+            selectinload(WorkspaceMembership.profile)
+            .selectinload(UniversalProfile.artist_profiles)
+            .selectinload(ArtistProfile.artist),
             selectinload(WorkspaceMembership.organization_membership)
             .selectinload(OrganizationMembership.professional_role_links)
             .selectinload(MembershipProfessionalRole.professional_role),

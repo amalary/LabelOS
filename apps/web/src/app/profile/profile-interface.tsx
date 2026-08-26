@@ -3,10 +3,7 @@
 import { Button, cn } from "@label-os/ui";
 import { FormEvent, useEffect, useMemo, useState } from "react";
 
-import {
-  useCurrentProfile,
-  useUpdateCurrentProfile,
-} from "../../lib/profiles";
+import { useCurrentProfile, useUpdateCurrentProfile } from "../../lib/profiles";
 import { profileCompletionViewModel } from "../../lib/profile-completion";
 import type { ProfileLinkInput, UniversalProfile } from "../../lib/profiles.types";
 import { useActiveWorkspace, useActiveWorkspaceProfile } from "../../lib/workspace-context";
@@ -70,8 +67,7 @@ function formStateFor(profile: UniversalProfile | null): ProfileFormState {
   const otherLink =
     profile?.links.find(
       (link) => !supportedServices.some((service) => service.type === link.link_type),
-    ) ??
-    null;
+    ) ?? null;
 
   return {
     display_name: profile?.display_name ?? "",
@@ -311,9 +307,7 @@ export function ProfileCompletionPrompt({ profile }: { profile: UniversalProfile
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <h2 className="text-lg font-semibold tracking-normal">{completionPrompt.title}</h2>
-          <p className="mt-1 text-sm leading-6 text-sky-800">
-            {completionPrompt.missingSummary}
-          </p>
+          <p className="mt-1 text-sm leading-6 text-sky-800">{completionPrompt.missingSummary}</p>
         </div>
         {completion ? (
           <span className="inline-flex h-8 items-center rounded-md border border-sky-200 bg-white/80 px-3 text-sm font-semibold text-sky-950">

@@ -23,13 +23,13 @@ flowchart TD
 
 The model has five intentional layers:
 
-| Layer | Entity | Responsibility |
-| --- | --- | --- |
-| Identity | `User` -> `UniversalProfile` | Authentication account and durable person identity. |
-| Workspace context | `UniversalProfile` -> `WorkspaceMembership` | The same person can participate in multiple workspaces with different status and access. |
-| Authorization | `WorkspaceMembership` -> `Role` -> `Capability` | Workspace-scoped action authorization. |
-| Organizational context | `Role` -> `Department` | Functional work areas and default department access. |
-| Specialized profile data | `UniversalProfile` -> profile modules | Optional domain-specific profile records such as `ArtistProfile`. |
+| Layer                    | Entity                                          | Responsibility                                                                           |
+| ------------------------ | ----------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| Identity                 | `User` -> `UniversalProfile`                    | Authentication account and durable person identity.                                      |
+| Workspace context        | `UniversalProfile` -> `WorkspaceMembership`     | The same person can participate in multiple workspaces with different status and access. |
+| Authorization            | `WorkspaceMembership` -> `Role` -> `Capability` | Workspace-scoped action authorization.                                                   |
+| Organizational context   | `Role` -> `Department`                          | Functional work areas and default department access.                                     |
+| Specialized profile data | `UniversalProfile` -> profile modules           | Optional domain-specific profile records such as `ArtistProfile`.                        |
 
 ## Identity
 

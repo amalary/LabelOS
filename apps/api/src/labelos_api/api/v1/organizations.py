@@ -595,9 +595,7 @@ async def _assign_workspace_roles(
     if not role_keys:
         return []
 
-    roles = (
-        await session.scalars(select(Role).where(Role.key.in_(role_keys)))
-    ).all()
+    roles = (await session.scalars(select(Role).where(Role.key.in_(role_keys)))).all()
     roles_by_key = {role.key: role for role in roles}
     missing_roles = [role_key for role_key in role_keys if role_key not in roles_by_key]
     if missing_roles:

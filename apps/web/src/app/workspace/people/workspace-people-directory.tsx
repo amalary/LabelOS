@@ -38,13 +38,13 @@ function TagList({
 
   return (
     <div className="flex flex-wrap gap-1.5">
-      {values.map((value) => (
+      {values.map((value) =>
         kind === "department" ? (
           <ProfileDepartmentBadge department={value} key={value} />
         ) : (
           <ProfileRoleBadge key={value} role={value} />
-        )
-      ))}
+        ),
+      )}
     </div>
   );
 }
@@ -134,9 +134,7 @@ export function WorkspacePeopleDirectory() {
           <h1 className="mt-2 text-2xl font-semibold tracking-normal text-slate-950">
             People Directory
           </h1>
-          <p className="mt-1 text-sm leading-6 text-slate-500">
-            {activeWorkspace.name}
-          </p>
+          <p className="mt-1 text-sm leading-6 text-slate-500">{activeWorkspace.name}</p>
         </div>
         <form className="flex w-full gap-2 lg:w-[460px]" onSubmit={submitSearch}>
           <Input
@@ -224,35 +222,35 @@ export function WorkspacePeopleDirectory() {
                   const identity = profileIdentityFromDirectoryEntry(person);
 
                   return (
-                  <tr className="align-top hover:bg-slate-50/80" key={person.id}>
-                    <td className="border-b border-slate-100 px-4 py-3">
-                      <div className="flex min-w-0 items-center gap-3">
-                        <ProfileAvatar profile={identity} />
-                        <ProfileName profile={identity} showHeadline />
-                      </div>
-                    </td>
-                    <td className="border-b border-slate-100 px-4 py-3">
-                      <TagList emptyLabel="No roles" values={identity.roles ?? []} />
-                    </td>
-                    <td className="border-b border-slate-100 px-4 py-3">
-                      <TagList
-                        emptyLabel="No departments"
-                        kind="department"
-                        values={identity.departments ?? []}
-                      />
-                    </td>
-                    <td className="border-b border-slate-100 px-4 py-3">
-                      <TagList emptyLabel="Universal" values={person.profile_modules} />
-                    </td>
-                    <td className="border-b border-slate-100 px-4 py-3">
-                      <StatusBadge status={person.membership_status} />
-                    </td>
-                    <td className="border-b border-slate-100 px-4 py-3 text-right">
-                      <ProfileQuickViewButton
-                        onOpen={() => setSelectedProfileId(person.profile_id)}
-                      />
-                    </td>
-                  </tr>
+                    <tr className="align-top hover:bg-slate-50/80" key={person.id}>
+                      <td className="border-b border-slate-100 px-4 py-3">
+                        <div className="flex min-w-0 items-center gap-3">
+                          <ProfileAvatar profile={identity} />
+                          <ProfileName profile={identity} showHeadline />
+                        </div>
+                      </td>
+                      <td className="border-b border-slate-100 px-4 py-3">
+                        <TagList emptyLabel="No roles" values={identity.roles ?? []} />
+                      </td>
+                      <td className="border-b border-slate-100 px-4 py-3">
+                        <TagList
+                          emptyLabel="No departments"
+                          kind="department"
+                          values={identity.departments ?? []}
+                        />
+                      </td>
+                      <td className="border-b border-slate-100 px-4 py-3">
+                        <TagList emptyLabel="Universal" values={person.profile_modules} />
+                      </td>
+                      <td className="border-b border-slate-100 px-4 py-3">
+                        <StatusBadge status={person.membership_status} />
+                      </td>
+                      <td className="border-b border-slate-100 px-4 py-3 text-right">
+                        <ProfileQuickViewButton
+                          onOpen={() => setSelectedProfileId(person.profile_id)}
+                        />
+                      </td>
+                    </tr>
                   );
                 })}
               </tbody>

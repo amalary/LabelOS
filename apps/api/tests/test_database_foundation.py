@@ -249,11 +249,11 @@ def test_artist_profiles_define_domain_extension_contract() -> None:
 
 def test_artist_profile_migrations_do_not_delete_unlinked_catalog_data() -> None:
     artist_profile_migration = (
-        REPO_ROOT
-        / "packages/database/alembic/versions/202608250200_artist_profiles.py"
+        REPO_ROOT / "packages/database/alembic/versions/202608250200_artist_profiles.py"
     ).read_text()
     module_architecture_migration = (
-        REPO_ROOT / "packages/database/alembic/versions"
+        REPO_ROOT
+        / "packages/database/alembic/versions"
         / "202608250300_profile_module_architecture.py"
     ).read_text()
 
@@ -263,9 +263,7 @@ def test_artist_profile_migrations_do_not_delete_unlinked_catalog_data() -> None
     assert "Cannot make artist_profiles.universal_profile_id non-null" in (
         module_architecture_migration
     )
-    assert "SET biography = (" in (
-        module_architecture_migration
-    )
+    assert "SET biography = (" in (module_architecture_migration)
 
 
 def test_profile_attributes_define_extensible_profile_metadata() -> None:

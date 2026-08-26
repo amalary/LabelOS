@@ -181,7 +181,7 @@ function canUseResolvedCapability(
   const allowedDepartments =
     resource?.department !== undefined && resource.department !== null
       ? [resource.department]
-      : capabilityDepartments[capability as Capability] ?? [];
+      : (capabilityDepartments[capability as Capability] ?? []);
   if (
     allowedDepartments.length > 0 &&
     !allowedDepartments.some((department) =>

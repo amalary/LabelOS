@@ -14,7 +14,9 @@ export default async function UniversalProfileOnboardingPage() {
   ]);
 
   if (profile.onboarding_status === "complete") {
-    redirect(organizationSelection.organizations.length === 0 ? "/onboarding/workspace" : "/dashboard");
+    redirect(
+      organizationSelection.organizations.length === 0 ? "/onboarding/workspace" : "/dashboard",
+    );
   }
 
   return (

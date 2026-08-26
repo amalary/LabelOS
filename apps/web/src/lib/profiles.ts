@@ -13,7 +13,8 @@ import type {
   WorkspaceProfilesList,
 } from "./profiles.types";
 
-export type ProfileApiErrorCode = "unauthorized" | "forbidden" | "not_found" | "conflict" | "network_failure";
+export type ProfileApiErrorCode =
+  "unauthorized" | "forbidden" | "not_found" | "conflict" | "network_failure";
 
 export class ProfileApiError extends Error {
   constructor(
@@ -113,7 +114,11 @@ function toProfileApiError(status: number): ProfileApiError {
     return new ProfileApiError("not_found", "Profile data was not found.", status);
   }
   if (status === 409) {
-    return new ProfileApiError("conflict", "Profile data changed before your update was saved.", status);
+    return new ProfileApiError(
+      "conflict",
+      "Profile data changed before your update was saved.",
+      status,
+    );
   }
   return new ProfileApiError("network_failure", "Profile data could not be loaded.", status);
 }
@@ -134,12 +139,9 @@ async function profileJson<T>(path: string, init?: RequestInit): Promise<T> {
       headers,
     });
   } catch (error) {
-    throw new ProfileApiError(
-      "network_failure",
-      "Unable to reach the profile API.",
-      undefined,
-      { cause: error },
-    );
+    throw new ProfileApiError("network_failure", "Unable to reach the profile API.", undefined, {
+      cause: error,
+    });
   }
 
   if (!response.ok) {
@@ -425,10 +427,7 @@ export function useProfileRoles(
     () => ({
       ...workspaceProfile,
       data: workspaceProfile.data
-        ? [
-            ...workspaceProfile.data.professional_roles,
-            ...workspaceProfile.data.workspace_roles,
-          ]
+        ? [...workspaceProfile.data.professional_roles, ...workspaceProfile.data.workspace_roles]
         : null,
       reload: async () => {
         const membership = await workspaceProfile.reload();
@@ -468,35 +467,38 @@ export function useUpdateCurrentProfile(): MutationState<UniversalProfile, Unive
   useSyncExternalStore(subscribe, getVersion, getVersion);
 
   const entry = entryFor<UniversalProfile>("profiles:mutation:update-current");
-  const mutate = useCallback(async (payload: UniversalProfileUpdate) => {
-    activeMutationCount += 1;
-    entry.isLoading = true;
-    entry.error = null;
-    emitMutationChange();
-    try {
-      const profile = await updateCurrentProfile(payload);
-      entry.data = profile;
+  const mutate = useCallback(
+    async (payload: UniversalProfileUpdate) => {
+      activeMutationCount += 1;
+      entry.isLoading = true;
       entry.error = null;
-      const currentEntry = entryFor<UniversalProfile>(profileQueryKeys.current);
-      currentEntry.data = profile;
-      currentEntry.error = null;
-      emit(currentEntry);
-      invalidateProfileCache((key) => key.startsWith("profiles:workspace-"));
-      return profile;
-    } catch (error) {
-      entry.error =
-        error instanceof ProfileApiError
-          ? error
-          : new ProfileApiError("network_failure", "Profile update failed.", undefined, {
-              cause: error,
-            });
-      throw entry.error;
-    } finally {
-      activeMutationCount = Math.max(0, activeMutationCount - 1);
-      entry.isLoading = false;
       emitMutationChange();
-    }
-  }, [entry]);
+      try {
+        const profile = await updateCurrentProfile(payload);
+        entry.data = profile;
+        entry.error = null;
+        const currentEntry = entryFor<UniversalProfile>(profileQueryKeys.current);
+        currentEntry.data = profile;
+        currentEntry.error = null;
+        emit(currentEntry);
+        invalidateProfileCache((key) => key.startsWith("profiles:workspace-"));
+        return profile;
+      } catch (error) {
+        entry.error =
+          error instanceof ProfileApiError
+            ? error
+            : new ProfileApiError("network_failure", "Profile update failed.", undefined, {
+                cause: error,
+              });
+        throw entry.error;
+      } finally {
+        activeMutationCount = Math.max(0, activeMutationCount - 1);
+        entry.isLoading = false;
+        emitMutationChange();
+      }
+    },
+    [entry],
+  );
 
   const reset = useCallback(() => {
     entry.data = null;

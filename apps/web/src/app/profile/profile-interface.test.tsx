@@ -121,7 +121,9 @@ describe("UniversalProfileInterface", () => {
 
     expect(await screen.findByRole("heading", { name: "Mira Stone" })).toBeInTheDocument();
     expect(screen.getByText("Artist manager and catalog strategist")).toBeInTheDocument();
-    expect(screen.getByText("Building release systems for independent artists.")).toBeInTheDocument();
+    expect(
+      screen.getByText("Building release systems for independent artists."),
+    ).toBeInTheDocument();
     expect(screen.getByText("Los Angeles, CA")).toBeInTheDocument();
     expect(screen.getByText("Artist Manager")).toBeInTheDocument();
     expect(screen.getByText("Workspace Admin")).toBeInTheDocument();
@@ -185,7 +187,9 @@ describe("UniversalProfileInterface", () => {
       await user.click(screen.getByRole("button", { name: "Save" }));
     });
 
-    await waitFor(() => expect(screen.queryByRole("button", { name: "Save" })).not.toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Save" })).not.toBeInTheDocument(),
+    );
     const patchCall = vi.mocked(fetch).mock.calls.find(([url, init]) => {
       return url === "/api/profiles/me" && init?.method === "PATCH";
     });

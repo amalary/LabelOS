@@ -195,9 +195,7 @@ describe("profile data layer", () => {
   });
 
   it("updates an artist profile with JSON through the workspace API proxy", async () => {
-    vi.mocked(fetch).mockResolvedValue(
-      Response.json({ ...artistProfile, stage_name: "Mira S." }),
-    );
+    vi.mocked(fetch).mockResolvedValue(Response.json({ ...artistProfile, stage_name: "Mira S." }));
 
     await expect(
       updateArtistProfile("workspace_01", "artist_profile_01", {
@@ -271,9 +269,7 @@ describe("profile data layer", () => {
       .mockResolvedValueOnce(Response.json({ ...artistProfile, stage_name: "Mira S." }));
 
     const current = renderHook(() => useArtistProfile("workspace_01", "artist_profile_01"));
-    const mutation = renderHook(() =>
-      useUpdateArtistProfile("workspace_01", "artist_profile_01"),
-    );
+    const mutation = renderHook(() => useUpdateArtistProfile("workspace_01", "artist_profile_01"));
 
     await waitFor(() => expect(current.result.current.data?.stage_name).toBe("Mira"));
 

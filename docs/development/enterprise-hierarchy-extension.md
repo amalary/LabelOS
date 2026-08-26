@@ -84,4 +84,3 @@ This note does not introduce:
 - cross-company policies;
 - enterprise administration;
 - hierarchical workspace switching.
-

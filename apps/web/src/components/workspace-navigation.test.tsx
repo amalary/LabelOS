@@ -63,8 +63,7 @@ function selection(activeId: string): OrganizationSelection {
   ];
 
   return {
-    activeOrganization:
-      organizations.find((organization) => organization.id === activeId) ?? null,
+    activeOrganization: organizations.find((organization) => organization.id === activeId) ?? null,
     organizations,
   };
 }
@@ -146,9 +145,6 @@ describe("WorkspaceNavigation", () => {
       "href",
       "/workspace/members",
     );
-    expect(screen.getByRole("link", { name: "Roles" })).toHaveAttribute(
-      "href",
-      "/workspace/roles",
-    );
+    expect(screen.getByRole("link", { name: "Roles" })).toHaveAttribute("href", "/workspace/roles");
   });
 });

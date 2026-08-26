@@ -192,7 +192,10 @@ export function ArtistProfileEditor({ artistProfileId }: { artistProfileId: stri
             {saveState === "saved" ? (
               <span className="text-sm font-medium text-emerald-700">Saved</span>
             ) : null}
-            <Button disabled={!canEdit || update.isMutating || artistProfile.isLoading} type="submit">
+            <Button
+              disabled={!canEdit || update.isMutating || artistProfile.isLoading}
+              type="submit"
+            >
               {update.isMutating ? "Saving" : "Save artist profile"}
             </Button>
           </div>

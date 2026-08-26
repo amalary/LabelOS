@@ -80,13 +80,13 @@ function TagList({
 
   return (
     <div className="flex flex-wrap gap-1.5">
-      {values.map((value) => (
+      {values.map((value) =>
         kind === "department" ? (
           <ProfileDepartmentBadge department={value} key={value} />
         ) : (
           <ProfileRoleBadge key={value} role={value} />
-        )
-      ))}
+        ),
+      )}
     </div>
   );
 }

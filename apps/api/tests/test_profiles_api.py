@@ -816,9 +816,7 @@ def test_list_workspace_profiles_allows_standalone_workspace_member(
     direct_response = client.get(f"/api/v1/profiles/{seeded.member_profile_id}")
 
     assert list_response.status_code == 200
-    profile_ids = {
-        item["profile"]["id"] for item in list_response.json()["profiles"]
-    }
+    profile_ids = {item["profile"]["id"] for item in list_response.json()["profiles"]}
     assert str(profile_id) in profile_ids
     assert str(seeded.member_profile_id) in profile_ids
     assert direct_response.status_code == 200

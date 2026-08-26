@@ -133,7 +133,9 @@ describe("profile identity components", () => {
     const user = userEvent.setup();
     const onChange = vi.fn();
 
-    render(<ProfileSelector onChange={onChange} profiles={[miraIdentity, noahIdentity]} value={null} />);
+    render(
+      <ProfileSelector onChange={onChange} profiles={[miraIdentity, noahIdentity]} value={null} />,
+    );
 
     await user.click(screen.getByRole("button", { name: /select profile/i }));
     await user.click(screen.getByRole("option", { name: /Noah Kim/i }));

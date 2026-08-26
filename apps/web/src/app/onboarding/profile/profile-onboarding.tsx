@@ -5,10 +5,7 @@ import { useRouter } from "next/navigation";
 import { FormEvent, useMemo, useState } from "react";
 
 import { useUpdateCurrentProfile } from "../../../lib/profiles";
-import type {
-  ProfileAttributeInput,
-  UniversalProfile,
-} from "../../../lib/profiles.types";
+import type { ProfileAttributeInput, UniversalProfile } from "../../../lib/profiles.types";
 import { useActiveWorkspace, useActiveWorkspaceProfile } from "../../../lib/workspace-context";
 
 type RoleModule = {
@@ -296,9 +293,7 @@ export function UniversalProfileOnboarding({
               <h2 className="text-lg font-semibold tracking-normal text-slate-950">
                 {roleModule.title}
               </h2>
-              <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">
-                {roleModule.detail}
-              </p>
+              <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">{roleModule.detail}</p>
             </div>
             <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-medium text-slate-700">
               {activeWorkspace?.name ?? "Workspace pending"}

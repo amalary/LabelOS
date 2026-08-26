@@ -161,7 +161,10 @@ export function ProfileRoleBadge({ role }: { role: string }) {
 
 export function ProfileDepartmentBadge({ department }: { department: string }) {
   return (
-    <Badge className="rounded-md border-sky-200 bg-sky-50 capitalize text-sky-800" variant="neutral">
+    <Badge
+      className="rounded-md border-sky-200 bg-sky-50 capitalize text-sky-800"
+      variant="neutral"
+    >
       {displayValue(department)}
     </Badge>
   );
