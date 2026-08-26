@@ -1,7 +1,10 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { useOrganizationRealtime } from "./use-organization-realtime";
+import {
+  shouldInvalidateProfileRealtimeCacheKey,
+  useOrganizationRealtime,
+} from "./use-organization-realtime";
 
 const navigation = vi.hoisted(() => ({
   refresh: vi.fn(),
@@ -194,5 +197,42 @@ describe("useOrganizationRealtime", () => {
     expect(reconnectedSource.url).toBe(
       "/api/realtime/organizations/org_01/events?lastEventId=event_02",
     );
+  });
+
+  it("invalidates workspace people and targeted artist profile caches for profile realtime events", () => {
+    const shouldInvalidate = (key: string) =>
+      shouldInvalidateProfileRealtimeCacheKey({
+        artistProfileId: "artist_profile_01",
+        eventType: "profile.artist_profile_updated",
+        key,
+        organizationId: "org_01",
+        profileId: "profile_01",
+      });
+
+    expect(shouldInvalidate("profiles:workspace-people:org_01::25:0")).toBe(true);
+    expect(shouldInvalidate("profiles:artist-profile:org_01:artist_profile_01")).toBe(true);
+    expect(shouldInvalidate("profiles:artist-profile:org_01:artist_profile_02")).toBe(false);
+    expect(shouldInvalidate("profiles:workspace-people:org_02::25:0")).toBe(false);
+  });
+
+  it("invalidates workspace scoped artist profile caches when artist profile events lack an id", () => {
+    expect(
+      shouldInvalidateProfileRealtimeCacheKey({
+        artistProfileId: null,
+        eventType: "profile.artist_profile_updated",
+        key: "profiles:artist-profile:org_01:artist_profile_01",
+        organizationId: "org_01",
+        profileId: "profile_01",
+      }),
+    ).toBe(true);
+    expect(
+      shouldInvalidateProfileRealtimeCacheKey({
+        artistProfileId: null,
+        eventType: "profile.updated",
+        key: "profiles:artist-profile:org_01:artist_profile_01",
+        organizationId: "org_01",
+        profileId: "profile_01",
+      }),
+    ).toBe(false);
   });
 });

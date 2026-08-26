@@ -308,7 +308,7 @@ class AuthorizationService:
         if isinstance(workspace, UUID):
             for membership in user.memberships:
                 if (
-                    membership.organization_id == workspace
+                    membership.workspace_id == workspace
                     and membership.status == "active"
                 ):
                     return membership

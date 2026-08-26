@@ -20,6 +20,7 @@ from labelos_database.models import (
     Organization,
     OrganizationMembership,
     ProfessionalRole,
+    UniversalProfile,
     User,
     WebhookEvent,
     workspace_permission_from_role,
@@ -32,6 +33,7 @@ from sqlalchemy import delete, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from labelos_api.api.v1.onboarding import slugify_organization_name
+from labelos_api.realtime import RealtimeEventType, RealtimePublisher
 
 SUPPORTED_WORKOS_EVENT_TYPES = frozenset(
     {
@@ -354,6 +356,32 @@ async def _synchronize_membership_event(
                     membership,
                 )
             )
+            await RealtimePublisher(session).publish(
+                organization_id=membership.organization_id,
+                event_type=RealtimeEventType.profile_workspace_left,
+                actor=None,
+                entity_type="profile",
+                entity_id=workspace_membership.profile_id,
+                payload={
+                    "profileId": str(workspace_membership.profile_id),
+                    "workspaceId": str(membership.organization_id),
+                    "membershipId": str(membership.id),
+                    "status": "removed",
+                },
+            )
+            await RealtimePublisher(session).publish(
+                organization_id=membership.organization_id,
+                event_type=RealtimeEventType.profile_membership_updated,
+                actor=None,
+                entity_type="profile",
+                entity_id=workspace_membership.profile_id,
+                payload={
+                    "profileId": str(workspace_membership.profile_id),
+                    "workspaceId": str(membership.organization_id),
+                    "membershipId": str(membership.id),
+                    "status": "removed",
+                },
+            )
             await mark_workspace_membership_removed(
                 session,
                 workspace_id=membership.organization_id,
@@ -394,11 +422,16 @@ async def _synchronize_membership_event(
         session.add(organization)
         await session.flush()
 
+    previous_membership_status = membership.status if membership is not None else None
+    previous_role = membership.role if membership is not None else None
     if membership is None:
         membership = await session.scalar(
             select(OrganizationMembership)
             .where(OrganizationMembership.organization_id == organization.id)
             .where(OrganizationMembership.user_id == user.id)
+        )
+        previous_membership_status = (
+            membership.status if membership is not None else None
         )
 
     role = _membership_role(data)
@@ -414,6 +447,9 @@ async def _synchronize_membership_event(
             session,
             professional_roles,
         )
+    existing_profile_id = await session.scalar(
+        select(UniversalProfile.id).where(UniversalProfile.user_id == user.id)
+    )
     if membership is None:
         membership = OrganizationMembership(
             workos_membership_id=workos_membership_id,
@@ -435,7 +471,51 @@ async def _synchronize_membership_event(
         membership.department_access = department_access
         membership.status = status
         await session.flush()
-    await ensure_workspace_membership_for_organization_membership(session, membership)
+    workspace_membership = (
+        await ensure_workspace_membership_for_organization_membership(
+            session,
+            membership,
+        )
+    )
+    if existing_profile_id is None:
+        await RealtimePublisher(session).publish(
+            organization_id=organization.id,
+            event_type=RealtimeEventType.profile_created,
+            actor=None,
+            entity_type="profile",
+            entity_id=workspace_membership.profile_id,
+            payload={
+                "profileId": str(workspace_membership.profile_id),
+                "workspaceId": str(organization.id),
+            },
+        )
+    if status == "active" and previous_membership_status != "active":
+        await RealtimePublisher(session).publish(
+            organization_id=organization.id,
+            event_type=RealtimeEventType.profile_workspace_joined,
+            actor=None,
+            entity_type="profile",
+            entity_id=workspace_membership.profile_id,
+            payload={
+                "profileId": str(workspace_membership.profile_id),
+                "workspaceId": str(organization.id),
+                "membershipId": str(membership.id),
+                "status": status,
+            },
+        )
+        await RealtimePublisher(session).publish(
+            organization_id=organization.id,
+            event_type=RealtimeEventType.profile_membership_updated,
+            actor=None,
+            entity_type="profile",
+            entity_id=workspace_membership.profile_id,
+            payload={
+                "profileId": str(workspace_membership.profile_id),
+                "workspaceId": str(organization.id),
+                "membershipId": str(membership.id),
+                "status": status,
+            },
+        )
     await _replace_membership_professional_roles(
         session,
         membership=membership,
@@ -448,6 +528,22 @@ async def _synchronize_membership_event(
         role_default_department_slugs=requested_department_access,
         workspace_owner=membership.workspace_permission.value == "owner",
     )
+    if professional_roles or role != previous_role:
+        await RealtimePublisher(session).publish(
+            organization_id=organization.id,
+            event_type=RealtimeEventType.profile_roles_updated,
+            actor=None,
+            entity_type="profile",
+            entity_id=workspace_membership.profile_id,
+            payload={
+                "profileId": str(workspace_membership.profile_id),
+                "workspaceId": str(organization.id),
+                "membershipId": str(membership.id),
+                "action": "synchronized",
+                "role": role.value,
+                "professionalRoles": professional_roles,
+            },
+        )
 
 
 async def _replace_membership_professional_roles(

@@ -49,6 +49,7 @@ export type WorkspaceInvite = {
     display_name: string | null;
   } | null;
   professional_roles: string[];
+  workspace_roles: string[];
   proposed_department_access: string[];
   expiration: string;
   maximum_uses: number | null;
@@ -152,6 +153,7 @@ export async function createWorkspaceInvite(
   payload: {
     email: string;
     professional_roles: string[];
+    workspace_roles?: string[];
     department_access?: string[];
     expires_in_days?: number;
     maximum_uses?: number | null;

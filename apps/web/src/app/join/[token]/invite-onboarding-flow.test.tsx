@@ -27,6 +27,7 @@ const invite: WorkspaceInvite = {
     display_name: "Owner",
   },
   professional_roles: ["Legal", "Management"],
+  workspace_roles: ["legal", "manager"],
   proposed_department_access: ["legal", "contracts", "agreements", "management"],
   expiration: "2026-09-01T00:00:00Z",
   maximum_uses: null,

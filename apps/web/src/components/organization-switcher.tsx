@@ -15,6 +15,7 @@ import { Button, cn } from "@label-os/ui";
 import { switchOrganization, type SwitchOrganizationState } from "../app/dashboard/actions";
 import { clearOrganizationScopedBrowserCaches } from "../lib/browser-cache";
 import type { OrganizationSummary, WorkspacePermission } from "../lib/organizations";
+import { clearProfileCache } from "../lib/profiles";
 
 type OrganizationSwitcherProps = {
   activeOrganization: OrganizationSummary | null;
@@ -276,6 +277,7 @@ export function OrganizationSwitcher({
                   }
                   setSelectedId(organization.id);
                   clearOrganizationScopedBrowserCaches();
+                  clearProfileCache();
                 }}
                 onKeyDown={(event) => onOptionKeyDown(event, index)}
                 ref={(element) => {

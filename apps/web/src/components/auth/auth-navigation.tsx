@@ -4,6 +4,7 @@ import { AuthUiProvider, useAuthUi } from "./auth-ui-context";
 import { SignInButton, SignedInUserSummary, UserAccountMenu } from "./auth-components";
 import type { AuthUiState } from "./auth-types";
 import { clearOrganizationScopedBrowserCaches } from "../../lib/browser-cache";
+import { clearProfileCache } from "../../lib/profiles";
 
 function submitPost(url: string) {
   const form = document.createElement("form");
@@ -74,6 +75,7 @@ export function AuthNavigation({
       onSignIn={() => window.location.assign(loginPath)}
       onSignOut={() => {
         clearOrganizationScopedBrowserCaches();
+        clearProfileCache();
         submitPost(logoutPath);
       }}
       onTheme={() => undefined}

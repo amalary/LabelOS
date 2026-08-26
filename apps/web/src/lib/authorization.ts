@@ -63,6 +63,29 @@ export type AuthorizationResource = {
   department?: string | null;
 } | null;
 
+const capabilityDepartments: Partial<Record<Capability, readonly string[]>> = {
+  [capabilities.artistView]: ["artist", "a&r", "management"],
+  [capabilities.artistEdit]: ["artist", "a&r", "management"],
+  [capabilities.artistCreate]: ["a&r", "management"],
+  [capabilities.campaignView]: ["marketing", "management"],
+  [capabilities.campaignCreate]: ["marketing", "management"],
+  [capabilities.campaignApprove]: ["marketing", "management"],
+  [capabilities.releaseView]: ["release_operations", "management"],
+  [capabilities.releaseEdit]: ["release_operations", "management"],
+  [capabilities.contractView]: ["legal", "contracts"],
+  [capabilities.contractUpload]: ["legal", "contracts"],
+  [capabilities.contractApprove]: ["legal", "contracts"],
+  [capabilities.contractSignRequest]: ["legal", "contracts"],
+  [capabilities.royaltyView]: ["finance", "royalties"],
+  [capabilities.financeView]: ["finance"],
+  [capabilities.analyticsView]: ["analytics", "management"],
+  [capabilities.memberInvite]: ["administration"],
+  [capabilities.memberRemove]: ["administration"],
+  [capabilities.roleAssign]: ["administration"],
+  [capabilities.workspaceManage]: ["administration"],
+  [capabilities.profileEdit]: [],
+};
+
 const roleRanks: Record<AppRole, number> = {
   member: 0,
   admin: 1,
@@ -155,8 +178,16 @@ function canUseResolvedCapability(
   ) {
     return true;
   }
-  const department = resource?.department;
-  if (department && !canAccessDepartment(subject, resolvedWorkspace, department)) {
+  const allowedDepartments =
+    resource?.department !== undefined && resource.department !== null
+      ? [resource.department]
+      : (capabilityDepartments[capability as Capability] ?? []);
+  if (
+    allowedDepartments.length > 0 &&
+    !allowedDepartments.some((department) =>
+      canAccessDepartment(subject, resolvedWorkspace, department),
+    )
+  ) {
     return false;
   }
   return resolvedWorkspace.capabilities?.includes(capability) ?? false;

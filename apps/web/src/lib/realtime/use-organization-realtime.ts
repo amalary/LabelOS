@@ -13,6 +13,7 @@ import {
 import { usePathname, useRouter } from "next/navigation";
 
 import { clearOrganizationScopedBrowserCaches } from "../browser-cache";
+import { invalidateProfileCache } from "../profiles";
 import { activityEventTypes, refetchEventTypes, type RealtimeEventEnvelope } from "./events";
 import type {
   ActivityEvent,
@@ -42,6 +43,50 @@ type OrganizationRealtimeContextValue = OrganizationRealtimeState & {
 const OrganizationRealtimeContext = createContext<OrganizationRealtimeContextValue | null>(null);
 
 const maxRecentActivityEvents = 25;
+const profileEventPrefix = "profile.";
+const artistProfileEventTypes = new Set<string>([
+  "profile.artist_updated",
+  "profile.artist_profile_created",
+  "profile.artist_profile_updated",
+]);
+
+export function shouldInvalidateProfileRealtimeCacheKey({
+  artistProfileId,
+  eventType,
+  key,
+  organizationId,
+  profileId,
+}: {
+  artistProfileId: string | null;
+  eventType: string;
+  key: string;
+  organizationId: string;
+  profileId: string | null;
+}) {
+  if (key === "profiles:current") {
+    return true;
+  }
+  if (key.startsWith(`profiles:workspace-members:${organizationId}:`)) {
+    return true;
+  }
+  if (key.startsWith(`profiles:workspace-people:${organizationId}:`)) {
+    return true;
+  }
+  if (profileId) {
+    if (key === `profiles:workspace-profile:${organizationId}:${profileId}`) {
+      return true;
+    }
+  } else if (key.startsWith(`profiles:workspace-profile:${organizationId}:`)) {
+    return true;
+  }
+  if (artistProfileId) {
+    return key === `profiles:artist-profile:${organizationId}:${artistProfileId}`;
+  }
+  return (
+    artistProfileEventTypes.has(eventType) &&
+    key.startsWith(`profiles:artist-profile:${organizationId}:`)
+  );
+}
 
 function payloadForActivity(event: RealtimeEventEnvelope): ActivityEventPayload {
   const payload: ActivityEventPayload = {};
@@ -194,6 +239,25 @@ export function useOrganizationRealtime(organizationId: string | null): Organiza
         }
 
         if (refetchEventTypes.has(event.type)) {
+          if (event.type.startsWith(profileEventPrefix)) {
+            const profileId =
+              typeof event.payload.profileId === "string"
+                ? event.payload.profileId
+                : event.entity_id;
+            const artistProfileId =
+              typeof event.payload.artistProfileId === "string"
+                ? event.payload.artistProfileId
+                : null;
+            invalidateProfileCache((key) =>
+              shouldInvalidateProfileRealtimeCacheKey({
+                artistProfileId,
+                eventType: event.type,
+                key,
+                organizationId,
+                profileId,
+              }),
+            );
+          }
           const isDashboardActivityRefresh =
             pathname === "/dashboard" && activityEventTypes.has(event.type);
           if (!isDashboardActivityRefresh) {

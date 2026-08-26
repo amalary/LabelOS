@@ -130,6 +130,86 @@ describe("OrganizationSwitcher", () => {
     expect(sessionStorage.getItem("labelos:artists:org-a")).toBeNull();
   });
 
+  it("does not switch or clear caches for the current workspace", async () => {
+    const user = userEvent.setup();
+    sessionStorage.setItem("labelos:artists:org-a", "cached");
+
+    render(
+      <OrganizationSwitcher
+        activeOrganization={{
+          id: "org-a",
+          name: "Alpha Label",
+          slug: "alpha-label",
+          role: "owner",
+          can_switch: true,
+        }}
+        organizations={[
+          {
+            id: "org-a",
+            name: "Alpha Label",
+            slug: "alpha-label",
+            role: "owner",
+            can_switch: true,
+          },
+          {
+            id: "org-b",
+            name: "Beta Label",
+            slug: "beta-label",
+            role: "member",
+            can_switch: true,
+          },
+        ]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /active workspace alpha label/i }));
+    await user.click(screen.getByRole("option", { name: /alpha label/i }));
+
+    expect(sessionStorage.getItem("labelos:artists:org-a")).toBe("cached");
+  });
+
+  it("does not switch to a workspace marked unavailable", async () => {
+    const user = userEvent.setup();
+    sessionStorage.setItem("labelos:artists:org-a", "cached");
+
+    render(
+      <OrganizationSwitcher
+        activeOrganization={{
+          id: "org-a",
+          name: "Alpha Label",
+          slug: "alpha-label",
+          role: "owner",
+          can_switch: true,
+        }}
+        organizations={[
+          {
+            id: "org-a",
+            name: "Alpha Label",
+            slug: "alpha-label",
+            role: "owner",
+            can_switch: true,
+          },
+          {
+            id: "org-b",
+            name: "Beta Label",
+            slug: "beta-label",
+            role: "member",
+            can_switch: false,
+          },
+        ]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /active workspace alpha label/i }));
+    const unavailableWorkspace = screen.getByRole("option", { name: /beta label/i });
+
+    expect(unavailableWorkspace).toHaveAttribute("aria-disabled", "true");
+
+    await user.click(unavailableWorkspace);
+
+    expect(sessionStorage.getItem("labelos:artists:org-a")).toBe("cached");
+  });
+
   it("supports keyboard navigation through workspace options", async () => {
     const user = userEvent.setup();
 

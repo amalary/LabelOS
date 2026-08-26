@@ -109,6 +109,11 @@ class MembershipContext:
     def role(self) -> MembershipRole:
         return MembershipRole(self.workspace_permission.value)
 
+    @property
+    def workspace_id(self) -> UUID:
+        """Stable local workspace identifier for authorization and profile scope."""
+        return self.organization_id
+
 
 @dataclass(frozen=True)
 class CurrentUserContext:
@@ -130,8 +135,10 @@ class CurrentUserContext:
 
     @property
     def active_workspace_id(self) -> UUID | None:
-        """LabelOS workspaces are backed by WorkOS organizations."""
-        return self.active_organization_id
+        active_membership = self.active_membership
+        if active_membership is None:
+            return None
+        return active_membership.workspace_id
 
     @property
     def workspace_memberships(self) -> tuple[MembershipContext, ...]:
@@ -143,7 +150,7 @@ class CurrentUserContext:
         if active_organization_id is None:
             return None
         for membership in self.memberships:
-            if membership.organization_id == active_organization_id:
+            if membership.workspace_id == active_organization_id:
                 return membership
         return None
 
