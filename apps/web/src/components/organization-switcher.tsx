@@ -16,6 +16,7 @@ import { switchOrganization, type SwitchOrganizationState } from "../app/dashboa
 import { clearOrganizationScopedBrowserCaches } from "../lib/browser-cache";
 import type { OrganizationSummary, WorkspacePermission } from "../lib/organizations";
 import { clearProfileCache } from "../lib/profiles";
+import { clearWorkspaceCapabilityCache } from "../lib/workspace-capabilities";
 
 type OrganizationSwitcherProps = {
   activeOrganization: OrganizationSummary | null;
@@ -278,6 +279,7 @@ export function OrganizationSwitcher({
                   setSelectedId(organization.id);
                   clearOrganizationScopedBrowserCaches();
                   clearProfileCache();
+                  clearWorkspaceCapabilityCache();
                 }}
                 onKeyDown={(event) => onOptionKeyDown(event, index)}
                 ref={(element) => {

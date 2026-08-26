@@ -14,6 +14,10 @@ import { usePathname, useRouter } from "next/navigation";
 
 import { clearOrganizationScopedBrowserCaches } from "../browser-cache";
 import { invalidateProfileCache } from "../profiles";
+import {
+  invalidateWorkspaceCapabilityCache,
+  shouldInvalidateWorkspaceCapabilityRealtimeCacheKey,
+} from "../workspace-capabilities";
 import { activityEventTypes, refetchEventTypes, type RealtimeEventEnvelope } from "./events";
 import type {
   ActivityEvent,
@@ -255,6 +259,25 @@ export function useOrganizationRealtime(organizationId: string | null): Organiza
                 key,
                 organizationId,
                 profileId,
+              }),
+            );
+          }
+          if (
+            event.type === "member.updated" ||
+            event.type === "member.role_changed" ||
+            event.type === "member.joined" ||
+            event.type === "member.removed" ||
+            event.type === "profile.roles_updated" ||
+            event.type === "profile.role_added" ||
+            event.type === "profile.role_removed" ||
+            event.type === "profile.membership_updated" ||
+            event.type === "profile.workspace_joined" ||
+            event.type === "profile.workspace_left"
+          ) {
+            invalidateWorkspaceCapabilityCache((key) =>
+              shouldInvalidateWorkspaceCapabilityRealtimeCacheKey({
+                key,
+                organizationId,
               }),
             );
           }
