@@ -248,14 +248,11 @@ DEFAULT_ROLE_DEPARTMENT_ASSOCIATIONS: dict[str, list[str]] = {
     "artist": ["creative", "management"],
     "manager": ["management"],
     "producer": ["creative"],
-    "songwriter": ["creative"],
-    "a&r": ["a&r"],
+    "a_and_r": ["a&r"],
     "marketing": ["marketing"],
-    "release_operations": ["release_operations"],
     "legal": ["legal"],
     "finance": ["finance"],
-    "analytics": ["analytics"],
-    "executive": [
+    "owner": [
         "a&r",
         "management",
         "marketing",
@@ -267,5 +264,5 @@ DEFAULT_ROLE_DEPARTMENT_ASSOCIATIONS: dict[str, list[str]] = {
         "creative",
         "administration",
     ],
-    "administrator": ["administration"],
+    "admin": ["administration"],
 }

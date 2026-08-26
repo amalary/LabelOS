@@ -194,7 +194,9 @@ async def create_artist_profile(
         context=context,
         workspace_id=workspace_id,
     )
-    if not authorization_service.can(context, workspace_id, Capability.artist_edit):
+    if not authorization_service.can(
+        context, workspace_id, Capability.artist_profile_edit
+    ):
         raise _forbidden("Insufficient capability permission")
     await _require_profile_in_workspace(
         session,
@@ -264,7 +266,9 @@ async def get_artist_profile(
         context=context,
         workspace_id=workspace_id,
     )
-    if not authorization_service.can(context, workspace_id, Capability.artist_view):
+    if not authorization_service.can(
+        context, workspace_id, Capability.artist_profile_view
+    ):
         raise _forbidden("Insufficient capability permission")
     artist_profile = await _load_artist_profile(
         session,
@@ -292,7 +296,9 @@ async def update_artist_profile(
         context=context,
         workspace_id=workspace_id,
     )
-    if not authorization_service.can(context, workspace_id, Capability.artist_edit):
+    if not authorization_service.can(
+        context, workspace_id, Capability.artist_profile_edit
+    ):
         raise _forbidden("Insufficient capability permission")
     artist_profile = await _load_artist_profile(
         session,

@@ -3,10 +3,11 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Annotated, Any
+from typing import Annotated, Any, Protocol
 from uuid import UUID
 
 from fastapi import Depends, HTTPException, status
+from labelos_database.capabilities import Capability
 from labelos_database.models import MembershipRole, WorkspacePermission
 
 from labelos_api.auth import (
@@ -38,27 +39,21 @@ class Permission(StrEnum):
     settings_manage = "settings:manage"
 
 
-class Capability(StrEnum):
-    artist_view = "artist.view"
-    artist_edit = "artist.edit"
-    artist_create = "artist.create"
-    campaign_view = "campaign.view"
-    campaign_create = "campaign.create"
-    campaign_approve = "campaign.approve"
-    release_view = "release.view"
-    release_edit = "release.edit"
-    contract_view = "contract.view"
-    contract_upload = "contract.upload"
-    contract_approve = "contract.approve"
-    contract_sign_request = "contract.sign_request"
-    royalty_view = "royalty.view"
-    finance_view = "finance.view"
-    analytics_view = "analytics.view"
-    member_invite = "member.invite"
-    member_remove = "member.remove"
-    role_assign = "role.assign"
-    workspace_manage = "workspace.manage"
-    profile_edit = "profile.edit"
+class ActorKind(StrEnum):
+    user = "user"
+    service_account = "service_account"
+    ai_agent = "ai_agent"
+
+
+class ResourceKind(StrEnum):
+    workspace = "workspace"
+    artist = "artist"
+    release = "release"
+    campaign = "campaign"
+    contract = "contract"
+    royalty = "royalty"
+    analytics = "analytics"
+    profile = "profile"
 
 
 APP_ROLES: tuple[MembershipRole, ...] = (
@@ -104,66 +99,142 @@ INITIAL_ROLE_CAPABILITIES: dict[MembershipRole, frozenset[Capability]] = {
     MembershipRole.owner: OWNER_CAPABILITIES,
     MembershipRole.admin: frozenset(
         {
-            Capability.artist_view,
-            Capability.artist_edit,
-            Capability.artist_create,
-            Capability.campaign_view,
-            Capability.campaign_create,
-            Capability.campaign_approve,
-            Capability.release_view,
-            Capability.release_edit,
-            Capability.contract_view,
-            Capability.contract_upload,
-            Capability.contract_approve,
-            Capability.contract_sign_request,
-            Capability.royalty_view,
-            Capability.finance_view,
-            Capability.analytics_view,
-            Capability.member_invite,
-            Capability.member_remove,
+            Capability.workspace_view,
+            Capability.workspace_update,
+            Capability.workspace_member_view,
+            Capability.workspace_member_invite,
+            Capability.workspace_member_roles_manage,
+            Capability.workspace_member_remove,
+            Capability.role_view,
+            Capability.role_create,
+            Capability.role_update,
+            Capability.role_delete,
             Capability.role_assign,
-            Capability.workspace_manage,
+            Capability.artist_profile_view,
+            Capability.artist_profile_edit,
+            Capability.artist_profile_create,
+            Capability.marketing_campaign_view,
+            Capability.marketing_campaign_create,
+            Capability.marketing_campaign_edit,
+            Capability.marketing_campaign_approve,
+            Capability.release_view,
+            Capability.release_create,
+            Capability.release_edit,
+            Capability.release_approve,
+            Capability.contract_view,
+            Capability.contract_create,
+            Capability.contract_edit,
+            Capability.contract_review,
+            Capability.contract_approve,
+            Capability.contract_execute,
+            Capability.royalty_view,
+            Capability.royalty_statement_view,
+            Capability.finance_view,
+            Capability.finance_report_view,
+            Capability.analytics_view,
+            Capability.profile_view,
             Capability.profile_edit,
         }
     ),
     MembershipRole.member: frozenset(
         {
-            Capability.artist_view,
-            Capability.campaign_view,
+            Capability.artist_profile_view,
+            Capability.marketing_campaign_view,
             Capability.release_view,
             Capability.analytics_view,
+            Capability.profile_view,
             Capability.profile_edit,
         }
     ),
 }
 
 CAPABILITY_DEPARTMENTS: dict[Capability, frozenset[str]] = {
-    Capability.artist_view: frozenset({"artist", "a&r", "management"}),
-    Capability.artist_edit: frozenset({"artist", "a&r", "management"}),
-    Capability.artist_create: frozenset({"a&r", "management"}),
-    Capability.campaign_view: frozenset({"marketing", "management"}),
-    Capability.campaign_create: frozenset({"marketing", "management"}),
-    Capability.campaign_approve: frozenset({"marketing", "management"}),
-    Capability.release_view: frozenset({"release_operations", "management"}),
-    Capability.release_edit: frozenset({"release_operations", "management"}),
-    Capability.contract_view: frozenset({"legal", "contracts"}),
-    Capability.contract_upload: frozenset({"legal", "contracts"}),
-    Capability.contract_approve: frozenset({"legal", "contracts"}),
-    Capability.contract_sign_request: frozenset({"legal", "contracts"}),
-    Capability.royalty_view: frozenset({"finance", "royalties"}),
-    Capability.finance_view: frozenset({"finance"}),
-    Capability.analytics_view: frozenset({"analytics", "management"}),
-    Capability.member_invite: frozenset({"administration"}),
-    Capability.member_remove: frozenset({"administration"}),
+    Capability.workspace_view: frozenset({"administration", "management"}),
+    Capability.workspace_update: frozenset({"administration"}),
+    Capability.workspace_member_view: frozenset({"administration", "management"}),
+    Capability.workspace_member_invite: frozenset({"administration"}),
+    Capability.workspace_member_roles_manage: frozenset({"administration"}),
+    Capability.workspace_member_remove: frozenset({"administration"}),
+    Capability.role_view: frozenset({"administration", "management"}),
+    Capability.role_create: frozenset({"administration"}),
+    Capability.role_update: frozenset({"administration"}),
+    Capability.role_delete: frozenset({"administration"}),
     Capability.role_assign: frozenset({"administration"}),
-    Capability.workspace_manage: frozenset({"administration"}),
+    Capability.profile_view: frozenset(),
     Capability.profile_edit: frozenset(),
+    Capability.artist_profile_view: frozenset({"artist", "a&r", "management"}),
+    Capability.artist_profile_edit: frozenset({"artist", "a&r", "management"}),
+    Capability.artist_profile_create: frozenset({"a&r", "management"}),
+    Capability.artist_profile_delete: frozenset({"a&r", "management"}),
+    Capability.ar_scouting_view: frozenset({"a&r", "management"}),
+    Capability.ar_scouting_create: frozenset({"a&r", "management"}),
+    Capability.ar_evaluation_view: frozenset({"a&r", "management"}),
+    Capability.ar_evaluation_create: frozenset({"a&r", "management"}),
+    Capability.ar_signing_approve: frozenset({"a&r", "management"}),
+    Capability.marketing_campaign_view: frozenset({"marketing", "management"}),
+    Capability.marketing_campaign_create: frozenset({"marketing", "management"}),
+    Capability.marketing_campaign_edit: frozenset({"marketing", "management"}),
+    Capability.marketing_campaign_approve: frozenset({"marketing", "management"}),
+    Capability.release_view: frozenset({"release_operations", "management"}),
+    Capability.release_create: frozenset({"release_operations", "management"}),
+    Capability.release_edit: frozenset({"release_operations", "management"}),
+    Capability.release_approve: frozenset({"release_operations", "management"}),
+    Capability.contract_view: frozenset({"legal", "contracts"}),
+    Capability.contract_create: frozenset({"legal", "contracts"}),
+    Capability.contract_edit: frozenset({"legal", "contracts"}),
+    Capability.contract_review: frozenset({"legal", "contracts"}),
+    Capability.contract_approve: frozenset({"legal", "contracts"}),
+    Capability.contract_execute: frozenset({"legal", "contracts"}),
+    Capability.royalty_view: frozenset({"finance", "royalties"}),
+    Capability.royalty_calculate: frozenset({"finance", "royalties"}),
+    Capability.royalty_statement_view: frozenset({"finance", "royalties"}),
+    Capability.royalty_statement_create: frozenset({"finance", "royalties"}),
+    Capability.finance_view: frozenset({"finance"}),
+    Capability.finance_report_view: frozenset({"finance"}),
+    Capability.finance_payment_view: frozenset({"finance"}),
+    Capability.finance_payment_approve: frozenset({"finance"}),
+    Capability.analytics_view: frozenset({"analytics", "management"}),
 }
 
 
 @dataclass(frozen=True)
+class AuthorizationActor:
+    """Actor metadata for authorization logs and future non-user principals."""
+
+    kind: ActorKind
+    subject: str
+    user_id: UUID | None = None
+    display_name: str | None = None
+
+
+@dataclass(frozen=True)
 class AuthorizationResource:
+    """Resource metadata used for workspace and future resource-aware decisions."""
+
+    kind: ResourceKind | str | None = None
+    id: UUID | str | None = None
+    workspace_id: UUID | None = None
     department: str | None = None
+    owner_actor: AuthorizationActor | None = None
+    attributes: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class AuthorizationDecision:
+    actor: AuthorizationActor
+    action: ResolvedAuthorizationAction
+    workspace_id: UUID | None
+    resource: AuthorizationResource | None
+    allowed: bool
+    reason: str
+
+
+class WorkspaceAuthorizationContext(Protocol):
+    principal: AuthenticatedPrincipal
+    memberships: tuple[MembershipContext, ...]
+
+    @property
+    def active_membership(self) -> MembershipContext | None: ...
 
 
 AuthorizationAction = Capability | Permission | MembershipRole | str
@@ -193,57 +264,109 @@ def _valid_capabilities(
     )
 
 
+def actor_from_current_user(context: CurrentUserContext) -> AuthorizationActor:
+    return AuthorizationActor(
+        kind=ActorKind.user,
+        subject=context.principal.subject,
+        user_id=context.user.id,
+        display_name=context.user.display_name,
+    )
+
+
 class AuthorizationService:
     def can(
         self,
-        user: CurrentUserContext,
+        actor: WorkspaceAuthorizationContext,
         workspace: AuthorizationWorkspace,
         capability: AuthorizationAction,
         resource: AuthorizationResource | dict[str, Any] | None = None,
     ) -> bool:
+        return self.decide(actor, workspace, capability, resource).allowed
+
+    def decide(
+        self,
+        actor: WorkspaceAuthorizationContext,
+        workspace: AuthorizationWorkspace,
+        capability: AuthorizationAction,
+        resource: AuthorizationResource | dict[str, Any] | None = None,
+    ) -> AuthorizationDecision:
         action = self._normalize_action(capability)
+        normalized_resource = self._normalize_resource(resource)
+        actor_ref = self._actor_ref(actor)
+        workspace_id = self._workspace_id(actor, workspace)
         if action is None:
-            return False
+            return AuthorizationDecision(
+                actor=actor_ref,
+                action=None,
+                workspace_id=workspace_id,
+                resource=normalized_resource,
+                allowed=False,
+                reason="unknown_action",
+            )
         if isinstance(action, Permission):
-            return self.can_permission(user, action)
+            allowed = self.can_permission(actor, action)
+            return AuthorizationDecision(
+                actor=actor_ref,
+                action=action,
+                workspace_id=workspace_id,
+                resource=normalized_resource,
+                allowed=allowed,
+                reason="permission_allowed" if allowed else "missing_permission",
+            )
         if isinstance(action, MembershipRole):
-            return self.can_role(user, action)
-        return self.can_capability(
-            user,
+            allowed = self.can_role(actor, action)
+            return AuthorizationDecision(
+                actor=actor_ref,
+                action=action,
+                workspace_id=workspace_id,
+                resource=normalized_resource,
+                allowed=allowed,
+                reason="role_allowed" if allowed else "insufficient_role",
+            )
+        allowed = self.can_capability(
+            actor,
             action,
             workspace=workspace,
-            resource=resource,
+            resource=normalized_resource,
+        )
+        return AuthorizationDecision(
+            actor=actor_ref,
+            action=action,
+            workspace_id=workspace_id,
+            resource=normalized_resource,
+            allowed=allowed,
+            reason="capability_allowed" if allowed else "missing_capability",
         )
 
     def can_role(
         self,
-        user: CurrentUserContext,
+        actor: WorkspaceAuthorizationContext,
         required_role: MembershipRole | str,
     ) -> bool:
         required = self._normalize_role(required_role)
         if required is None:
             return False
-        principal_roles = _principal_roles(user.principal)
+        principal_roles = _principal_roles(actor.principal)
         return any(has_role_at_least(actual, required) for actual in principal_roles)
 
     def can_permission(
         self,
-        user: CurrentUserContext,
+        actor: WorkspaceAuthorizationContext,
         permission: Permission | str,
     ) -> bool:
         required = self._normalize_permission(permission)
         if required is None:
             return False
-        return required.value in user.principal.permissions
+        return required.value in actor.principal.permissions
 
     def can_access_department(
         self,
-        user: CurrentUserContext,
+        actor: WorkspaceAuthorizationContext,
         department_slug: str,
         *,
         workspace: AuthorizationWorkspace = None,
     ) -> bool:
-        membership = self._resolve_workspace_membership(user, workspace)
+        membership = self._resolve_workspace_membership(actor, workspace)
         if membership is None:
             return False
         if membership.workspace_permission == WorkspacePermission.owner:
@@ -252,7 +375,7 @@ class AuthorizationService:
 
     def can_capability(
         self,
-        user: CurrentUserContext,
+        actor: WorkspaceAuthorizationContext,
         capability: Capability | str,
         *,
         workspace: AuthorizationWorkspace = None,
@@ -261,7 +384,7 @@ class AuthorizationService:
         required = self._normalize_capability(capability)
         if required is None:
             return False
-        membership = self._resolve_workspace_membership(user, workspace)
+        membership = self._resolve_workspace_membership(actor, workspace)
         if membership is None:
             return False
         if membership.workspace_permission == WorkspacePermission.owner:
@@ -273,19 +396,19 @@ class AuthorizationService:
             else CAPABILITY_DEPARTMENTS.get(required, frozenset())
         )
         if allowed_departments and not any(
-            self.can_access_department(user, slug, workspace=membership)
+            self.can_access_department(actor, slug, workspace=membership)
             for slug in allowed_departments
         ):
             return False
-        return required in self.effective_capabilities(user, workspace=membership)
+        return required in self.effective_capabilities(actor, workspace=membership)
 
     def effective_capabilities(
         self,
-        user: CurrentUserContext,
+        actor: WorkspaceAuthorizationContext,
         *,
         workspace: AuthorizationWorkspace = None,
     ) -> frozenset[Capability]:
-        membership = self._resolve_workspace_membership(user, workspace)
+        membership = self._resolve_workspace_membership(actor, workspace)
         if membership is None:
             return frozenset()
         workspace_role = _workspace_role(membership.workspace_permission)
@@ -300,31 +423,72 @@ class AuthorizationService:
 
     def _resolve_workspace_membership(
         self,
-        user: CurrentUserContext,
+        actor: WorkspaceAuthorizationContext,
         workspace: AuthorizationWorkspace,
     ) -> MembershipContext | None:
         if isinstance(workspace, MembershipContext):
             return workspace if workspace.status == "active" else None
         if isinstance(workspace, UUID):
-            for membership in user.memberships:
+            for membership in actor.memberships:
                 if (
                     membership.workspace_id == workspace
                     and membership.status == "active"
                 ):
                     return membership
             return None
-        return user.active_membership
+        return actor.active_membership
 
     def _resource_department(
         self,
         resource: AuthorizationResource | dict[str, Any] | None,
     ) -> str | None:
-        if resource is None:
+        normalized = self._normalize_resource(resource)
+        if normalized is None:
             return None
-        if isinstance(resource, AuthorizationResource):
-            return resource.department
+        return normalized.department
+
+    def _normalize_resource(
+        self,
+        resource: AuthorizationResource | dict[str, Any] | None,
+    ) -> AuthorizationResource | None:
+        if resource is None or isinstance(resource, AuthorizationResource):
+            return resource
         department = resource.get("department")
-        return department if isinstance(department, str) else None
+        kind = resource.get("kind")
+        resource_id = resource.get("id")
+        workspace_id = resource.get("workspace_id")
+        attributes = resource.get("attributes")
+        return AuthorizationResource(
+            kind=kind if isinstance(kind, str) else None,
+            id=resource_id if isinstance(resource_id, UUID | str) else None,
+            workspace_id=workspace_id if isinstance(workspace_id, UUID) else None,
+            department=department if isinstance(department, str) else None,
+            attributes=attributes if isinstance(attributes, dict) else None,
+        )
+
+    def _actor_ref(self, actor: WorkspaceAuthorizationContext) -> AuthorizationActor:
+        actor_ref = getattr(actor, "authorization_actor", None)
+        if isinstance(actor_ref, AuthorizationActor):
+            return actor_ref
+        if isinstance(actor, CurrentUserContext):
+            return actor_from_current_user(actor)
+        return AuthorizationActor(
+            kind=ActorKind.user,
+            subject=actor.principal.subject,
+            display_name=actor.principal.display_name,
+        )
+
+    def _workspace_id(
+        self,
+        actor: WorkspaceAuthorizationContext,
+        workspace: AuthorizationWorkspace,
+    ) -> UUID | None:
+        if isinstance(workspace, MembershipContext):
+            return workspace.workspace_id
+        if isinstance(workspace, UUID):
+            return workspace
+        active_membership = actor.active_membership
+        return active_membership.workspace_id if active_membership is not None else None
 
     def _normalize_action(
         self,

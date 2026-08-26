@@ -158,7 +158,7 @@ administrator grants, and future policy workflows to produce auditable access
 records.
 
 Department access is separate from action capabilities. A user may have a
-capability such as `contract.upload`, but a legal-scoped resource should still
+capability such as `contract.create`, but a legal-scoped resource should still
 require access to the relevant legal department scope.
 
 ## Specialized Profiles

@@ -56,7 +56,7 @@ async def admin_example(
 async def create_contract_example(
     _context: Annotated[
         CurrentUserContext,
-        Depends(require_capability(Capability.contract_upload, department="legal")),
+        Depends(require_capability(Capability.contract_create, department="legal")),
     ],
 ) -> ProtectedRouteResponse:
-    return ProtectedRouteResponse(ok=True, guard=Capability.contract_upload.value)
+    return ProtectedRouteResponse(ok=True, guard=Capability.contract_create.value)

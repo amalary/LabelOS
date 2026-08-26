@@ -1318,7 +1318,7 @@ def test_workspace_switch_resolves_different_profile_context_without_duplication
                 description="Legal role.",
             )
             artist_view = Capability(
-                key="artist.view",
+                key="artist.profile.view",
                 display_name="View artists",
                 description="View artists.",
             )
@@ -1420,7 +1420,7 @@ def test_workspace_switch_resolves_different_profile_context_without_duplication
     assert beta["workspace_roles"] == ["legal"]
     assert alpha["department_access"] == ["creative"]
     assert beta["department_access"] == ["contracts"]
-    assert alpha["capability_permissions"] == ["artist.view"]
+    assert alpha["capability_permissions"] == ["artist.profile.view"]
     assert beta["capability_permissions"] == ["contract.view"]
 
 

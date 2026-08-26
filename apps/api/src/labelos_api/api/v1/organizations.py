@@ -61,6 +61,7 @@ ALLOWED_WORKSPACE_ROLES = {
     default_role.key: default_role.display_name for default_role in DEFAULT_ROLES
 }
 WORKSPACE_ROLE_ALIASES = {
+    "a&r": "a_and_r",
     "management": "manager",
 }
 ALLOWED_DEPARTMENT_ACCESS = {
@@ -957,7 +958,7 @@ async def create_workspace_invite(
     context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
 ) -> WorkspaceInviteResponse:
     _require_membership(context, organization_id, MembershipRole.member)
-    _require_capability(context, organization_id, Capability.member_invite)
+    _require_capability(context, organization_id, Capability.workspace_member_invite)
     if payload.workspace_roles:
         _require_capability(context, organization_id, Capability.role_assign)
 

@@ -20,6 +20,18 @@ depends_on: str | Sequence[str] | None = None
 
 DEFAULT_ROLES = (
     (
+        "c2915cf2-10ba-50ec-a8a6-e4a5e5519f24",
+        "owner",
+        "Owner",
+        "Workspace owner with full control over workspace configuration, access, and operations.",
+    ),
+    (
+        "d3f8c6e8-60f0-5902-9630-65f96f61c016",
+        "admin",
+        "Admin",
+        "Workspace administrator responsible for member operations, role assignment, and workspace administration.",
+    ),
+    (
         "d6c9e57c-6f3d-5177-a5dd-da5c1e16a79f",
         "artist",
         "Artist",
@@ -32,20 +44,8 @@ DEFAULT_ROLES = (
         "Artist, business, or project manager coordinating work across a workspace.",
     ),
     (
-        "3daa23fa-9389-5204-be68-dabd8bfafc61",
-        "producer",
-        "Producer",
-        "Producer responsible for recording, production, or creative direction.",
-    ),
-    (
-        "06d05755-95af-5cfe-8f4e-8c84fd52dc29",
-        "songwriter",
-        "Songwriter",
-        "Composer, lyricist, or writer contributing to musical works.",
-    ),
-    (
         "060f948c-f937-53d3-aa46-3c609b3b9cd8",
-        "a&r",
+        "a_and_r",
         "A&R",
         "Artists and repertoire role focused on talent and creative development.",
     ),
@@ -54,12 +54,6 @@ DEFAULT_ROLES = (
         "marketing",
         "Marketing",
         "Marketing role responsible for audience strategy, campaigns, and growth.",
-    ),
-    (
-        "5683c4d1-99f3-59a0-b9d3-1bc932b68038",
-        "release_operations",
-        "Release Operations",
-        "Operations role responsible for release readiness, delivery, and schedules.",
     ),
     (
         "cd1d3ae8-6458-558c-ac73-dea262b3b03d",
@@ -74,28 +68,17 @@ DEFAULT_ROLES = (
         "Finance role responsible for budgets, payments, accounting, and reporting.",
     ),
     (
-        "9fe438d1-95f9-5bc8-89b8-9e09ad0637b4",
-        "analytics",
-        "Analytics",
-        "Analytics role responsible for reporting, insights, and performance review.",
-    ),
-    (
-        "28b2b159-f8bd-53ac-8b12-52bbd0bc998c",
-        "executive",
-        "Executive",
-        "Executive leadership role responsible for strategy and decision-making.",
-    ),
-    (
-        "76157317-6e0b-5a39-a9a4-abe5080fb36b",
-        "administrator",
-        "Administrator",
-        "Workspace administration role responsible for settings and member operations.",
+        "3daa23fa-9389-5204-be68-dabd8bfafc61",
+        "producer",
+        "Producer",
+        "Producer responsible for recording, production, or creative direction.",
     ),
 )
 
 PROFESSIONAL_ROLE_KEY_ALIASES = {
     "management": "manager",
-    "label_executive": "executive",
+    "a&r": "a_and_r",
+    "label_executive": "owner",
 }
 
 
@@ -127,27 +110,7 @@ def upgrade() -> None:
     op.create_index("ix_roles_key", "roles", ["key"])
     op.create_index("ix_roles_system_role", "roles", ["system_role"])
 
-    roles_table = sa.table(
-        "roles",
-        sa.column("id", sa.Uuid()),
-        sa.column("key", sa.String()),
-        sa.column("display_name", sa.String()),
-        sa.column("description", sa.String()),
-        sa.column("system_role", sa.Boolean()),
-    )
-    op.bulk_insert(
-        roles_table,
-        [
-            {
-                "id": UUID(role_id),
-                "key": key,
-                "display_name": display_name,
-                "description": description,
-                "system_role": True,
-            }
-            for role_id, key, display_name, description in DEFAULT_ROLES
-        ],
-    )
+    _seed_system_roles()
 
     op.create_table(
         "workspace_membership_roles",
@@ -247,6 +210,54 @@ def downgrade() -> None:
     op.drop_table("roles")
 
 
+def _seed_system_roles() -> None:
+    bind = op.get_bind()
+    for role_id, key, display_name, description in DEFAULT_ROLES:
+        stable_id = UUID(role_id)
+        existing_id = bind.execute(
+            sa.text("SELECT id FROM roles WHERE key = :key OR id = :id"),
+            {"key": key, "id": stable_id},
+        ).scalar_one_or_none()
+        values = {
+            "id": stable_id,
+            "key": key,
+            "display_name": display_name,
+            "description": description,
+        }
+        if existing_id is None:
+            bind.execute(
+                sa.text("""
+                    INSERT INTO roles (
+                        id,
+                        key,
+                        display_name,
+                        description,
+                        system_role
+                    )
+                    VALUES (
+                        :id,
+                        :key,
+                        :display_name,
+                        :description,
+                        true
+                    )
+                    """),
+                values,
+            )
+        else:
+            bind.execute(
+                sa.text("""
+                    UPDATE roles
+                    SET
+                        display_name = :display_name,
+                        description = :description,
+                        system_role = true
+                    WHERE id = :existing_id
+                    """),
+                {**values, "existing_id": existing_id},
+            )
+
+
 def _backfill_workspace_membership_roles() -> None:
     bind = op.get_bind()
     role_ids_by_key = {
@@ -268,7 +279,7 @@ def _backfill_workspace_membership_roles() -> None:
             role_id = uuid5(NAMESPACE_URL, f"labelos-role:{role_key}")
             bind.execute(
                 sa.text("""
-                    INSERT INTO roles (
+                INSERT INTO roles (
                         id,
                         key,
                         display_name,

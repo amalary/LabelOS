@@ -143,7 +143,7 @@ def organizations_client(
                 system_role=True,
             )
             workspace_ar_role = Role(
-                key="a&r",
+                key="a_and_r",
                 display_name="A&R",
                 description="A&R role.",
                 system_role=True,
@@ -1054,7 +1054,9 @@ def test_workspace_role_assignments_can_differ_between_workspaces(
     assert asyncio.run(
         _workspace_role_keys(sessionmaker, seeded.member_membership_id)
     ) == ["artist", "producer"]
-    assert asyncio.run(_workspace_role_keys(sessionmaker, beta_member_id)) == ["a&r"]
+    assert asyncio.run(_workspace_role_keys(sessionmaker, beta_member_id)) == [
+        "a_and_r"
+    ]
 
 
 def test_remove_workspace_role_keeps_universal_profile_and_publishes_activity(
@@ -1251,7 +1253,7 @@ def test_create_workspace_invite_allows_member_with_invite_capability(
         client,
         seeded,
         role_for_org_a=MembershipRole.member,
-        capability_permissions=("member.invite",),
+        capability_permissions=("workspace.member.invite",),
     )
 
     response = client.post(
@@ -1275,7 +1277,7 @@ def test_create_workspace_invite_requires_role_assign_for_selected_roles(
         client,
         seeded,
         role_for_org_a=MembershipRole.member,
-        capability_permissions=("member.invite",),
+        capability_permissions=("workspace.member.invite",),
     )
 
     response = client.post(

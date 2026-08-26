@@ -1,4 +1,8 @@
 from labelos_database.base import Base
+from labelos_database.bootstrap import (
+    role_capability_id,
+    seed_system_roles_and_capabilities,
+)
 from labelos_database.departments import (
     DEFAULT_DEPARTMENTS,
     DEFAULT_ROLE_DEPARTMENT_ACCESS,
@@ -107,6 +111,8 @@ __all__ = [
     "WorkspaceInvite",
     "WorkspaceMembership",
     "WorkspaceMembershipRole",
+    "role_capability_id",
+    "seed_system_roles_and_capabilities",
     "ensure_workspace_membership_for_organization_membership",
     "get_or_create_profile_for_user",
     "mark_workspace_membership_removed",

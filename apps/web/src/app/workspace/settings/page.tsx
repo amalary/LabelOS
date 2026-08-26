@@ -39,7 +39,9 @@ export default async function WorkspaceSettingsPage({ searchParams }: WorkspaceS
 
   const inviteLink = params?.invite ? joinUrl(params.invite) : null;
   const subject = activeOrganization ? workspaceSubject(activeOrganization) : null;
-  const canInviteMembers = subject ? can(subject, null, capabilities.memberInvite) : false;
+  const canInviteMembers = subject
+    ? can(subject, null, capabilities.workspaceMemberInvite)
+    : false;
   const canAssignInviteRoles = subject ? can(subject, null, capabilities.roleAssign) : false;
 
   return (

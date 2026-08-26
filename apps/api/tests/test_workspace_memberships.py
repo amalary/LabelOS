@@ -388,7 +388,7 @@ def test_workspace_membership_combines_capabilities_from_multiple_roles(
                 system_capability=True,
             )
             campaign_approve = Capability(
-                key="campaign.approve",
+                key="marketing.campaign.approve",
                 display_name="Approve campaigns",
                 description="Approve campaign plans.",
                 system_capability=True,
@@ -420,7 +420,7 @@ def test_workspace_membership_combines_capabilities_from_multiple_roles(
     )
 
     assert loaded is not None
-    assert loaded.capability_keys == ("contract.view", "campaign.approve")
+    assert loaded.capability_keys == ("contract.view", "marketing.campaign.approve")
 
 
 def test_workspace_role_assignments_are_workspace_specific(

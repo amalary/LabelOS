@@ -38,7 +38,7 @@ export function ArtistProfileEditor({ artistProfileId }: { artistProfileId: stri
   const artistProfile = useArtistProfile(activeWorkspace?.id ?? null, artistProfileId);
   const update = useUpdateArtistProfile(activeWorkspace?.id ?? null, artistProfileId);
   const canEdit = workspaceProfile.subject
-    ? can(workspaceProfile.subject, null, capabilities.artistEdit)
+    ? can(workspaceProfile.subject, null, capabilities.artistProfileEdit)
     : false;
   const [stageName, setStageName] = useState("");
   const [careerStage, setCareerStage] = useState("");

@@ -124,7 +124,7 @@ describe("workspace context", () => {
             professional_roles: ["Artist"],
             workspace_roles: ["artist"],
             department_access: ["creative"],
-            capability_permissions: ["artist.view", "profile.edit"],
+            capability_permissions: ["artist.profile.view", "profile.edit"],
           }),
         ),
       );
@@ -137,7 +137,7 @@ describe("workspace context", () => {
 
     await waitFor(() => expect(result.current.roles).toEqual(["Artist", "artist", "member"]));
     expect(result.current.departmentAccess).toEqual(["creative"]);
-    expect(result.current.capabilities).toEqual(["artist.view", "profile.edit"]);
+    expect(result.current.capabilities).toEqual(["artist.profile.view", "profile.edit"]);
     expect(result.current.canEditProfile).toBe(true);
   });
 
@@ -155,7 +155,7 @@ describe("workspace context", () => {
             professional_roles: ["Artist"],
             workspace_roles: ["artist"],
             department_access: ["creative"],
-            capability_permissions: ["artist.view", "profile.edit"],
+            capability_permissions: ["artist.profile.view", "profile.edit"],
           }),
         ),
       )

@@ -1,6 +1,9 @@
 from pathlib import Path
+from uuid import UUID
 
 import pytest
+from labelos_database.capabilities import is_valid_capability_identifier
+from labelos_database.bootstrap import seed_system_roles_and_capabilities
 from labelos_database.config import DatabaseSettings
 from labelos_database.departments import (
     DEFAULT_DEPARTMENTS,
@@ -401,42 +404,115 @@ def test_roles_define_extensible_workspace_role_registry() -> None:
     table = Role.__table__
     constraint_names = {constraint.name for constraint in table.constraints}
     index_names = {index.name for index in table.indexes}
+    foreign_key_deletions = {
+        foreign_key.parent.name: foreign_key.ondelete
+        for foreign_key in table.foreign_keys
+    }
 
     assert "id" in table.columns
+    assert "workspace_id" in table.columns
     assert "key" in table.columns
+    assert "name" in table.columns
     assert "display_name" in table.columns
     assert "description" in table.columns
+    assert "is_system_role" in table.columns
     assert "system_role" in table.columns
     assert "created_at" in table.columns
     assert "updated_at" in table.columns
     assert table.c.id.primary_key
+    assert table.c.workspace_id.nullable is True
+    assert table.c.name.nullable is False
+    assert table.c.is_system_role.server_default is not None
     assert table.c.system_role.server_default is not None
-    assert "uq_roles_key" in constraint_names
+    assert "uq_roles_key" not in constraint_names
+    assert "uq_roles_system_key" in index_names
+    assert "uq_roles_workspace_id_key" in index_names
+    assert "ix_roles_workspace_id" in index_names
+    assert "ix_roles_workspace_id_key" in index_names
     assert "ix_roles_key" in index_names
+    assert "ix_roles_is_system_role" in index_names
     assert "ix_roles_system_role" in index_names
+    assert foreign_key_deletions == {"workspace_id": "CASCADE"}
+    assert Role.workspace.property.uselist is False
     assert Role.workspace_membership_assignments.property.uselist is True
     assert Role.capability_links.property.uselist is True
+
+
+def test_role_prompt_fields_preserve_legacy_display_fields() -> None:
+    role_from_legacy_fields = Role(
+        key="custom_legacy",
+        display_name="Custom Legacy",
+        description="Legacy construction remains supported.",
+        system_role=True,
+    )
+    role_from_prompt_fields = Role(
+        key="custom_prompt",
+        name="Custom Prompt",
+        description="Prompt construction is supported.",
+        is_system_role=True,
+    )
+
+    assert role_from_legacy_fields.name == "Custom Legacy"
+    assert role_from_legacy_fields.is_system_role is True
+    assert role_from_prompt_fields.display_name == "Custom Prompt"
+    assert role_from_prompt_fields.system_role is True
+
+
+def test_workspace_custom_roles_are_workspace_scoped() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Role.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        first_workspace = Organization(
+            name="First Label",
+            slug="first-role-scope-label",
+            owner=User(email="first-role-scope-owner@example.com"),
+        )
+        second_workspace = Organization(
+            name="Second Label",
+            slug="second-role-scope-label",
+            owner=User(email="second-role-scope-owner@example.com"),
+        )
+        session.add_all(
+            [
+                Role(
+                    workspace=first_workspace,
+                    key="catalog_admin",
+                    name="Catalog Admin",
+                    description="First workspace role.",
+                ),
+                Role(
+                    workspace=second_workspace,
+                    key="catalog_admin",
+                    name="Catalog Admin",
+                    description="Second workspace role.",
+                ),
+            ]
+        )
+
+        session.commit()
+
+        assert session.query(Role).filter_by(key="catalog_admin").count() == 2
+    engine.dispose()
 
 
 def test_default_roles_match_initial_system_catalog() -> None:
     roles_by_key = {role.key: role for role in DEFAULT_ROLES}
 
     assert tuple(roles_by_key) == (
+        "owner",
+        "admin",
         "artist",
+        "a_and_r",
         "manager",
-        "producer",
-        "songwriter",
-        "a&r",
-        "marketing",
-        "release_operations",
         "legal",
+        "marketing",
         "finance",
-        "analytics",
-        "executive",
-        "administrator",
+        "producer",
     )
     assert all(role.system_role for role in DEFAULT_ROLES)
-    assert roles_by_key["release_operations"].display_name == "Release Operations"
+    assert all(role.key for role in DEFAULT_ROLES)
+    assert roles_by_key["a_and_r"].display_name == "A&R"
 
 
 def test_capabilities_define_action_catalog() -> None:
@@ -463,55 +539,154 @@ def test_default_capabilities_are_specific_actions() -> None:
     capability_keys = {capability.key for capability in DEFAULT_CAPABILITIES}
 
     assert {
-        "artist.view",
-        "artist.edit",
-        "artist.create",
-        "campaign.view",
-        "campaign.create",
-        "campaign.approve",
-        "release.view",
-        "release.edit",
-        "contract.view",
-        "contract.upload",
-        "contract.approve",
-        "contract.sign_request",
-        "royalty.view",
-        "finance.view",
-        "analytics.view",
-        "member.invite",
-        "member.remove",
+        "workspace.view",
+        "workspace.update",
+        "workspace.member.view",
+        "workspace.member.invite",
+        "workspace.member.roles.manage",
+        "workspace.member.remove",
+        "role.view",
+        "role.create",
+        "role.update",
+        "role.delete",
         "role.assign",
-        "workspace.manage",
+        "profile.view",
         "profile.edit",
+        "artist.profile.view",
+        "artist.profile.create",
+        "artist.profile.edit",
+        "artist.profile.delete",
+        "ar.scouting.view",
+        "ar.scouting.create",
+        "ar.evaluation.view",
+        "ar.evaluation.create",
+        "ar.signing.approve",
+        "release.view",
+        "release.create",
+        "release.edit",
+        "release.approve",
+        "marketing.campaign.view",
+        "marketing.campaign.create",
+        "marketing.campaign.edit",
+        "marketing.campaign.approve",
+        "contract.view",
+        "contract.create",
+        "contract.edit",
+        "contract.review",
+        "contract.approve",
+        "contract.execute",
+        "royalty.view",
+        "royalty.calculate",
+        "royalty.statement.view",
+        "royalty.statement.create",
+        "finance.view",
+        "finance.report.view",
+        "finance.payment.view",
+        "finance.payment.approve",
+        "analytics.view",
     } <= capability_keys
     assert all(capability.system_capability for capability in DEFAULT_CAPABILITIES)
-    assert all("." in capability.key for capability in DEFAULT_CAPABILITIES)
-    capability_actions = {
-        capability.key.split(".")[-1]
+    assert len(capability_keys) == len(DEFAULT_CAPABILITIES)
+    assert all(
+        is_valid_capability_identifier(capability.key)
         for capability in DEFAULT_CAPABILITIES
-        if capability.key != "workspace.manage"
-    }
-    assert "manage" not in capability_actions
+    )
 
 
 def test_default_role_capability_mapping_references_configured_registries() -> None:
     role_keys = {role.key for role in DEFAULT_ROLES}
     capability_keys = {capability.key for capability in DEFAULT_CAPABILITIES}
 
-    assert DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS["legal"] == (
-        "contract.view",
-        "contract.upload",
-        "contract.approve",
-        "contract.sign_request",
-        "profile.edit",
+    assert set(DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS["owner"]) == capability_keys
+    assert "workspace.update" in DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS["admin"]
+    assert "role.assign" in DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS["admin"]
+    assert (
+        "finance.payment.approve" not in DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS["admin"]
     )
-    assert "workspace.manage" in DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS["administrator"]
+    assert "contract.execute" not in DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS["admin"]
+    assert "role.assign" not in DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS["artist"]
+    assert DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS["legal"] == (
+        "profile.view",
+        "profile.edit",
+        "contract.view",
+        "contract.create",
+        "contract.edit",
+        "contract.review",
+        "contract.approve",
+    )
+    assert "contract.execute" not in DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS["legal"]
     assert set(DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS) <= role_keys
     assert {
         capability_key
         for capability_keys_for_role in DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS.values()
         for capability_key in capability_keys_for_role
     } <= capability_keys
+
+
+def test_system_role_bootstrap_is_idempotent() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    RoleCapability.metadata.create_all(engine)
+
+    with engine.begin() as connection:
+        seed_system_roles_and_capabilities(connection)
+        seed_system_roles_and_capabilities(connection)
+
+    with Session(engine) as session:
+        assert session.query(Role).filter_by(workspace_id=None).count() == len(
+            DEFAULT_ROLES
+        )
+        assert session.query(CapabilityModel).count() == len(DEFAULT_CAPABILITIES)
+
+        roles_by_key = {
+            role.key: role
+            for role in session.query(Role).filter_by(workspace_id=None).all()
+        }
+        assert roles_by_key["owner"].is_system_role is True
+        assert roles_by_key["owner"].system_role is True
+        assert roles_by_key["owner"].workspace_id is None
+
+        expected_link_count = sum(
+            len(capability_keys)
+            for capability_keys in DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS.values()
+        )
+        assert session.query(RoleCapability).count() == expected_link_count
+        assert len({role.key for role in roles_by_key.values()}) == len(DEFAULT_ROLES)
+    engine.dispose()
+
+
+def test_system_role_bootstrap_updates_existing_stable_role_id() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    RoleCapability.metadata.create_all(engine)
+    ar_role = next(role for role in DEFAULT_ROLES if role.key == "a_and_r")
+
+    with Session(engine) as session:
+        session.add(
+            Role(
+                id=UUID(ar_role.id),
+                workspace_id=None,
+                key="a&r",
+                name="A and R",
+                display_name="A and R",
+                description="Legacy key.",
+                system_role=True,
+                is_system_role=True,
+            )
+        )
+        session.commit()
+
+    with engine.begin() as connection:
+        seed_system_roles_and_capabilities(connection)
+
+    with Session(engine) as session:
+        assert session.query(Role).filter_by(key="a&r").count() == 0
+        normalized_role = session.query(Role).filter_by(key="a_and_r").one()
+        assert normalized_role.id == UUID(ar_role.id)
+        assert normalized_role.display_name == "A&R"
+        assert normalized_role.is_system_role is True
+        assert (
+            session.query(RoleCapability).filter_by(role_id=normalized_role.id).count()
+        )
+    engine.dispose()
 
 
 def test_workspace_membership_roles_define_many_to_many_assignment() -> None:
@@ -543,6 +718,43 @@ def test_workspace_membership_roles_define_many_to_many_assignment() -> None:
     }
     assert WorkspaceMembershipRole.workspace_membership.property.uselist is False
     assert WorkspaceMembershipRole.role.property.uselist is False
+
+
+def test_deleting_role_assignment_does_not_delete_workspace_membership() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    WorkspaceMembershipRole.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        workspace = Organization(
+            name="Example Label",
+            slug="example-role-assignment-label",
+            owner=User(email="owner-role-assignment@example.com"),
+        )
+        profile = UniversalProfile(
+            user=User(email="member-role-assignment@example.com"),
+            slug="role-assignment-member",
+        )
+        role = Role(
+            key="assignment_test",
+            name="Assignment Test",
+            description="Assignment deletion test.",
+        )
+        membership = WorkspaceMembership(workspace=workspace, profile=profile)
+        assignment = WorkspaceMembershipRole(
+            workspace_membership=membership,
+            role=role,
+        )
+        session.add(assignment)
+        session.commit()
+        membership_id = membership.id
+        assignment_id = assignment.id
+
+        session.delete(assignment)
+        session.commit()
+
+        assert session.get(WorkspaceMembershipRole, assignment_id) is None
+        assert session.get(WorkspaceMembership, membership_id) is not None
+    engine.dispose()
 
 
 def test_role_capabilities_define_many_to_many_assignment() -> None:
@@ -910,7 +1122,7 @@ def test_default_role_department_associations_reference_configured_registries() 
     role_keys = {role.key for role in DEFAULT_ROLES}
     department_keys = {department.key for department in DEFAULT_DEPARTMENTS}
 
-    assert DEFAULT_ROLE_DEPARTMENT_ASSOCIATIONS["a&r"] == ["a&r"]
+    assert DEFAULT_ROLE_DEPARTMENT_ASSOCIATIONS["a_and_r"] == ["a&r"]
     assert DEFAULT_ROLE_DEPARTMENT_ASSOCIATIONS["marketing"] == ["marketing"]
     assert DEFAULT_ROLE_DEPARTMENT_ASSOCIATIONS["artist"] == [
         "creative",
