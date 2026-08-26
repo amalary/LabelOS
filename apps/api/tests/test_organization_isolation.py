@@ -16,6 +16,7 @@ from labelos_database.models import (
     UniversalProfile,
     User,
     WorkspaceMembership,
+    WorkspacePermission,
 )
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -87,7 +88,7 @@ def isolated_client(
             org_a_membership = OrganizationMembership(
                 organization=org_a,
                 user=owner,
-                role=MembershipRole.admin,
+                role=MembershipRole.owner,
             )
             org_a_workspace_membership = WorkspaceMembership(
                 workspace=org_a,
@@ -544,7 +545,7 @@ def test_workspace_artist_profile_update_changes_module_fields(
 def test_workspace_artist_profile_update_requires_artist_edit_capability(
     isolated_client: tuple[TestClient, async_sessionmaker[AsyncSession], SeededTenants],
 ) -> None:
-    client, _sessionmaker, seeded = isolated_client
+    client, sessionmaker, seeded = isolated_client
     _set_active_organization(
         client,
         local_organization_id=seeded.org_a_id,
@@ -561,6 +562,20 @@ def test_workspace_artist_profile_update_requires_artist_edit_capability(
         },
     )
     artist_profile_id = create_response.json()["profile"]["id"]
+
+    async def demote_actor_membership() -> None:
+        async with sessionmaker() as session:
+            membership = await session.scalar(
+                select(OrganizationMembership)
+                .where(OrganizationMembership.organization_id == seeded.org_a_id)
+                .where(OrganizationMembership.user_id == seeded.user_id)
+            )
+            assert membership is not None
+            membership.role = MembershipRole.member
+            membership.workspace_permission = WorkspacePermission.member
+            await session.commit()
+
+    asyncio.run(demote_actor_membership())
     _set_active_organization(
         client,
         local_organization_id=seeded.org_a_id,

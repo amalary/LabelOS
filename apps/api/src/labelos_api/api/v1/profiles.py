@@ -3,6 +3,7 @@ from urllib.parse import urlparse
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from labelos_database.capabilities import Capability as CapabilityKey
 from labelos_database.models import (
     ArtistProfile,
     Department,
@@ -30,6 +31,11 @@ from labelos_api.auth import (
     CurrentUserContext,
     SessionDep,
     get_current_user_context,
+)
+from labelos_api.authorization import (
+    AuthorizationResource,
+    ResourceKind,
+    authorization_service,
 )
 from labelos_api.profile_completion import evaluate_profile_completion
 from labelos_api.realtime import RealtimeEventType, RealtimePublisher
@@ -359,6 +365,46 @@ async def _require_workspace_membership(
         raise _not_found()
 
 
+def _raise_capability_denial(reason: str) -> None:
+    if reason in {"invalid_resource_scope", "membership_not_found"}:
+        raise _not_found()
+    if reason == "insufficient_department_access":
+        raise _forbidden("Insufficient department access")
+    raise _forbidden("Insufficient capability permission")
+
+
+async def _require_workspace_profile_capability(
+    session: AsyncSession,
+    *,
+    context: CurrentUserContext,
+    workspace_id: UUID,
+    capability: CapabilityKey,
+    profile_id: UUID | None = None,
+) -> None:
+    decision = await authorization_service.decide_capability(
+        session,
+        actor=context,
+        workspace=workspace_id,
+        capability=capability,
+        resource=(
+            AuthorizationResource(
+                kind=ResourceKind.profile,
+                id=profile_id,
+                workspace_id=workspace_id,
+            )
+            if profile_id is not None
+            else AuthorizationResource(
+                kind=ResourceKind.workspace,
+                id=workspace_id,
+                workspace_id=workspace_id,
+            )
+        ),
+    )
+    if decision.allowed:
+        return
+    _raise_capability_denial(decision.reason)
+
+
 def _profile_options():
     return (
         selectinload(UniversalProfile.links),
@@ -382,14 +428,14 @@ async def _load_profile(
     )
 
 
-async def _can_read_profile(
+async def _authorize_profile_read(
     session: AsyncSession,
     *,
     context: CurrentUserContext,
     profile: UniversalProfile,
-) -> bool:
+) -> ProfileVisibility:
     if profile.user_id == context.user.id:
-        return True
+        return "owner"
 
     workspace_ids = [
         membership.workspace_id
@@ -397,22 +443,35 @@ async def _can_read_profile(
         if membership.status == "active"
     ]
     if not workspace_ids:
-        return False
+        raise _not_found()
 
-    active_actor_workspaces = (
-        select(WorkspaceMembership.workspace_id)
-        .join(WorkspaceMembership.profile)
-        .where(UniversalProfile.user_id == context.user.id)
-        .where(WorkspaceMembership.status == "active")
-        .where(WorkspaceMembership.workspace_id.in_(workspace_ids))
-    )
-    shared_membership_id = await session.scalar(
-        select(WorkspaceMembership.id)
-        .where(WorkspaceMembership.profile_id == profile.id)
-        .where(WorkspaceMembership.workspace_id.in_(active_actor_workspaces))
-        .where(WorkspaceMembership.status == "active")
-    )
-    return shared_membership_id is not None
+    denial_reasons: list[str] = []
+    for workspace_id in workspace_ids:
+        decision = await authorization_service.decide_capability(
+            session,
+            actor=context,
+            workspace=workspace_id,
+            capability=CapabilityKey.profile_view,
+            resource=AuthorizationResource(
+                kind=ResourceKind.profile,
+                id=profile.id,
+                workspace_id=workspace_id,
+            ),
+        )
+        if decision.allowed:
+            return "shared"
+        denial_reasons.append(decision.reason)
+
+    if any(
+        reason in {"missing_capability", "insufficient_department_access"}
+        for reason in denial_reasons
+    ):
+        _raise_capability_denial(
+            "insufficient_department_access"
+            if "insufficient_department_access" in denial_reasons
+            else "missing_capability"
+        )
+    raise _not_found()
 
 
 def _preferences_response(
@@ -817,6 +876,15 @@ async def update_my_profile(
         _apply_preference_changes(profile, payload.preferences)
 
     try:
+        active_workspace_id = _active_workspace_id(context)
+        if active_workspace_id is not None:
+            await _require_workspace_profile_capability(
+                session,
+                context=context,
+                workspace_id=active_workspace_id,
+                capability=CapabilityKey.profile_edit,
+                profile_id=profile.id,
+            )
         if existing_profile_id is None:
             await _publish_profile_activity(
                 session,
@@ -866,13 +934,13 @@ async def get_profile(
     profile = await _load_profile(session, profile_id)
     if profile is None:
         raise _not_found()
-    if not await _can_read_profile(session, context=context, profile=profile):
-        raise _not_found()
-    is_owner = profile.user_id == context.user.id
+    visibility = await _authorize_profile_read(
+        session, context=context, profile=profile
+    )
     return _profile_response(
         profile,
-        visibility="owner" if is_owner else "shared",
-        include_private_preferences=is_owner,
+        visibility=visibility,
+        include_private_preferences=visibility == "owner",
     )
 
 
@@ -887,7 +955,12 @@ async def list_workspace_profiles(
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> WorkspaceProfilesListResponse:
-    await _require_workspace_membership(session, context, workspace_id)
+    await _require_workspace_profile_capability(
+        session,
+        context=context,
+        workspace_id=workspace_id,
+        capability=CapabilityKey.profile_view,
+    )
     total = await session.scalar(
         select(func.count())
         .select_from(WorkspaceMembership)
@@ -959,7 +1032,12 @@ async def list_workspace_people_directory(
     limit: Annotated[int, Query(ge=1, le=100)] = 25,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> WorkspacePeopleDirectoryResponse:
-    await _require_workspace_membership(session, context, workspace_id)
+    await _require_workspace_profile_capability(
+        session,
+        context=context,
+        workspace_id=workspace_id,
+        capability=CapabilityKey.profile_view,
+    )
     normalized_query = query.strip() if query else None
     if normalized_query == "":
         normalized_query = None
@@ -1022,7 +1100,13 @@ async def get_workspace_profile(
     session: SessionDep,
     context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
 ) -> WorkspaceProfileMembershipResponse:
-    await _require_workspace_membership(session, context, workspace_id)
+    await _require_workspace_profile_capability(
+        session,
+        context=context,
+        workspace_id=workspace_id,
+        capability=CapabilityKey.profile_view,
+        profile_id=profile_id,
+    )
     membership = await session.scalar(
         select(WorkspaceMembership)
         .options(

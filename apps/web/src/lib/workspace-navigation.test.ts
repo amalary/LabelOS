@@ -26,11 +26,13 @@ describe("workspace navigation visibility", () => {
   it("shows marketing product areas from campaign and analytics capabilities", () => {
     expect(
       labelsFor(
-        [capabilities.campaignView, capabilities.analyticsView],
+        [capabilities.marketingCampaignView, capabilities.analyticsView],
         ["marketing", "analytics"],
       ),
     ).toEqual(expect.arrayContaining(["Marketing", "Campaigns", "Analytics"]));
-    expect(labelsFor([capabilities.campaignView], ["marketing"])).not.toContain("Contracts");
+    expect(labelsFor([capabilities.marketingCampaignView], ["marketing"])).not.toContain(
+      "Contracts",
+    );
   });
 
   it("shows legal product areas from contract capabilities", () => {
@@ -43,7 +45,7 @@ describe("workspace navigation visibility", () => {
   it("shows artist areas from artist, release, creative, and analytics capabilities", () => {
     const labels = labelsFor(
       [
-        capabilities.artistView,
+        capabilities.artistProfileView,
         capabilities.releaseView,
         capabilities.releaseEdit,
         capabilities.analyticsView,
@@ -59,7 +61,12 @@ describe("workspace navigation visibility", () => {
 
   it("shows administrative areas from workspace administration capabilities", () => {
     const labels = labelsFor(
-      [capabilities.workspaceManage, capabilities.memberInvite, capabilities.roleAssign],
+      [
+        capabilities.workspaceUpdate,
+        capabilities.workspaceMemberInvite,
+        capabilities.workspaceMemberRolesManage,
+        capabilities.roleAssign,
+      ],
       ["administration"],
     );
 
@@ -68,10 +75,16 @@ describe("workspace navigation visibility", () => {
     );
   });
 
+  it("hides role assignment navigation without member role management capability", () => {
+    const labels = labelsFor([capabilities.roleAssign], ["administration"]);
+
+    expect(labels).not.toContain("Roles");
+  });
+
   it("keeps workspace-only areas hidden without an active workspace", () => {
     const labels = visibleWorkspaceNavigationItems({
       hasActiveWorkspace: false,
-      subject: subject([capabilities.campaignView, capabilities.workspaceManage]),
+      subject: subject([capabilities.marketingCampaignView, capabilities.workspaceUpdate]),
     }).map((item) => item.label);
 
     expect(labels).toEqual(["Profile"]);

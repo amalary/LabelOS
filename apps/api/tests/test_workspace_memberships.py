@@ -3,6 +3,7 @@ from collections.abc import Iterator
 
 import pytest
 from labelos_database.base import Base
+from labelos_database.bootstrap import seed_system_roles_and_capabilities
 from labelos_database.models import (
     Capability,
     Department,
@@ -20,6 +21,8 @@ from labelos_database.models import (
     WorkspaceMembershipRole,
 )
 from labelos_database.workspace_memberships import (
+    LEGACY_MEMBERSHIP_ROLE_ASSIGNMENT_SOURCE,
+    backfill_workspace_membership_roles_from_legacy_memberships,
     ensure_workspace_membership_for_organization_membership,
     mark_workspace_membership_removed,
 )
@@ -45,6 +48,12 @@ def sessionmaker() -> Iterator[async_sessionmaker[AsyncSession]]:
     asyncio.run(prepare_database())
     yield async_sessionmaker(bind=engine, expire_on_commit=False)
     asyncio.run(engine.dispose())
+
+
+async def _seed_system_roles(session: AsyncSession) -> None:
+    connection = await session.connection()
+    await connection.run_sync(seed_system_roles_and_capabilities)
+    await session.flush()
 
 
 async def _seed_membership(
@@ -388,7 +397,7 @@ def test_workspace_membership_combines_capabilities_from_multiple_roles(
                 system_capability=True,
             )
             campaign_approve = Capability(
-                key="campaign.approve",
+                key="marketing.campaign.approve",
                 display_name="Approve campaigns",
                 description="Approve campaign plans.",
                 system_capability=True,
@@ -420,7 +429,7 @@ def test_workspace_membership_combines_capabilities_from_multiple_roles(
     )
 
     assert loaded is not None
-    assert loaded.capability_keys == ("contract.view", "campaign.approve")
+    assert loaded.capability_keys == ("contract.view", "marketing.campaign.approve")
 
 
 def test_workspace_role_assignments_are_workspace_specific(
@@ -509,3 +518,195 @@ def test_workspace_role_assignments_are_workspace_specific(
 
     assert first_role_keys == ("artist",)
     assert second_role_keys == ("manager",)
+
+
+def test_backfill_maps_representative_legacy_membership_roles(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async def run() -> tuple[
+        dict[str, int],
+        dict[str, int],
+        list[tuple[str, str, tuple[str, ...], str | None]],
+    ]:
+        async with sessionmaker() as session:
+            await _seed_system_roles(session)
+            memberships = [
+                await _seed_membership(
+                    session,
+                    email="owner@example.com",
+                    slug="owner-label",
+                    role=MembershipRole.owner,
+                ),
+                await _seed_membership(
+                    session,
+                    email="admin@example.com",
+                    slug="admin-label",
+                    role=MembershipRole.admin,
+                ),
+                await _seed_membership(
+                    session,
+                    email="member@example.com",
+                    slug="member-label",
+                    role=MembershipRole.member,
+                ),
+                await _seed_membership(
+                    session,
+                    email="artist@example.com",
+                    slug="artist-label",
+                    role=MembershipRole.artist,
+                ),
+            ]
+
+            report = await backfill_workspace_membership_roles_from_legacy_memberships(
+                session
+            )
+            await session.commit()
+
+            loaded_rows: list[tuple[str, str, tuple[str, ...], str | None]] = []
+            for membership in memberships:
+                workspace_membership = await session.scalar(
+                    select(WorkspaceMembership)
+                    .options(
+                        selectinload(
+                            WorkspaceMembership.organization_membership
+                        ).selectinload(OrganizationMembership.user),
+                        selectinload(WorkspaceMembership.role_assignments).selectinload(
+                            WorkspaceMembershipRole.role
+                        ),
+                    )
+                    .where(
+                        WorkspaceMembership.organization_membership_id == membership.id
+                    )
+                )
+                assert workspace_membership is not None
+                assignment = workspace_membership.role_assignments[0]
+                loaded_rows.append(
+                    (
+                        workspace_membership.organization_membership.user.email,
+                        workspace_membership.workspace_permission.value,
+                        workspace_membership.role_keys,
+                        assignment.metadata_json.get("source"),
+                    )
+                )
+
+            return (
+                report.inspected_role_counts,
+                report.mapped_role_counts,
+                sorted(loaded_rows),
+            )
+
+    inspected, mapped, rows = asyncio.run(run())
+
+    assert inspected == {"admin": 1, "artist": 1, "member": 1, "owner": 1}
+    assert mapped == {"admin": 1, "artist": 1, "member": 1, "owner": 1}
+    assert rows == [
+        (
+            "admin@example.com",
+            "admin",
+            ("admin",),
+            LEGACY_MEMBERSHIP_ROLE_ASSIGNMENT_SOURCE,
+        ),
+        (
+            "artist@example.com",
+            "member",
+            ("artist",),
+            LEGACY_MEMBERSHIP_ROLE_ASSIGNMENT_SOURCE,
+        ),
+        (
+            "member@example.com",
+            "member",
+            ("member",),
+            LEGACY_MEMBERSHIP_ROLE_ASSIGNMENT_SOURCE,
+        ),
+        (
+            "owner@example.com",
+            "owner",
+            ("owner",),
+            LEGACY_MEMBERSHIP_ROLE_ASSIGNMENT_SOURCE,
+        ),
+    ]
+
+
+def test_backfill_is_idempotent_and_preserves_existing_assignments(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async def run() -> tuple[int, int, tuple[str, ...]]:
+        async with sessionmaker() as session:
+            await _seed_system_roles(session)
+            membership = await _seed_membership(session, role=MembershipRole.admin)
+            workspace_membership = (
+                await ensure_workspace_membership_for_organization_membership(
+                    session,
+                    membership,
+                )
+            )
+            legal = await session.scalar(select(Role).where(Role.key == "legal"))
+            assert legal is not None
+            session.add(
+                WorkspaceMembershipRole(
+                    workspace_membership=workspace_membership,
+                    role=legal,
+                    metadata_json={"source": "manual"},
+                )
+            )
+
+            first = await backfill_workspace_membership_roles_from_legacy_memberships(
+                session
+            )
+            second = await backfill_workspace_membership_roles_from_legacy_memberships(
+                session
+            )
+            await session.commit()
+
+            loaded = await session.scalar(
+                select(WorkspaceMembership)
+                .options(
+                    selectinload(WorkspaceMembership.role_assignments).selectinload(
+                        WorkspaceMembershipRole.role
+                    )
+                )
+                .where(WorkspaceMembership.id == workspace_membership.id)
+            )
+            assert loaded is not None
+            return (
+                first.assignments_created,
+                second.assignments_existing,
+                loaded.role_keys,
+            )
+
+    created, existing, role_keys = asyncio.run(run())
+
+    assert created == 1
+    assert existing == 1
+    assert role_keys == ("legal", "admin")
+
+
+def test_backfill_reports_unmapped_legacy_membership_roles(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async def run() -> tuple[dict[str, int], int, int]:
+        async with sessionmaker() as session:
+            await _seed_system_roles(session)
+            await _seed_membership(session, role=MembershipRole.guest)
+
+            report = await backfill_workspace_membership_roles_from_legacy_memberships(
+                session
+            )
+            assignment_count = await session.scalar(
+                select(func.count()).select_from(WorkspaceMembershipRole)
+            )
+            workspace_membership_count = await session.scalar(
+                select(func.count()).select_from(WorkspaceMembership)
+            )
+            await session.commit()
+            return (
+                report.unmapped_role_counts,
+                assignment_count or 0,
+                workspace_membership_count or 0,
+            )
+
+    unmapped, assignment_count, workspace_membership_count = asyncio.run(run())
+
+    assert unmapped == {"guest": 1}
+    assert assignment_count == 0
+    assert workspace_membership_count == 1

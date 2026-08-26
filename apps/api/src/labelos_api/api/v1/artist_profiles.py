@@ -11,7 +11,9 @@ from sqlalchemy.orm import selectinload
 
 from labelos_api.auth import CurrentUserContext, SessionDep, get_current_user_context
 from labelos_api.authorization import (
+    AuthorizationResource,
     Capability,
+    ResourceKind,
     authorization_service,
 )
 from labelos_api.realtime import RealtimeEventType, RealtimePublisher
@@ -86,6 +88,39 @@ def _forbidden(detail: str) -> HTTPException:
 
 def _conflict(detail: str) -> HTTPException:
     return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail)
+
+
+def _raise_capability_denial(reason: str) -> None:
+    if reason in {"invalid_resource_scope", "membership_not_found"}:
+        raise _not_found()
+    if reason == "insufficient_department_access":
+        raise _forbidden("Insufficient department access")
+    raise _forbidden("Insufficient capability permission")
+
+
+async def _require_artist_profile_capability(
+    session: AsyncSession,
+    *,
+    context: CurrentUserContext,
+    workspace_id: UUID,
+    capability: Capability,
+    resource: AuthorizationResource | None = None,
+) -> None:
+    decision = await authorization_service.decide_capability(
+        session,
+        actor=context,
+        workspace=workspace_id,
+        capability=capability,
+        resource=resource
+        or AuthorizationResource(
+            kind=ResourceKind.workspace,
+            id=workspace_id,
+            workspace_id=workspace_id,
+        ),
+    )
+    if decision.allowed:
+        return
+    _raise_capability_denial(decision.reason)
 
 
 def _artist_profile_response(
@@ -189,13 +224,6 @@ async def create_artist_profile(
     session: SessionDep,
     context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
 ) -> ArtistProfileDetailResponse:
-    await _require_active_workspace_membership(
-        session,
-        context=context,
-        workspace_id=workspace_id,
-    )
-    if not authorization_service.can(context, workspace_id, Capability.artist_edit):
-        raise _forbidden("Insufficient capability permission")
     await _require_profile_in_workspace(
         session,
         workspace_id=workspace_id,
@@ -208,6 +236,17 @@ async def create_artist_profile(
     )
     if artist is None:
         raise _not_found()
+    await _require_artist_profile_capability(
+        session,
+        context=context,
+        workspace_id=workspace_id,
+        capability=Capability.artist_profile_create,
+        resource=AuthorizationResource(
+            kind=ResourceKind.artist,
+            id=artist.id,
+            workspace_id=workspace_id,
+        ),
+    )
     if artist.profile is not None:
         raise _conflict("Artist already has an artist profile")
 
@@ -259,13 +298,17 @@ async def get_artist_profile(
     session: SessionDep,
     context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
 ) -> ArtistProfileDetailResponse:
-    await _require_active_workspace_membership(
+    await _require_artist_profile_capability(
         session,
         context=context,
         workspace_id=workspace_id,
+        capability=Capability.artist_profile_view,
+        resource=AuthorizationResource(
+            kind=ResourceKind.artist_profile,
+            id=artist_profile_id,
+            workspace_id=workspace_id,
+        ),
     )
-    if not authorization_service.can(context, workspace_id, Capability.artist_view):
-        raise _forbidden("Insufficient capability permission")
     artist_profile = await _load_artist_profile(
         session,
         workspace_id=workspace_id,
@@ -287,13 +330,17 @@ async def update_artist_profile(
     session: SessionDep,
     context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
 ) -> ArtistProfileDetailResponse:
-    await _require_active_workspace_membership(
+    await _require_artist_profile_capability(
         session,
         context=context,
         workspace_id=workspace_id,
+        capability=Capability.artist_profile_edit,
+        resource=AuthorizationResource(
+            kind=ResourceKind.artist_profile,
+            id=artist_profile_id,
+            workspace_id=workspace_id,
+        ),
     )
-    if not authorization_service.can(context, workspace_id, Capability.artist_edit):
-        raise _forbidden("Insufficient capability permission")
     artist_profile = await _load_artist_profile(
         session,
         workspace_id=workspace_id,

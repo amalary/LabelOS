@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 from labelos_database.base import Base
 from labelos_database.models import (
+    Capability,
     Department,
     MembershipDepartmentAccess,
     MembershipProfessionalRole,
@@ -17,11 +18,13 @@ from labelos_database.models import (
     ProfessionalRole,
     RealtimeEvent,
     Role,
+    RoleCapability,
     UniversalProfile,
     User,
     WorkspaceInvite,
     WorkspaceMembership,
     WorkspaceMembershipRole,
+    WorkspacePermission,
 )
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -143,7 +146,7 @@ def organizations_client(
                 system_role=True,
             )
             workspace_ar_role = Role(
-                key="a&r",
+                key="a_and_r",
                 display_name="A&R",
                 description="A&R role.",
                 system_role=True,
@@ -379,6 +382,28 @@ async def _membership_role(
         return membership.role if membership is not None else None
 
 
+async def _membership_status(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    membership_id: UUID,
+) -> str | None:
+    async with sessionmaker() as session:
+        membership = await session.get(OrganizationMembership, membership_id)
+        return membership.status if membership is not None else None
+
+
+async def _workspace_membership_status(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    membership_id: UUID,
+) -> str | None:
+    async with sessionmaker() as session:
+        workspace_membership = await session.scalar(
+            select(WorkspaceMembership).where(
+                WorkspaceMembership.organization_membership_id == membership_id
+            )
+        )
+        return workspace_membership.status if workspace_membership is not None else None
+
+
 async def _organization_slug(
     sessionmaker: async_sessionmaker[AsyncSession],
     organization_id: UUID,
@@ -467,6 +492,15 @@ async def _realtime_events(
             .order_by(RealtimeEvent.created_at.asc(), RealtimeEvent.id.asc())
         )
         return list(rows.all())
+
+
+def _authorization_audit_events(events: list[RealtimeEvent]) -> list[RealtimeEvent]:
+    return [
+        event
+        for event in events
+        if event.event_type
+        in {"role.assigned", "role.removed", "membership.roles.updated"}
+    ]
 
 
 async def _universal_profile_count(
@@ -659,7 +693,7 @@ def test_create_organization_validates_slug(
     assert response.json() == {"detail": "Request validation failed"}
 
 
-def test_update_organization_requires_owner_role(
+def test_update_organization_allows_workspace_update_capability(
     organizations_client: tuple[
         TestClient,
         async_sessionmaker[AsyncSession],
@@ -674,11 +708,11 @@ def test_update_organization_requires_owner_role(
         json={"name": "Renamed Label"},
     )
 
-    assert response.status_code == 403
-    assert response.json() == {"detail": "Insufficient organization role"}
+    assert response.status_code == 200
+    assert response.json()["name"] == "Renamed Label"
 
 
-def test_update_organization_requires_manage_permission(
+def test_update_organization_requires_workspace_update_capability(
     organizations_client: tuple[
         TestClient,
         async_sessionmaker[AsyncSession],
@@ -686,7 +720,7 @@ def test_update_organization_requires_manage_permission(
     ],
 ) -> None:
     client, _sessionmaker, seeded = organizations_client
-    _set_context(client, seeded, permissions=("members:manage",))
+    _set_context(client, seeded, role_for_org_a=MembershipRole.member)
 
     response = client.patch(
         f"/api/v1/organizations/{seeded.org_a_id}",
@@ -694,7 +728,7 @@ def test_update_organization_requires_manage_permission(
     )
 
     assert response.status_code == 403
-    assert response.json() == {"detail": "Insufficient permission"}
+    assert response.json() == {"detail": "Insufficient capability permission"}
 
 
 def test_update_organization_changes_name_and_slug(
@@ -728,7 +762,7 @@ def test_update_organization_changes_name_and_slug(
     )
 
 
-def test_list_members_requires_admin_role_and_permission(
+def test_list_members_requires_view_capability(
     organizations_client: tuple[
         TestClient,
         async_sessionmaker[AsyncSession],
@@ -741,7 +775,28 @@ def test_list_members_requires_admin_role_and_permission(
     response = client.get(f"/api/v1/organizations/{seeded.org_a_id}/members")
 
     assert response.status_code == 403
-    assert response.json() == {"detail": "Insufficient organization role"}
+    assert response.json() == {"detail": "Insufficient capability permission"}
+
+
+def test_list_members_allows_member_with_view_capability(
+    organizations_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededOrganizations,
+    ],
+) -> None:
+    client, _sessionmaker, seeded = organizations_client
+    _set_context(
+        client,
+        seeded,
+        role_for_org_a=MembershipRole.member,
+        capability_permissions=("workspace.member.view",),
+    )
+
+    response = client.get(f"/api/v1/organizations/{seeded.org_a_id}/members")
+
+    assert response.status_code == 200
+    assert response.json()["total"] == 2
 
 
 def test_list_members_returns_paginated_safe_member_records(
@@ -784,6 +839,177 @@ def test_list_members_returns_paginated_safe_member_records(
     assert "session_SECRET" not in response.text
 
 
+def test_get_current_authorization_context_returns_roles_and_deduped_capabilities(
+    organizations_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededOrganizations,
+    ],
+) -> None:
+    client, _sessionmaker, seeded = organizations_client
+    _set_context(
+        client,
+        seeded,
+        role_for_org_a=MembershipRole.member,
+        capability_permissions=("analytics.view", "workspace.member.view"),
+        role_capabilities=("analytics.view", "artist.profile.edit"),
+    )
+
+    response = client.get(
+        f"/api/v1/organizations/{seeded.org_a_id}/authorization/context"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["workspace_id"] == str(seeded.org_a_id)
+    assert body["roles"] == [{"key": "member", "name": "Member"}]
+    assert body["capabilities"] == sorted(set(body["capabilities"]))
+    assert "analytics.view" in body["capabilities"]
+    assert "artist.profile.edit" in body["capabilities"]
+    assert "workspace.member.view" in body["capabilities"]
+    assert body["capabilities"].count("analytics.view") == 1
+    assert "session_SECRET" not in response.text
+    assert "owner@example.com" not in response.text
+
+
+def test_current_authorization_context_requires_workspace_membership(
+    organizations_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededOrganizations,
+    ],
+) -> None:
+    client, _sessionmaker, seeded = organizations_client
+    _set_context(client, seeded)
+
+    response = client.get(
+        f"/api/v1/organizations/{seeded.org_c_id}/authorization/context"
+    )
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Not found"}
+
+
+def test_list_workspace_roles_returns_safe_deterministic_role_definitions(
+    organizations_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededOrganizations,
+    ],
+) -> None:
+    client, sessionmaker, seeded = organizations_client
+
+    async def attach_role_capability() -> None:
+        async with sessionmaker() as session:
+            capability = Capability(
+                key="analytics.view",
+                display_name="View analytics",
+                description="View analytics.",
+                system_capability=True,
+            )
+            session.add(capability)
+            await session.flush()
+            session.add(
+                RoleCapability(
+                    role_id=seeded.manager_role_id,
+                    capability_id=capability.id,
+                )
+            )
+            await session.commit()
+
+    asyncio.run(attach_role_capability())
+    _set_context(client, seeded)
+
+    response = client.get(f"/api/v1/organizations/{seeded.org_a_id}/roles")
+
+    assert response.status_code == 200
+    body = response.json()
+    role_keys = [role["key"] for role in body["roles"]]
+    assert role_keys == sorted(role_keys)
+    manager = next(role for role in body["roles"] if role["key"] == "manager")
+    assert manager["name"] == "Manager"
+    assert manager["capabilities"] == ["analytics.view"]
+    assert "metadata" not in response.text
+    assert "session_SECRET" not in response.text
+
+
+def test_list_workspace_roles_requires_role_view_capability(
+    organizations_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededOrganizations,
+    ],
+) -> None:
+    client, _sessionmaker, seeded = organizations_client
+    _set_context(client, seeded, role_for_org_a=MembershipRole.member)
+
+    response = client.get(f"/api/v1/organizations/{seeded.org_a_id}/roles")
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Insufficient capability permission"}
+
+
+def test_list_member_role_assignments_returns_only_member_ids_and_roles(
+    organizations_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededOrganizations,
+    ],
+) -> None:
+    client, _sessionmaker, seeded = organizations_client
+    _set_context(client, seeded)
+    client.post(
+        f"/api/v1/organizations/{seeded.org_a_id}/members/"
+        f"{seeded.member_membership_id}/roles",
+        json={"role_id": str(seeded.producer_role_id), "metadata": {"source": "test"}},
+    )
+    client.post(
+        f"/api/v1/organizations/{seeded.org_a_id}/members/"
+        f"{seeded.member_membership_id}/roles",
+        json={"role_id": str(seeded.artist_role_id)},
+    )
+
+    response = client.get(
+        f"/api/v1/organizations/{seeded.org_a_id}/member-role-assignments"
+    )
+
+    assert response.status_code == 200
+    assignments = response.json()["assignments"]
+    member_assignment = next(
+        assignment
+        for assignment in assignments
+        if assignment["member_id"] == str(seeded.member_membership_id)
+    )
+    assert member_assignment == {
+        "member_id": str(seeded.member_membership_id),
+        "roles": [
+            {"key": "artist", "name": "Artist"},
+            {"key": "producer", "name": "Producer"},
+        ],
+    }
+    assert "member@example.com" not in response.text
+    assert "source" not in response.text
+    assert "metadata" not in response.text
+
+
+def test_list_member_role_assignments_requires_member_view_capability(
+    organizations_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededOrganizations,
+    ],
+) -> None:
+    client, _sessionmaker, seeded = organizations_client
+    _set_context(client, seeded, role_for_org_a=MembershipRole.member)
+
+    response = client.get(
+        f"/api/v1/organizations/{seeded.org_a_id}/member-role-assignments"
+    )
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Insufficient capability permission"}
+
+
 def test_assign_and_list_multiple_workspace_roles(
     organizations_client: tuple[
         TestClient,
@@ -821,7 +1047,13 @@ def test_assign_and_list_multiple_workspace_roles(
         _workspace_role_keys(sessionmaker, seeded.member_membership_id)
     ) == ["artist", "producer"]
     events = asyncio.run(_realtime_events(sessionmaker, seeded.org_a_id))
-    assert [event.event_type for event in events] == [
+    non_audit_events = [
+        event
+        for event in events
+        if event.event_type
+        not in {"role.assigned", "role.removed", "membership.roles.updated"}
+    ]
+    assert [event.event_type for event in non_audit_events] == [
         "member.role_changed",
         "profile.role_added",
         "profile.roles_updated",
@@ -831,15 +1063,40 @@ def test_assign_and_list_multiple_workspace_roles(
     ]
     assert events[0].payload["action"] == "assigned"
     assert events[0].payload["roleKey"] == "artist"
-    assert events[1].entity_type == "profile"
-    assert events[1].payload["workspaceId"] == str(seeded.org_a_id)
-    assert events[1].payload["roleKey"] == "artist"
-    assert events[2].entity_type == "profile"
-    assert events[2].payload["workspaceId"] == str(seeded.org_a_id)
-    assert events[2].payload["roleKey"] == "artist"
-    assert events[2].payload["action"] == "assigned"
-    assert "member@example.com" not in str(events[1].payload)
-    assert "member@example.com" not in str(events[2].payload)
+    assert non_audit_events[1].entity_type == "profile"
+    assert non_audit_events[1].payload["workspaceId"] == str(seeded.org_a_id)
+    assert non_audit_events[1].payload["roleKey"] == "artist"
+    assert non_audit_events[2].entity_type == "profile"
+    assert non_audit_events[2].payload["workspaceId"] == str(seeded.org_a_id)
+    assert non_audit_events[2].payload["roleKey"] == "artist"
+    assert non_audit_events[2].payload["action"] == "assigned"
+    audit_events = _authorization_audit_events(events)
+    assert [event.event_type for event in audit_events] == [
+        "role.assigned",
+        "membership.roles.updated",
+        "role.assigned",
+        "membership.roles.updated",
+    ]
+    role_audit = audit_events[0]
+    assert role_audit.actor_user_id == seeded.user_id
+    assert role_audit.entity_type == "workspace_membership"
+    assert role_audit.created_at is not None
+    assert role_audit.payload["workspaceId"] == str(seeded.org_a_id)
+    assert role_audit.payload["membershipId"] == str(seeded.member_membership_id)
+    assert role_audit.payload["memberUserId"] == str(seeded.member_id)
+    assert role_audit.payload["roleId"] == str(seeded.artist_role_id)
+    assert role_audit.payload["roleKey"] == "artist"
+    assert audit_events[1].payload["assignedRoles"] == [
+        {
+            "roleId": str(seeded.artist_role_id),
+            "roleKey": "artist",
+            "role": "Artist",
+        }
+    ]
+    assert "member@example.com" not in str(audit_events[0].payload)
+    assert "session_SECRET" not in str(audit_events[0].payload)
+    assert "member@example.com" not in str(non_audit_events[1].payload)
+    assert "member@example.com" not in str(non_audit_events[2].payload)
 
 
 def test_duplicate_workspace_role_assignment_is_rejected(
@@ -874,6 +1131,158 @@ def test_duplicate_workspace_role_assignment_is_rejected(
     ) == ["artist"]
 
 
+def test_replace_workspace_roles_persists_multiple_roles_atomically(
+    organizations_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededOrganizations,
+    ],
+) -> None:
+    client, sessionmaker, seeded = organizations_client
+    _set_context(client, seeded)
+    client.post(
+        f"/api/v1/organizations/{seeded.org_a_id}/members/"
+        f"{seeded.member_membership_id}/roles",
+        json={"role_id": str(seeded.artist_role_id)},
+    )
+
+    response = client.put(
+        f"/api/v1/organizations/{seeded.org_a_id}/members/"
+        f"{seeded.member_membership_id}/roles",
+        json={
+            "role_ids": [
+                str(seeded.producer_role_id),
+                str(seeded.manager_role_id),
+                str(seeded.producer_role_id),
+            ]
+        },
+    )
+
+    assert response.status_code == 200
+    assert {item["role"]["key"] for item in response.json()["roles"]} == {
+        "manager",
+        "producer",
+    }
+    assert set(
+        asyncio.run(_workspace_role_keys(sessionmaker, seeded.member_membership_id))
+    ) == {"manager", "producer"}
+    events = asyncio.run(_realtime_events(sessionmaker, seeded.org_a_id))
+    non_audit_events = [
+        event
+        for event in events
+        if event.event_type
+        not in {"role.assigned", "role.removed", "membership.roles.updated"}
+    ]
+    assert [event.event_type for event in non_audit_events][-7:] == [
+        "member.role_changed",
+        "profile.role_removed",
+        "member.role_changed",
+        "profile.role_added",
+        "member.role_changed",
+        "profile.role_added",
+        "profile.roles_updated",
+    ]
+    assert non_audit_events[-1].payload["action"] == "replaced"
+    audit_events = _authorization_audit_events(events)
+    assert [event.event_type for event in audit_events][-4:] == [
+        "role.removed",
+        "role.assigned",
+        "role.assigned",
+        "membership.roles.updated",
+    ]
+    roles_updated_audit = audit_events[-1]
+    assert roles_updated_audit.actor_user_id == seeded.user_id
+    assert roles_updated_audit.payload["workspaceId"] == str(seeded.org_a_id)
+    assert roles_updated_audit.payload["membershipId"] == str(
+        seeded.member_membership_id
+    )
+    assert roles_updated_audit.payload["memberUserId"] == str(seeded.member_id)
+    assert {
+        role["roleKey"] for role in roles_updated_audit.payload["assignedRoles"]
+    } == {
+        "producer",
+        "manager",
+    }
+    assert [
+        role["roleKey"] for role in roles_updated_audit.payload["removedRoles"]
+    ] == ["artist"]
+    assert "member@example.com" not in str(roles_updated_audit.payload)
+
+
+def test_replace_workspace_roles_requires_role_assignment_capabilities(
+    organizations_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededOrganizations,
+    ],
+) -> None:
+    client, _sessionmaker, seeded = organizations_client
+    _set_context(
+        client,
+        seeded,
+        role_for_org_a=MembershipRole.member,
+        capability_permissions=("workspace.member.view",),
+    )
+
+    response = client.put(
+        f"/api/v1/organizations/{seeded.org_a_id}/members/"
+        f"{seeded.member_membership_id}/roles",
+        json={"role_ids": [str(seeded.artist_role_id)]},
+    )
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Insufficient capability permission"}
+
+
+def test_replace_workspace_roles_prevents_last_owner_lockout(
+    organizations_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededOrganizations,
+    ],
+) -> None:
+    client, sessionmaker, seeded = organizations_client
+
+    async def make_member_the_only_owner() -> None:
+        async with sessionmaker() as session:
+            actor_membership = await session.scalar(
+                select(OrganizationMembership)
+                .where(OrganizationMembership.organization_id == seeded.org_a_id)
+                .where(OrganizationMembership.user_id == seeded.user_id)
+            )
+            target_membership = await session.get(
+                OrganizationMembership,
+                seeded.member_membership_id,
+            )
+            assert actor_membership is not None
+            assert target_membership is not None
+            actor_membership.role = MembershipRole.admin
+            actor_membership.workspace_permission = WorkspacePermission.admin
+            target_membership.role = MembershipRole.owner
+            target_membership.workspace_permission = WorkspacePermission.owner
+            await session.commit()
+
+    asyncio.run(make_member_the_only_owner())
+    _set_context(
+        client,
+        seeded,
+        role_for_org_a=MembershipRole.admin,
+        capability_permissions=(
+            "workspace.member.roles.manage",
+            "role.assign",
+        ),
+    )
+
+    response = client.put(
+        f"/api/v1/organizations/{seeded.org_a_id}/members/"
+        f"{seeded.member_membership_id}/roles",
+        json={"role_ids": [str(seeded.artist_role_id)]},
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "Cannot remove the last workspace owner role"}
+
+
 def test_assign_workspace_role_requires_labelos_role_assign_capability(
     organizations_client: tuple[
         TestClient,
@@ -900,7 +1309,10 @@ def test_assign_workspace_role_requires_labelos_role_assign_capability(
         seeded,
         role_for_org_a=MembershipRole.member,
         permissions=(),
-        capability_permissions=("role.assign",),
+        capability_permissions=(
+            "workspace.member.roles.manage",
+            "role.assign",
+        ),
     )
     allowed_response = client.post(
         f"/api/v1/organizations/{seeded.org_a_id}/members/"
@@ -911,6 +1323,81 @@ def test_assign_workspace_role_requires_labelos_role_assign_capability(
     assert denied_response.status_code == 403
     assert denied_response.json() == {"detail": "Insufficient capability permission"}
     assert allowed_response.status_code == 201
+
+
+def test_assign_workspace_role_requires_member_roles_manage_capability(
+    organizations_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededOrganizations,
+    ],
+) -> None:
+    client, _sessionmaker, seeded = organizations_client
+    _set_context(
+        client,
+        seeded,
+        role_for_org_a=MembershipRole.member,
+        capability_permissions=("role.assign",),
+    )
+
+    response = client.post(
+        f"/api/v1/organizations/{seeded.org_a_id}/members/"
+        f"{seeded.member_membership_id}/roles",
+        json={"role_id": str(seeded.artist_role_id)},
+    )
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Insufficient capability permission"}
+
+
+def test_assign_workspace_role_rejects_role_with_forbidden_capabilities(
+    organizations_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededOrganizations,
+    ],
+) -> None:
+    client, sessionmaker, seeded = organizations_client
+
+    async def attach_role_capability() -> None:
+        async with sessionmaker() as session:
+            capability = Capability(
+                key="contract.execute",
+                display_name="Execute contracts",
+                description="Execute contract records.",
+                system_capability=True,
+            )
+            session.add(capability)
+            await session.flush()
+            session.add(
+                RoleCapability(
+                    role_id=seeded.legal_role_id,
+                    capability_id=capability.id,
+                )
+            )
+            await session.commit()
+
+    asyncio.run(attach_role_capability())
+    _set_context(
+        client,
+        seeded,
+        role_for_org_a=MembershipRole.member,
+        capability_permissions=(
+            "workspace.member.roles.manage",
+            "role.assign",
+        ),
+    )
+
+    response = client.post(
+        f"/api/v1/organizations/{seeded.org_a_id}/members/"
+        f"{seeded.member_membership_id}/roles",
+        json={"role_id": str(seeded.legal_role_id)},
+    )
+
+    assert response.status_code == 403
+    assert response.json() == {
+        "detail": "Cannot administer a role with forbidden capabilities"
+    }
 
 
 def test_assign_workspace_role_rejects_self_escalation(
@@ -1054,7 +1541,9 @@ def test_workspace_role_assignments_can_differ_between_workspaces(
     assert asyncio.run(
         _workspace_role_keys(sessionmaker, seeded.member_membership_id)
     ) == ["artist", "producer"]
-    assert asyncio.run(_workspace_role_keys(sessionmaker, beta_member_id)) == ["a&r"]
+    assert asyncio.run(_workspace_role_keys(sessionmaker, beta_member_id)) == [
+        "a_and_r"
+    ]
 
 
 def test_remove_workspace_role_keeps_universal_profile_and_publishes_activity(
@@ -1103,6 +1592,111 @@ def test_remove_workspace_role_keeps_universal_profile_and_publishes_activity(
         "profile.role_removed",
     ]
     assert profile_role_events[-1].payload["roleKey"] == "artist"
+    audit_events = _authorization_audit_events(events)
+    assert [event.event_type for event in audit_events] == [
+        "role.assigned",
+        "membership.roles.updated",
+        "role.removed",
+        "membership.roles.updated",
+    ]
+    removal_audit = audit_events[-2]
+    assert removal_audit.actor_user_id == seeded.user_id
+    assert removal_audit.entity_type == "workspace_membership"
+    assert removal_audit.created_at is not None
+    assert removal_audit.payload["workspaceId"] == str(seeded.org_a_id)
+    assert removal_audit.payload["membershipId"] == str(seeded.member_membership_id)
+    assert removal_audit.payload["memberUserId"] == str(seeded.member_id)
+    assert removal_audit.payload["roleId"] == str(seeded.artist_role_id)
+    assert removal_audit.payload["roleKey"] == "artist"
+    assert "member@example.com" not in str(removal_audit.payload)
+
+
+def test_remove_member_requires_remove_capability(
+    organizations_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededOrganizations,
+    ],
+) -> None:
+    client, _sessionmaker, seeded = organizations_client
+    _set_context(
+        client,
+        seeded,
+        role_for_org_a=MembershipRole.member,
+        capability_permissions=("workspace.member.view",),
+    )
+
+    response = client.delete(
+        f"/api/v1/organizations/{seeded.org_a_id}/members/"
+        f"{seeded.member_membership_id}",
+    )
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Insufficient capability permission"}
+
+
+def test_remove_member_marks_memberships_removed_and_publishes_activity(
+    organizations_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededOrganizations,
+    ],
+) -> None:
+    client, sessionmaker, seeded = organizations_client
+    _set_context(client, seeded)
+
+    response = client.delete(
+        f"/api/v1/organizations/{seeded.org_a_id}/members/"
+        f"{seeded.member_membership_id}",
+    )
+
+    assert response.status_code == 204
+    assert (
+        asyncio.run(_membership_status(sessionmaker, seeded.member_membership_id))
+        == "removed"
+    )
+    assert (
+        asyncio.run(
+            _workspace_membership_status(sessionmaker, seeded.member_membership_id)
+        )
+        == "removed"
+    )
+    events = asyncio.run(_realtime_events(sessionmaker, seeded.org_a_id))
+    assert [event.event_type for event in events] == [
+        "member.removed",
+        "profile.membership_updated",
+    ]
+    assert events[0].payload["membershipId"] == str(seeded.member_membership_id)
+    assert events[0].payload["workspaceId"] == str(seeded.org_a_id)
+
+
+def test_remove_last_workspace_owner_is_rejected(
+    organizations_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededOrganizations,
+    ],
+) -> None:
+    client, sessionmaker, seeded = organizations_client
+    _set_context(client, seeded)
+
+    async def owner_membership_id() -> UUID:
+        async with sessionmaker() as session:
+            membership_id = await session.scalar(
+                select(OrganizationMembership.id)
+                .where(OrganizationMembership.organization_id == seeded.org_a_id)
+                .where(OrganizationMembership.user_id == seeded.user_id)
+            )
+            assert membership_id is not None
+            return membership_id
+
+    membership_id = asyncio.run(owner_membership_id())
+    response = client.delete(
+        f"/api/v1/organizations/{seeded.org_a_id}/members/{membership_id}",
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "Cannot remove the last workspace owner"}
 
 
 def test_cross_organization_members_returns_not_found(
@@ -1251,7 +1845,7 @@ def test_create_workspace_invite_allows_member_with_invite_capability(
         client,
         seeded,
         role_for_org_a=MembershipRole.member,
-        capability_permissions=("member.invite",),
+        capability_permissions=("workspace.member.invite",),
     )
 
     response = client.post(
@@ -1275,7 +1869,7 @@ def test_create_workspace_invite_requires_role_assign_for_selected_roles(
         client,
         seeded,
         role_for_org_a=MembershipRole.member,
-        capability_permissions=("member.invite",),
+        capability_permissions=("workspace.member.invite",),
     )
 
     response = client.post(

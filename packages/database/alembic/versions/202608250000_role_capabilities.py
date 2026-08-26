@@ -57,27 +57,7 @@ def upgrade() -> None:
         ["system_capability"],
     )
 
-    capabilities_table = sa.table(
-        "capabilities",
-        sa.column("id", sa.Uuid()),
-        sa.column("key", sa.String()),
-        sa.column("display_name", sa.String()),
-        sa.column("description", sa.String()),
-        sa.column("system_capability", sa.Boolean()),
-    )
-    op.bulk_insert(
-        capabilities_table,
-        [
-            {
-                "id": UUID(capability.id),
-                "key": capability.key,
-                "display_name": capability.display_name,
-                "description": capability.description,
-                "system_capability": capability.system_capability,
-            }
-            for capability in DEFAULT_CAPABILITIES
-        ],
-    )
+    _seed_capabilities()
 
     op.create_table(
         "role_capabilities",
@@ -157,6 +137,17 @@ def _seed_role_capabilities() -> None:
             capability_id = capabilities_by_key.get(capability_key)
             if capability_id is None:
                 continue
+            existing_id = bind.execute(
+                sa.text("""
+                    SELECT id
+                    FROM role_capabilities
+                    WHERE role_id = :role_id
+                        AND capability_id = :capability_id
+                    """),
+                {"role_id": role_id, "capability_id": capability_id},
+            ).scalar_one_or_none()
+            if existing_id is not None:
+                continue
             bind.execute(
                 sa.text("""
                     INSERT INTO role_capabilities (
@@ -178,4 +169,52 @@ def _seed_role_capabilities() -> None:
                     "role_id": role_id,
                     "capability_id": capability_id,
                 },
+            )
+
+
+def _seed_capabilities() -> None:
+    bind = op.get_bind()
+    for capability in DEFAULT_CAPABILITIES:
+        existing_id = bind.execute(
+            sa.text("SELECT id FROM capabilities WHERE key = :key"),
+            {"key": capability.key},
+        ).scalar_one_or_none()
+        values = {
+            "id": UUID(capability.id),
+            "key": capability.key,
+            "display_name": capability.display_name,
+            "description": capability.description,
+            "system_capability": capability.system_capability,
+        }
+        if existing_id is None:
+            bind.execute(
+                sa.text("""
+                    INSERT INTO capabilities (
+                        id,
+                        key,
+                        display_name,
+                        description,
+                        system_capability
+                    )
+                    VALUES (
+                        :id,
+                        :key,
+                        :display_name,
+                        :description,
+                        :system_capability
+                    )
+                    """),
+                values,
+            )
+        else:
+            bind.execute(
+                sa.text("""
+                    UPDATE capabilities
+                    SET
+                        display_name = :display_name,
+                        description = :description,
+                        system_capability = :system_capability
+                    WHERE id = :existing_id
+                    """),
+                {**values, "existing_id": existing_id},
             )

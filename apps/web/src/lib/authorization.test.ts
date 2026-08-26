@@ -7,19 +7,11 @@ import {
   hasCapability,
   hasDepartmentAccess,
   hasPermission,
-  hasRole,
   permissions,
   unavailableActionProps,
 } from "./authorization";
 
 describe("frontend authorization helpers", () => {
-  it("checks the Owner/Admin/Member role hierarchy", () => {
-    expect(hasRole({ role: "owner" }, "admin")).toBe(true);
-    expect(hasRole({ role: "Admin" }, "member")).toBe(true);
-    expect(hasRole({ role: "member" }, "admin")).toBe(false);
-    expect(hasRole({ role: null }, "member")).toBe(false);
-  });
-
   it("checks explicit permissions from the backend token", () => {
     const subject = { permissions: [permissions.artistsView, permissions.releasesManage] };
 
@@ -44,26 +36,38 @@ describe("frontend authorization helpers", () => {
     const subject = {
       workspacePermission: "member",
       departmentAccess: ["legal"],
-      capabilities: [capabilities.contractUpload],
+      capabilities: [capabilities.contractCreate],
     };
 
     expect(hasDepartmentAccess(subject, "legal")).toBe(true);
-    expect(hasCapability(subject, capabilities.contractUpload)).toBe(true);
-    expect(canUseCapability(subject, capabilities.contractUpload, "legal")).toBe(true);
-    expect(canUseCapability(subject, capabilities.contractSignRequest, "legal")).toBe(false);
-    expect(canUseCapability(subject, capabilities.contractUpload, "production")).toBe(false);
+    expect(hasCapability(subject, capabilities.contractCreate)).toBe(true);
+    expect(canUseCapability(subject, capabilities.contractCreate, "legal")).toBe(true);
+    expect(canUseCapability(subject, capabilities.contractExecute, "legal")).toBe(false);
+    expect(canUseCapability(subject, capabilities.contractCreate, "production")).toBe(false);
   });
 
   it("applies default capability departments when no resource department is provided", () => {
     const subject = {
       workspacePermission: "member",
       departmentAccess: ["marketing"],
-      capabilities: [capabilities.contractUpload, capabilities.campaignCreate],
+      capabilities: [capabilities.contractCreate, capabilities.marketingCampaignCreate],
     };
 
-    expect(hasCapability(subject, capabilities.contractUpload)).toBe(false);
-    expect(hasCapability(subject, capabilities.campaignCreate)).toBe(true);
-    expect(can(subject, null, capabilities.contractUpload, { department: "legal" })).toBe(false);
+    expect(hasCapability(subject, capabilities.contractCreate)).toBe(false);
+    expect(hasCapability(subject, capabilities.marketingCampaignCreate)).toBe(true);
+    expect(can(subject, null, capabilities.contractCreate, { department: "legal" })).toBe(false);
+  });
+
+  it("applies default capability departments when no resource department is provided", () => {
+    const subject = {
+      workspacePermission: "member",
+      departmentAccess: ["marketing"],
+      capabilities: [capabilities.contractCreate, capabilities.marketingCampaignCreate],
+    };
+
+    expect(hasCapability(subject, capabilities.contractCreate)).toBe(false);
+    expect(hasCapability(subject, capabilities.marketingCampaignCreate)).toBe(true);
+    expect(can(subject, null, capabilities.contractCreate, { department: "legal" })).toBe(false);
   });
 
   it("uses can as the central authorization resolver", () => {
@@ -79,16 +83,14 @@ describe("frontend authorization helpers", () => {
     expect(can(subject, null, "admin")).toBe(false);
     expect(can(subject, null, capabilities.contractApprove, { department: "legal" })).toBe(true);
     expect(can(subject, null, capabilities.contractApprove, { department: "finance" })).toBe(false);
-    expect(can(subject, null, capabilities.contractSignRequest, { department: "legal" })).toBe(
-      false,
-    );
+    expect(can(subject, null, capabilities.contractExecute, { department: "legal" })).toBe(false);
   });
 
   it("treats workspace owners as having every department and capability", () => {
     const subject = { workspacePermission: "owner" };
 
     expect(hasDepartmentAccess(subject, "legal")).toBe(true);
-    expect(hasCapability(subject, capabilities.workspaceManage)).toBe(true);
+    expect(hasCapability(subject, capabilities.workspaceUpdate)).toBe(true);
     expect(canUseCapability(subject, capabilities.releaseEdit, "release_operations")).toBe(true);
   });
 });

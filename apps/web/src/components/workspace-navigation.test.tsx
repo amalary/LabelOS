@@ -97,13 +97,18 @@ describe("WorkspaceNavigation", () => {
     vi.mocked(fetch)
       .mockResolvedValueOnce(Response.json(profile))
       .mockResolvedValueOnce(
-        Response.json(membership("workspace_member", ["artist.view"], ["artist"])),
+        Response.json(membership("workspace_member", ["artist.profile.view"], ["artist"])),
       )
       .mockResolvedValueOnce(
         Response.json(
           membership(
             "workspace_admin",
-            ["workspace.manage", "member.invite", "role.assign"],
+            [
+              "workspace.update",
+              "workspace.member.invite",
+              "workspace.member.roles.manage",
+              "role.assign",
+            ],
             ["administration"],
           ),
         ),

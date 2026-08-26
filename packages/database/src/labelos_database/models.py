@@ -78,11 +78,14 @@ class MembershipRole(StrEnum):
     owner = "owner"
     admin = "admin"
     member = "member"
+    artist = "artist"
     guest = "guest"
     viewer = "viewer"
 
 
 def workspace_permission_from_role(role: MembershipRole) -> WorkspacePermission:
+    if role == MembershipRole.artist:
+        return WorkspacePermission.member
     if role == MembershipRole.viewer:
         return WorkspacePermission.guest
     return WorkspacePermission(role.value)
@@ -527,6 +530,10 @@ class Organization(Base, TimestampMixin):
         cascade="all, delete-orphan",
         foreign_keys="WorkspaceInvite.organization_id",
     )
+    roles: Mapped[list["Role"]] = relationship(
+        back_populates="workspace",
+        cascade="all, delete-orphan",
+    )
 
     __table_args__ = (
         UniqueConstraint(
@@ -779,10 +786,32 @@ class WorkspaceMembership(Base, TimestampMixin):
 class Role(Base, TimestampMixin):
     __tablename__ = "roles"
 
+    def __init__(self, **kwargs: object) -> None:
+        if "name" not in kwargs and "display_name" in kwargs:
+            kwargs["name"] = kwargs["display_name"]
+        if "display_name" not in kwargs and "name" in kwargs:
+            kwargs["display_name"] = kwargs["name"]
+        if "is_system_role" not in kwargs and "system_role" in kwargs:
+            kwargs["is_system_role"] = kwargs["system_role"]
+        if "system_role" not in kwargs and "is_system_role" in kwargs:
+            kwargs["system_role"] = kwargs["is_system_role"]
+        super().__init__(**kwargs)
+
     id: Mapped[UUIDPrimaryKey]
+    workspace_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=True,
+    )
     key: Mapped[str] = mapped_column(String(80), nullable=False)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
     display_name: Mapped[str] = mapped_column(String(120), nullable=False)
     description: Mapped[str] = mapped_column(String(500), nullable=False)
+    is_system_role: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=false(),
+    )
     system_role: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
@@ -790,6 +819,7 @@ class Role(Base, TimestampMixin):
         server_default=false(),
     )
 
+    workspace: Mapped[Organization | None] = relationship(back_populates="roles")
     workspace_membership_assignments: Mapped[list["WorkspaceMembershipRole"]] = (
         relationship(
             back_populates="role",
@@ -809,7 +839,7 @@ class Role(Base, TimestampMixin):
         ),
     )
 
-    @validates("key", "display_name", "description")
+    @validates("key", "name", "display_name", "description")
     def _validate_required_text(self, key: str, value: str | None) -> str:
         return _required_text(value, key)
 
@@ -822,8 +852,25 @@ class Role(Base, TimestampMixin):
         )
 
     __table_args__ = (
-        UniqueConstraint("key", name="uq_roles_key"),
+        Index(
+            "uq_roles_system_key",
+            "key",
+            unique=True,
+            postgresql_where=workspace_id.is_(None),
+            sqlite_where=workspace_id.is_(None),
+        ),
+        Index(
+            "uq_roles_workspace_id_key",
+            "workspace_id",
+            "key",
+            unique=True,
+            postgresql_where=workspace_id.is_not(None),
+            sqlite_where=workspace_id.is_not(None),
+        ),
+        Index("ix_roles_workspace_id", "workspace_id"),
+        Index("ix_roles_workspace_id_key", "workspace_id", "key"),
         Index("ix_roles_key", "key"),
+        Index("ix_roles_is_system_role", "is_system_role"),
         Index("ix_roles_system_role", "system_role"),
     )
 

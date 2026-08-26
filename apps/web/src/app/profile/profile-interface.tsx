@@ -177,10 +177,12 @@ export function ProfileAvatar({ profile }: { profile: UniversalProfile | null })
 }
 
 export function ProfileHeader({
+  canEdit,
   isEditing,
   onEdit,
   profile,
 }: {
+  canEdit: boolean;
   isEditing: boolean;
   onEdit: () => void;
   profile: UniversalProfile;
@@ -206,9 +208,11 @@ export function ProfileHeader({
             ) : null}
           </div>
         </div>
-        <Button disabled={isEditing} onClick={onEdit} size="sm" variant="secondary">
-          Edit Profile
-        </Button>
+        {canEdit ? (
+          <Button disabled={isEditing} onClick={onEdit} size="sm" variant="secondary">
+            Edit Profile
+          </Button>
+        ) : null}
       </div>
       <p className="mt-6 max-w-3xl whitespace-pre-line text-sm leading-7 text-slate-600">
         {profile.biography || (
@@ -471,6 +475,7 @@ export function UniversalProfileInterface() {
 
   const roles = useMemo(() => workspaceProfile.roles, [workspaceProfile.roles]);
   const departments = workspaceProfile.departmentAccess;
+  const canEditProfile = workspaceProfile.canEditProfile;
 
   if (currentProfile.isLoading && !currentProfile.data) {
     return (
@@ -519,7 +524,12 @@ export function UniversalProfileInterface() {
 
   return (
     <div className="mx-auto flex w-full max-w-5xl flex-col gap-5">
-      <ProfileHeader isEditing={isEditing} onEdit={() => setIsEditing(true)} profile={profile} />
+      <ProfileHeader
+        canEdit={canEditProfile}
+        isEditing={isEditing}
+        onEdit={() => setIsEditing(true)}
+        profile={profile}
+      />
       <ProfileCompletionPrompt profile={profile} />
 
       {isEditing ? (

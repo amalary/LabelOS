@@ -1,4 +1,5 @@
 import time
+from dataclasses import dataclass
 from uuid import uuid4
 
 import jwt
@@ -6,24 +7,32 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from labelos_database.capabilities import (
+    CAPABILITY_REGISTRY,
+    is_valid_capability_identifier,
+    validate_capability_identifier,
+)
 from labelos_database.models import MembershipRole, User, WorkspacePermission
 
 from labelos_api.auth import (
     AuthenticatedPrincipal,
     CurrentUserContext,
     MembershipContext,
-    has_role_at_least,
     principal_from_token,
     require_active_workspace_id,
-    require_organization_role,
     require_permission,
 )
 from labelos_api.authorization import (
     INITIAL_ROLE_CAPABILITIES,
     INITIAL_ROLE_PERMISSIONS,
+    ActorKind,
+    AuthorizationActor,
+    AuthorizationDecision,
     AuthorizationResource,
     Capability,
     Permission,
+    ResourceKind,
+    actor_from_current_user,
     authorization_service,
     effective_capabilities,
     has_capability,
@@ -361,12 +370,6 @@ def test_authenticated_me_response_uses_current_principal(
     }
 
 
-def test_role_checks_follow_membership_hierarchy() -> None:
-    assert has_role_at_least(MembershipRole.owner, MembershipRole.guest)
-    assert has_role_at_least(MembershipRole.admin, MembershipRole.member)
-    assert not has_role_at_least(MembershipRole.guest, MembershipRole.member)
-
-
 def test_initial_role_permission_mapping() -> None:
     owner_permissions = INITIAL_ROLE_PERMISSIONS[MembershipRole.owner]
     admin_permissions = INITIAL_ROLE_PERMISSIONS[MembershipRole.admin]
@@ -385,11 +388,24 @@ def test_initial_role_capability_mapping() -> None:
     admin_capabilities = INITIAL_ROLE_CAPABILITIES[MembershipRole.admin]
     member_capabilities = INITIAL_ROLE_CAPABILITIES[MembershipRole.member]
 
-    assert Capability.workspace_manage in owner_capabilities
+    assert Capability.workspace_update in owner_capabilities
     assert Capability.contract_approve in admin_capabilities
     assert Capability.role_assign in admin_capabilities
-    assert Capability.artist_view in member_capabilities
+    assert Capability.artist_profile_view in member_capabilities
     assert Capability.contract_approve not in member_capabilities
+
+
+def test_capability_registry_imports_and_validates_identifiers() -> None:
+    capability_keys = [capability.key for capability in CAPABILITY_REGISTRY]
+
+    assert Capability.workspace_view.value == "workspace.view"
+    assert Capability.artist_profile_edit.value == "artist.profile.edit"
+    assert len(capability_keys) == len(set(capability_keys))
+    assert all(is_valid_capability_identifier(key) for key in capability_keys)
+    assert validate_capability_identifier("release.approve") == "release.approve"
+    assert not is_valid_capability_identifier("Workspace.View")
+    with pytest.raises(ValueError, match="dot-separated lowercase"):
+        validate_capability_identifier("workspace:view")
 
 
 def test_capability_authorization_combines_workspace_department_and_capability() -> (
@@ -419,7 +435,7 @@ def test_capability_authorization_combines_workspace_department_and_capability()
     assert has_department_access(context, "legal")
     assert has_capability(context, Capability.contract_approve)
     assert Capability.contract_approve in effective_capabilities(context)
-    assert not has_capability(context, Capability.contract_sign_request)
+    assert not has_capability(context, Capability.contract_execute)
 
 
 def test_authorization_service_can_resolves_workspace_capability_resource() -> None:
@@ -440,7 +456,7 @@ def test_authorization_service_can_resolves_workspace_capability_resource() -> N
                 workos_organization_id="org_ACTIVE",
                 workspace_permission=WorkspacePermission.member,
                 department_access=("legal",),
-                capability_permissions=("contract.upload",),
+                capability_permissions=("contract.create",),
             ),
         ),
     )
@@ -448,20 +464,127 @@ def test_authorization_service_can_resolves_workspace_capability_resource() -> N
     assert authorization_service.can(
         context,
         workspace_id,
-        Capability.contract_upload,
+        Capability.contract_create,
         AuthorizationResource(department="legal"),
     )
     assert not authorization_service.can(
         context,
         workspace_id,
-        Capability.contract_upload,
+        Capability.contract_create,
         AuthorizationResource(department="finance"),
     )
     assert not authorization_service.can(
         context,
         workspace_id,
-        Capability.contract_sign_request,
+        Capability.contract_execute,
         AuthorizationResource(department="legal"),
+    )
+
+
+def test_authorization_decision_records_actor_action_workspace_and_resource() -> None:
+    workspace_id = uuid4()
+    context = CurrentUserContext(
+        user=User(id=uuid4(), email="person@example.com", display_name="Test Person"),
+        principal=AuthenticatedPrincipal(
+            provider="workos",
+            subject="user_01TEST",
+            session_id="session_01TEST",
+            organization_id="org_ACTIVE",
+        ),
+        memberships=(
+            MembershipContext(
+                organization_id=workspace_id,
+                organization_name="Example Label",
+                organization_slug="example-label",
+                workos_organization_id="org_ACTIVE",
+                workspace_permission=WorkspacePermission.member,
+                department_access=("legal",),
+                capability_permissions=("contract.create",),
+            ),
+        ),
+    )
+    resource = AuthorizationResource(
+        kind=ResourceKind.contract,
+        id=uuid4(),
+        workspace_id=workspace_id,
+        department="legal",
+    )
+
+    decision = authorization_service.decide(
+        context,
+        workspace_id,
+        Capability.contract_create,
+        resource,
+    )
+
+    assert isinstance(decision, AuthorizationDecision)
+    assert decision.allowed is True
+    assert decision.reason == "capability_allowed"
+    assert decision.actor == actor_from_current_user(context)
+    assert decision.actor.kind == ActorKind.user
+    assert decision.actor.user_id == context.user.id
+    assert decision.action == Capability.contract_create
+    assert decision.workspace_id == workspace_id
+    assert decision.resource == resource
+
+
+def test_authorization_api_accepts_actor_shaped_context_without_user_model() -> None:
+    workspace_id = uuid4()
+
+    @dataclass(frozen=True)
+    class ServiceAccountLikeContext:
+        principal: AuthenticatedPrincipal
+        memberships: tuple[MembershipContext, ...]
+
+        @property
+        def authorization_actor(self) -> AuthorizationActor:
+            return AuthorizationActor(
+                kind=ActorKind.service_account,
+                subject=self.principal.subject,
+                display_name=self.principal.display_name,
+            )
+
+        @property
+        def active_membership(self) -> MembershipContext | None:
+            return self.memberships[0]
+
+    actor = ServiceAccountLikeContext(
+        principal=AuthenticatedPrincipal(
+            provider="internal",
+            subject="service_account_01TEST",
+            session_id="session_01TEST",
+            display_name="Catalog Importer",
+        ),
+        memberships=(
+            MembershipContext(
+                organization_id=workspace_id,
+                organization_name="Example Label",
+                organization_slug="example-label",
+                workos_organization_id=None,
+                workspace_permission=WorkspacePermission.member,
+                department_access=("artist",),
+                capability_permissions=("artist.profile.create",),
+            ),
+        ),
+    )
+
+    decision = authorization_service.decide(
+        actor,
+        workspace_id,
+        Capability.artist_profile_create,
+        {"kind": "artist", "department": "artist", "workspace_id": workspace_id},
+    )
+
+    assert decision.allowed is True
+    assert decision.actor == AuthorizationActor(
+        kind=ActorKind.service_account,
+        subject="service_account_01TEST",
+        display_name="Catalog Importer",
+    )
+    assert decision.resource == AuthorizationResource(
+        kind="artist",
+        workspace_id=workspace_id,
+        department="artist",
     )
 
 
@@ -486,7 +609,7 @@ def test_owner_has_all_capabilities_and_department_access() -> None:
     )
 
     assert has_department_access(context, "legal")
-    assert has_capability(context, Capability.workspace_manage)
+    assert has_capability(context, Capability.workspace_update)
 
 
 def test_role_derived_capability_authorizes_without_direct_membership_grant() -> None:
@@ -538,7 +661,6 @@ def test_authorization_service_denies_unknown_actions_by_default() -> None:
     assert not authorization_service.can(context, None, "unregistered.action")
     assert not authorization_service.can_capability(context, "unregistered.action")
     assert not authorization_service.can_permission(context, "unregistered:permission")
-    assert not authorization_service.can_role(context, "unregistered-role")
 
 
 def test_authorization_service_requires_active_workspace_membership() -> None:
@@ -566,10 +688,10 @@ def test_authorization_service_requires_active_workspace_membership() -> None:
     assert not authorization_service.can(
         context,
         inactive_membership,
-        Capability.workspace_manage,
+        Capability.workspace_update,
     )
     assert not authorization_service.can(
-        context, workspace_id, Capability.workspace_manage
+        context, workspace_id, Capability.workspace_update
     )
 
 
@@ -590,7 +712,7 @@ def test_authorization_service_combines_capabilities_across_multiple_roles() -> 
                 workos_organization_id="org_ACTIVE",
                 workspace_permission=WorkspacePermission.guest,
                 department_access=("legal", "marketing"),
-                role_capabilities=("contract.view", "campaign.approve"),
+                role_capabilities=("contract.view", "marketing.campaign.approve"),
             ),
         ),
     )
@@ -598,7 +720,7 @@ def test_authorization_service_combines_capabilities_across_multiple_roles() -> 
     capabilities = effective_capabilities(context)
 
     assert Capability.contract_view in capabilities
-    assert Capability.campaign_approve in capabilities
+    assert Capability.marketing_campaign_approve in capabilities
     assert authorization_service.can(
         context,
         None,
@@ -608,41 +730,15 @@ def test_authorization_service_combines_capabilities_across_multiple_roles() -> 
     assert authorization_service.can(
         context,
         None,
-        Capability.campaign_approve,
+        Capability.marketing_campaign_approve,
         AuthorizationResource(department="marketing"),
     )
     assert not authorization_service.can(
         context,
         None,
-        Capability.member_invite,
+        Capability.workspace_member_invite,
         AuthorizationResource(department="administration"),
     )
-
-
-def test_require_organization_role_rejects_insufficient_role() -> None:
-    organization_id = uuid4()
-    context = CurrentUserContext(
-        user=User(email="person@example.com"),
-        principal=AuthenticatedPrincipal(
-            provider="workos",
-            subject="user_01TEST",
-            session_id="session_01TEST",
-        ),
-        memberships=(
-            MembershipContext(
-                organization_id=organization_id,
-                organization_name="Example Label",
-                organization_slug="example-label",
-                workos_organization_id="org_01TEST",
-                role=MembershipRole.guest,
-            ),
-        ),
-    )
-
-    with pytest.raises(HTTPException) as exc_info:
-        require_organization_role(organization_id, MembershipRole.admin, context)
-
-    assert exc_info.value.status_code == 403
 
 
 def test_active_workspace_uses_workos_organization_membership() -> None:
@@ -792,21 +888,28 @@ def test_protected_route_allows_owner_with_permission(
     assert response.json() == {"ok": True, "guard": "artists:manage"}
 
 
-def test_protected_route_allows_admin_role(
+def test_protected_route_allows_workspace_update_capability(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("APP_ENV", "test")
     app = create_app()
-    _override_current_user_context(app, role="admin")
+    _override_current_user_context(
+        app,
+        role="member",
+        department_access=("administration",),
+        capability_permissions=("workspace.update",),
+    )
 
     with TestClient(app) as test_client:
-        response = test_client.get("/api/v1/authorization/examples/admin")
+        response = test_client.get(
+            "/api/v1/authorization/examples/workspace-administration"
+        )
 
     assert response.status_code == 200
-    assert response.json() == {"ok": True, "guard": "admin"}
+    assert response.json() == {"ok": True, "guard": "workspace.update"}
 
 
-def test_protected_route_rejects_member_role(
+def test_protected_route_rejects_missing_workspace_update_capability(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("APP_ENV", "test")
@@ -814,24 +917,28 @@ def test_protected_route_rejects_member_role(
     _override_current_user_context(app, role="member")
 
     with TestClient(app) as test_client:
-        response = test_client.get("/api/v1/authorization/examples/admin")
+        response = test_client.get(
+            "/api/v1/authorization/examples/workspace-administration"
+        )
 
     assert response.status_code == 403
-    assert response.json() == {"detail": "Insufficient role"}
+    assert response.json() == {"detail": "Insufficient capability permission"}
 
 
-def test_protected_route_rejects_missing_role(
+def test_protected_route_rejects_missing_workspace_context_for_capability(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("APP_ENV", "test")
     app = create_app()
-    _override_current_user_context(app, role=None, roles=())
+    _override_current_user_context(app, role=None, roles=(), organization_id=None)
 
     with TestClient(app) as test_client:
-        response = test_client.get("/api/v1/authorization/examples/admin")
+        response = test_client.get(
+            "/api/v1/authorization/examples/workspace-administration"
+        )
 
     assert response.status_code == 403
-    assert response.json() == {"detail": "Insufficient role"}
+    assert response.json() == {"detail": "Organization context required"}
 
 
 def test_protected_route_rejects_missing_permission(
@@ -857,14 +964,30 @@ def test_capability_route_allows_department_and_capability(
         app,
         workspace_permission=WorkspacePermission.member,
         department_access=("legal",),
-        capability_permissions=("contract.upload",),
+        capability_permissions=("contract.create",),
+    )
+
+    async def decide_capability(session, *, actor, workspace, capability, resource):
+        return AuthorizationDecision(
+            actor=AuthorizationActor(kind=ActorKind.user, subject="user_01TEST"),
+            action=Capability.contract_create,
+            workspace_id=None,
+            resource=None,
+            allowed=True,
+            reason="capability_allowed",
+        )
+
+    monkeypatch.setattr(
+        authorization_service,
+        "decide_capability",
+        decide_capability,
     )
 
     with TestClient(app) as test_client:
         response = test_client.post("/api/v1/authorization/examples/contracts")
 
     assert response.status_code == 200
-    assert response.json() == {"ok": True, "guard": "contract.upload"}
+    assert response.json() == {"ok": True, "guard": "contract.create"}
 
 
 def test_capability_route_rejects_missing_department(
@@ -875,7 +998,23 @@ def test_capability_route_rejects_missing_department(
     _override_current_user_context(
         app,
         workspace_permission=WorkspacePermission.member,
-        capability_permissions=("contract.upload",),
+        capability_permissions=("contract.create",),
+    )
+
+    async def decide_capability(session, *, actor, workspace, capability, resource):
+        return AuthorizationDecision(
+            actor=AuthorizationActor(kind=ActorKind.user, subject="user_01TEST"),
+            action=Capability.contract_create,
+            workspace_id=None,
+            resource=None,
+            allowed=False,
+            reason="insufficient_department_access",
+        )
+
+    monkeypatch.setattr(
+        authorization_service,
+        "decide_capability",
+        decide_capability,
     )
 
     with TestClient(app) as test_client:
@@ -894,6 +1033,22 @@ def test_capability_route_rejects_missing_capability(
         app,
         workspace_permission=WorkspacePermission.guest,
         department_access=("legal",),
+    )
+
+    async def decide_capability(session, *, actor, workspace, capability, resource):
+        return AuthorizationDecision(
+            actor=AuthorizationActor(kind=ActorKind.user, subject="user_01TEST"),
+            action=Capability.contract_create,
+            workspace_id=None,
+            resource=None,
+            allowed=False,
+            reason="missing_capability",
+        )
+
+    monkeypatch.setattr(
+        authorization_service,
+        "decide_capability",
+        decide_capability,
     )
 
     with TestClient(app) as test_client:

@@ -49,13 +49,13 @@ describe("InviteTemplateForm", () => {
       />,
     );
 
-    expect(screen.getByRole("button", { name: "Invite person" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Invite person" })).not.toBeInTheDocument();
     expect(
       screen.getByText("Ask a workspace owner or admin to invite new people."),
     ).toBeInTheDocument();
   });
 
-  it("shows role assignment as unavailable without exposing capability names", async () => {
+  it("hides invite role controls without exposing capability names", async () => {
     const user = userEvent.setup();
     const { InviteTemplateForm } = await import("./invite-template-form");
 
@@ -65,10 +65,11 @@ describe("InviteTemplateForm", () => {
 
     await user.click(screen.getByRole("button", { name: "Invite person" }));
 
-    expect(screen.getByRole("checkbox", { name: "Role Artist" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Send invitation" })).toBeDisabled();
+    expect(screen.queryByRole("checkbox", { name: "Role Artist" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "Invite as" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Send invitation" })).toBeEnabled();
     expect(
-      screen.getByText("Ask a workspace owner or admin to choose starting roles for invitees."),
+      screen.getByText("This invitation will use the workspace default starting access."),
     ).toBeInTheDocument();
     expect(screen.queryByText(/role\.assign|member\.invite/)).not.toBeInTheDocument();
   });

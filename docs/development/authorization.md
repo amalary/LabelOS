@@ -4,6 +4,58 @@ Label OS uses WorkOS AuthKit for authentication and WorkOS RBAC claims for
 backend authorization decisions. The frontend can hide or disable unavailable
 actions, but FastAPI route dependencies are the authoritative enforcement point.
 
+## Domain Model
+
+The LabelOS authorization domain is named around these concepts:
+
+- **Actor** - the authenticated entity asking to do something. Users are the
+  only implemented actor type today. The API uses actor terminology so future
+  service accounts and AI agents can participate without pretending to be human
+  users.
+- **User** - a human account resolved from WorkOS identity into the local
+  `users` table.
+- **Workspace Membership** - a user's membership in one workspace. In the
+  current schema, workspaces are backed by `organizations`, but authorization
+  code should use `workspace_id` as the boundary.
+- **Role** - the function an actor performs in a workspace, such as `artist`,
+  `legal`, `marketing`, or `administrator`.
+- **Capability** - an action an actor is allowed to perform, such as
+  `contract.create` or `artist.profile.edit`.
+- **Resource** - the workspace-scoped object affected by an authorization
+  request. Today resources mainly contribute department scope. The typed
+  `AuthorizationResource` also carries kind, id, workspace, owner actor, and
+  attributes for future resource-aware decisions.
+- **Authorization Decision** - the allow/deny result for an actor, action,
+  workspace, and optional resource. `AuthorizationService.decide(...)` returns
+  this typed result; `AuthorizationService.can(...)` remains the boolean
+  convenience wrapper.
+
+The intended relationship is:
+
+```text
+User
+-> Workspace Membership
+-> Membership Roles
+-> Roles
+-> Role Capabilities
+-> Capabilities
+-> Authorization Decision
+```
+
+Users can belong to multiple workspaces, can hold different roles per
+workspace, and can hold multiple roles in the same workspace. Capabilities are
+inherited from all assigned workspace roles and are additive with explicit
+membership capability grants.
+
+Roles and capabilities must stay separate:
+
+- Roles answer: "What function does this person perform?"
+- Capabilities answer: "What is this person actually allowed to do?"
+
+Do not gate product actions by checking role names directly. Resolve
+capabilities for the actor's workspace membership, then make an authorization
+decision against the requested capability and resource.
+
 ## WorkOS AuthKit Claims
 
 AuthKit access tokens are JWTs. WorkOS documents these relevant session claims:
@@ -64,7 +116,7 @@ Memberships also carry optional action-level grants:
 Authorization decisions should use this layered model:
 
 ```text
-Universal Profile
+Actor
 -> active Workspace Membership by workspace_id
 -> Workspace Roles
 -> Role Capabilities
@@ -77,7 +129,9 @@ Workspace authorization code should compare requested scopes through
 `workspace_id` rather than assuming the current WorkOS organization-backed
 storage model is the permanent enterprise shape. See
 `docs/development/enterprise-hierarchy-extension.md` for the hierarchy extension
-boundary.
+boundary. Enterprise hierarchy, custom workspace role management, service
+account authorization, and AI agent authorization are extension points, not
+implemented behavior in the current resolver.
 
 Application code should not inline access rules such as
 `user.role == "legal"` or department-specific role checks. Backend access
@@ -87,15 +141,19 @@ decisions flow through the central `AuthorizationService.can(...)` resolver:
 authorization_service.can(
     user=context,
     workspace=context.active_workspace_id,
-    capability=Capability.contract_upload,
+    capability=Capability.contract_create,
     resource=AuthorizationResource(department="legal"),
 )
 ```
 
+Use `AuthorizationService.decide(...)` when the caller needs the typed
+`AuthorizationDecision` for logging, audit trails, or future policy debugging.
+Use `can(...)` for existing boolean route guards.
+
 Frontend helpers expose the same convention for presentation-only decisions:
 
 ```ts
-can(subject, workspace, capabilities.contractUpload, { department: "legal" });
+can(subject, workspace, capabilities.contractCreate, { department: "legal" });
 ```
 
 ## Departments
@@ -184,32 +242,59 @@ to departments. The resulting access is persisted in
 
 ## Capabilities
 
-Capabilities control individual actions inside a department. They use dot-case
-slugs because they describe application actions rather than WorkOS RBAC
-permissions.
+Capabilities control individual actions inside a department. They use
+dot-separated stable identifiers because they describe application actions
+rather than WorkOS RBAC permissions. Backend capability identifiers live in
+`packages/database/src/labelos_database/capabilities.py`; frontend callers use
+`apps/web/src/lib/capability-registry.ts`.
 
 Initial capabilities:
 
-- `artist.view`
-- `artist.edit`
-- `artist.create`
-- `campaign.view`
-- `campaign.create`
-- `campaign.approve`
-- `release.view`
-- `release.edit`
-- `contract.view`
-- `contract.upload`
-- `contract.approve`
-- `contract.sign_request`
-- `royalty.view`
-- `finance.view`
-- `analytics.view`
-- `member.invite`
-- `member.remove`
+- `workspace.view`
+- `workspace.update`
+- `workspace.member.view`
+- `workspace.member.invite`
+- `workspace.member.roles.manage`
+- `workspace.member.remove`
+- `role.view`
+- `role.create`
+- `role.update`
+- `role.delete`
 - `role.assign`
-- `workspace.manage`
+- `profile.view`
 - `profile.edit`
+- `artist.profile.view`
+- `artist.profile.create`
+- `artist.profile.edit`
+- `artist.profile.delete`
+- `ar.scouting.view`
+- `ar.scouting.create`
+- `ar.evaluation.view`
+- `ar.evaluation.create`
+- `ar.signing.approve`
+- `release.view`
+- `release.create`
+- `release.edit`
+- `release.approve`
+- `marketing.campaign.view`
+- `marketing.campaign.create`
+- `marketing.campaign.edit`
+- `marketing.campaign.approve`
+- `contract.view`
+- `contract.create`
+- `contract.edit`
+- `contract.review`
+- `contract.approve`
+- `contract.execute`
+- `royalty.view`
+- `royalty.calculate`
+- `royalty.statement.view`
+- `royalty.statement.create`
+- `finance.view`
+- `finance.report.view`
+- `finance.payment.view`
+- `finance.payment.approve`
+- `analytics.view`
 
 Initial baseline capability mapping:
 
@@ -268,10 +353,10 @@ Capability example:
 async def create_contract_example(
     _context: Annotated[
         CurrentUserContext,
-        Depends(require_capability(Capability.contract_upload, department="legal")),
+        Depends(require_capability(Capability.contract_create, department="legal")),
     ],
 ) -> ProtectedRouteResponse:
-    return ProtectedRouteResponse(ok=True, guard="contract.upload")
+    return ProtectedRouteResponse(ok=True, guard="contract.create")
 ```
 
 ## Frontend Helpers
@@ -285,21 +370,20 @@ the user experience; they must not replace backend route guards.
 New capabilities should be introduced through the central catalog before any UI
 or route consumes them:
 
-1. Add a dot-case key to the backend `Capability` enum in
-   `apps/api/src/labelos_api/authorization.py`.
-2. Add the same key to `DEFAULT_CAPABILITIES` in
-   `packages/database/src/labelos_database/roles.py` with a stable UUID,
-   display name, and description.
-3. Add role defaults in `DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS` only for roles
-   that should receive the capability automatically.
-4. Add or update an Alembic migration when the database seed data changes.
-5. Add the frontend presentation constant in
-   `apps/web/src/lib/authorization.ts`.
-6. Protect backend routes with `require_capability(...)` or call
+1. Add a dot-separated key to the backend `Capability` enum and
+   `CAPABILITY_REGISTRY` in
+   `packages/database/src/labelos_database/capabilities.py`.
+2. Add role defaults in `DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS` only for roles
+   that should receive the capability automatically, using `Capability.*.value`
+   rather than retyping raw strings.
+3. Add or update an Alembic migration when the database seed data changes.
+4. Add the frontend presentation constant and metadata in
+   `apps/web/src/lib/capability-registry.ts`.
+5. Protect backend routes with `require_capability(...)` or call
    `authorization_service.can(...)` in service code. UI components should
    consume already-resolved authorization state or frontend helpers only for
    presentation.
-7. Add allow and deny tests. At minimum cover no membership, inactive
+6. Add allow and deny tests. At minimum cover no membership, inactive
    membership, missing capability, missing department when applicable, and a
    role or explicit grant that allows the action.
 

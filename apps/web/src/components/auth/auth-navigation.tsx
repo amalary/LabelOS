@@ -5,6 +5,7 @@ import { SignInButton, SignedInUserSummary, UserAccountMenu } from "./auth-compo
 import type { AuthUiState } from "./auth-types";
 import { clearOrganizationScopedBrowserCaches } from "../../lib/browser-cache";
 import { clearProfileCache } from "../../lib/profiles";
+import { clearWorkspaceCapabilityCache } from "../../lib/workspace-capabilities";
 
 function submitPost(url: string) {
   const form = document.createElement("form");
@@ -76,6 +77,7 @@ export function AuthNavigation({
       onSignOut={() => {
         clearOrganizationScopedBrowserCaches();
         clearProfileCache();
+        clearWorkspaceCapabilityCache();
         submitPost(logoutPath);
       }}
       onTheme={() => undefined}

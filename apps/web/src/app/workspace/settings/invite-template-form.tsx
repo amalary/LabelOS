@@ -108,7 +108,7 @@ export function InviteTemplateForm({
   const [state, formAction] = useActionState(createWorkspaceInviteAction, initialActionState);
   const [selectedRoles, setSelectedRoles] = useState<Set<RoleName>>(() => new Set(["Artist"]));
   const selectedDepartments = useMemo(() => uniqueDepartmentsFor(selectedRoles), [selectedRoles]);
-  const canSubmit = canInviteMembers && canAssignInviteRoles && selectedRoles.size > 0;
+  const canSubmit = canInviteMembers && (canAssignInviteRoles ? selectedRoles.size > 0 : true);
 
   useEffect(() => {
     if (!isOpen) {
@@ -146,14 +146,15 @@ export function InviteTemplateForm({
             Invite one person and choose the label roles they should start with.
           </p>
         </div>
-        <button
-          className="inline-flex h-10 items-center justify-center rounded-md bg-slate-950 px-4 text-sm font-semibold text-white outline-none transition hover:bg-slate-800 focus-visible:ring-2 focus-visible:ring-cyan-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:bg-slate-400"
-          disabled={!canInviteMembers}
-          onClick={() => setIsOpen(true)}
-          type="button"
-        >
-          Invite person
-        </button>
+        {canInviteMembers ? (
+          <button
+            className="inline-flex h-10 items-center justify-center rounded-md bg-slate-950 px-4 text-sm font-semibold text-white outline-none transition hover:bg-slate-800 focus-visible:ring-2 focus-visible:ring-cyan-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:bg-slate-400"
+            onClick={() => setIsOpen(true)}
+            type="button"
+          >
+            Invite person
+          </button>
+        ) : null}
       </div>
 
       {!canInviteMembers ? (
@@ -202,9 +203,19 @@ export function InviteTemplateForm({
 
             <form action={formAction} className="mt-5 grid gap-5">
               <input name="organizationId" type="hidden" value={organizationId} />
-              {selectedDepartments.map((department) => (
-                <input key={department} name="departmentAccess" type="hidden" value={department} />
-              ))}
+              {canAssignInviteRoles
+                ? selectedDepartments.map((department) => (
+                    <input
+                      key={department}
+                      name="departmentAccess"
+                      type="hidden"
+                      value={department}
+                    />
+                  ))
+                : null}
+              {!canAssignInviteRoles ? (
+                <input name="professionalRoles" type="hidden" value="Artist" />
+              ) : null}
 
               <label className="grid gap-2 text-sm font-medium text-slate-700">
                 Email
@@ -219,43 +230,48 @@ export function InviteTemplateForm({
                 />
               </label>
 
-              <fieldset className="grid gap-3">
-                <legend className="text-sm font-medium text-slate-700">Invite as</legend>
-                <div className="grid gap-2 sm:grid-cols-2">
-                  {INVITE_ROLES.map((role) => {
-                    const isSelected = selectedRoles.has(role.label);
-                    const descriptionId = `${dialogDescriptionId}-${role.workspaceRole}`;
+              {canAssignInviteRoles ? (
+                <fieldset className="grid gap-3">
+                  <legend className="text-sm font-medium text-slate-700">Invite as</legend>
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    {INVITE_ROLES.map((role) => {
+                      const isSelected = selectedRoles.has(role.label);
+                      const descriptionId = `${dialogDescriptionId}-${role.workspaceRole}`;
 
-                    return (
-                      <label
-                        className="grid min-h-24 cursor-pointer gap-2 rounded-md border border-slate-200 bg-slate-50 p-3 text-sm transition focus-within:ring-2 focus-within:ring-cyan-500 focus-within:ring-offset-2 has-[:checked]:border-cyan-500 has-[:checked]:bg-cyan-50 has-[:disabled]:cursor-not-allowed has-[:disabled]:opacity-60"
-                        key={role.label}
-                      >
-                        <span className="flex items-center gap-3 font-semibold text-slate-950">
-                          <input
-                            aria-describedby={descriptionId}
-                            aria-label={`Role ${role.label}`}
-                            checked={isSelected}
-                            className="h-4 w-4 accent-cyan-600"
-                            disabled={!canInviteMembers || !canAssignInviteRoles}
-                            name="professionalRoles"
-                            onChange={() => toggleRole(role.label)}
-                            type="checkbox"
-                            value={role.professionalRole}
-                          />
-                          {isSelected ? (
-                            <input name="workspaceRoles" type="hidden" value={role.workspaceRole} />
-                          ) : null}
-                          {role.label}
-                        </span>
-                        <span className="text-sm leading-5 text-slate-600" id={descriptionId}>
-                          {role.description}
-                        </span>
-                      </label>
-                    );
-                  })}
-                </div>
-              </fieldset>
+                      return (
+                        <label
+                          className="grid min-h-24 cursor-pointer gap-2 rounded-md border border-slate-200 bg-slate-50 p-3 text-sm transition focus-within:ring-2 focus-within:ring-cyan-500 focus-within:ring-offset-2 has-[:checked]:border-cyan-500 has-[:checked]:bg-cyan-50 has-[:disabled]:cursor-not-allowed has-[:disabled]:opacity-60"
+                          key={role.label}
+                        >
+                          <span className="flex items-center gap-3 font-semibold text-slate-950">
+                            <input
+                              aria-describedby={descriptionId}
+                              aria-label={`Role ${role.label}`}
+                              checked={isSelected}
+                              className="h-4 w-4 accent-cyan-600"
+                              name="professionalRoles"
+                              onChange={() => toggleRole(role.label)}
+                              type="checkbox"
+                              value={role.professionalRole}
+                            />
+                            {isSelected ? (
+                              <input
+                                name="workspaceRoles"
+                                type="hidden"
+                                value={role.workspaceRole}
+                              />
+                            ) : null}
+                            {role.label}
+                          </span>
+                          <span className="text-sm leading-5 text-slate-600" id={descriptionId}>
+                            {role.description}
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </fieldset>
+              ) : null}
 
               <div className="grid gap-4 sm:grid-cols-[1fr_1fr_auto]">
                 <label className="grid gap-2 text-sm font-medium text-slate-700">
@@ -294,11 +310,11 @@ export function InviteTemplateForm({
                   className="rounded-md border border-amber-300 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-900"
                   role="status"
                 >
-                  Ask a workspace owner or admin to choose starting roles for invitees.
+                  This invitation will use the workspace default starting access.
                 </div>
               ) : null}
 
-              {selectedRoles.size === 0 ? (
+              {canAssignInviteRoles && selectedRoles.size === 0 ? (
                 <div
                   className="rounded-md border border-amber-300 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-900"
                   role="status"
