@@ -17,6 +17,7 @@ from labelos_database.models import (
     OrganizationMembership,
     ProfessionalRole,
     Role,
+    RoleCapability,
     UniversalProfile,
     WorkspaceInvite,
     WorkspaceMembership,
@@ -171,6 +172,39 @@ class WorkspaceRoleResponse(BaseModel):
     display_name: str
     description: str
     system_role: bool
+
+
+class AuthorizationRoleSummaryResponse(BaseModel):
+    key: str
+    name: str
+
+
+class AuthorizationContextResponse(BaseModel):
+    workspace_id: UUID
+    roles: list[AuthorizationRoleSummaryResponse] = Field(default_factory=list)
+    capabilities: list[str] = Field(default_factory=list)
+
+
+class WorkspaceRoleDefinitionResponse(BaseModel):
+    id: UUID
+    key: str
+    name: str
+    description: str
+    system_role: bool
+    capabilities: list[str] = Field(default_factory=list)
+
+
+class WorkspaceRolesListResponse(BaseModel):
+    roles: list[WorkspaceRoleDefinitionResponse]
+
+
+class MemberRoleAssignmentSummaryResponse(BaseModel):
+    member_id: UUID
+    roles: list[AuthorizationRoleSummaryResponse] = Field(default_factory=list)
+
+
+class MemberRoleAssignmentsListResponse(BaseModel):
+    assignments: list[MemberRoleAssignmentSummaryResponse]
 
 
 class WorkspaceRoleAssignmentResponse(BaseModel):
@@ -336,6 +370,29 @@ def _require_capability(
         workspace=organization_id,
     ):
         raise _forbidden("Insufficient capability permission")
+
+
+def _require_role_capabilities_administerable(
+    context: CurrentUserContext,
+    organization_id: UUID,
+    role: Role,
+) -> None:
+    if role.workspace_id not in {None, organization_id}:
+        raise _not_found()
+    if _membership_for_context(context, organization_id) == WorkspacePermission.owner:
+        return
+
+    actor_capabilities = authorization_service.effective_capabilities(
+        context,
+        workspace=organization_id,
+    )
+    role_capabilities = {
+        Capability(capability.key)
+        for capability in role.capabilities
+        if capability.key in Capability._value2member_map_
+    }
+    if not role_capabilities.issubset(actor_capabilities):
+        raise _forbidden("Cannot administer a role with forbidden capabilities")
 
 
 def _organization_response(
@@ -682,6 +739,77 @@ def _role_assignment_response(
     )
 
 
+def _role_display_name_from_key(role_key: str) -> str:
+    return ALLOWED_WORKSPACE_ROLES.get(role_key, role_key.replace("_", " ").title())
+
+
+def _role_summary(role: Role) -> AuthorizationRoleSummaryResponse:
+    return AuthorizationRoleSummaryResponse(key=role.key, name=role.display_name)
+
+
+def _role_capability_keys(role: Role) -> list[str]:
+    return sorted({capability.key for capability in role.capabilities})
+
+
+def _workspace_role_definition_response(role: Role) -> WorkspaceRoleDefinitionResponse:
+    return WorkspaceRoleDefinitionResponse(
+        id=role.id,
+        key=role.key,
+        name=role.display_name,
+        description=role.description,
+        system_role=role.system_role,
+        capabilities=_role_capability_keys(role),
+    )
+
+
+async def _load_current_workspace_roles(
+    session: AsyncSession,
+    *,
+    context: CurrentUserContext,
+    organization_id: UUID,
+) -> list[AuthorizationRoleSummaryResponse]:
+    workspace_membership = await session.scalar(
+        select(WorkspaceMembership)
+        .join(WorkspaceMembership.profile)
+        .options(
+            selectinload(WorkspaceMembership.role_assignments).selectinload(
+                WorkspaceMembershipRole.role
+            )
+        )
+        .where(WorkspaceMembership.workspace_id == organization_id)
+        .where(WorkspaceMembership.status == "active")
+        .where(UniversalProfile.user_id == context.user.id)
+    )
+    role_by_key = {
+        membership.workspace_permission.value: AuthorizationRoleSummaryResponse(
+            key=membership.workspace_permission.value,
+            name=_role_display_name_from_key(membership.workspace_permission.value),
+        )
+        for membership in context.memberships
+        if membership.workspace_id == organization_id and membership.status == "active"
+    }
+    if workspace_membership is not None:
+        for role in workspace_membership.roles:
+            role_by_key[role.key] = _role_summary(role)
+    return [role_by_key[key] for key in sorted(role_by_key)]
+
+
+def _member_role_assignment_summary(
+    membership: OrganizationMembership,
+) -> MemberRoleAssignmentSummaryResponse:
+    workspace_membership = membership.workspace_membership
+    roles = (
+        []
+        if workspace_membership is None
+        else [_role_summary(role) for role in workspace_membership.roles]
+    )
+    roles_by_key = {role.key: role for role in roles}
+    return MemberRoleAssignmentSummaryResponse(
+        member_id=membership.id,
+        roles=[roles_by_key[key] for key in sorted(roles_by_key)],
+    )
+
+
 def _member_role_payload(
     *,
     membership: OrganizationMembership,
@@ -822,6 +950,20 @@ async def _active_membership_row(
     return row.one_or_none()
 
 
+async def _active_owner_count(
+    session: AsyncSession,
+    organization_id: UUID,
+) -> int:
+    count = await session.scalar(
+        select(func.count())
+        .select_from(OrganizationMembership)
+        .where(OrganizationMembership.organization_id == organization_id)
+        .where(OrganizationMembership.status == "active")
+        .where(OrganizationMembership.workspace_permission == WorkspacePermission.owner)
+    )
+    return count or 0
+
+
 async def _slug_exists(
     session: AsyncSession,
     slug: str,
@@ -957,14 +1099,41 @@ async def create_workspace_invite(
     session: SessionDep,
     context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
 ) -> WorkspaceInviteResponse:
-    _require_membership(context, organization_id, MembershipRole.member)
     _require_capability(context, organization_id, Capability.workspace_member_invite)
     if payload.workspace_roles:
+        _require_capability(
+            context,
+            organization_id,
+            Capability.workspace_member_roles_manage,
+        )
         _require_capability(context, organization_id, Capability.role_assign)
 
     organization = await session.get(Organization, organization_id)
     if organization is None:
         raise _not_found()
+
+    if payload.workspace_roles:
+        roles = (
+            await session.scalars(
+                select(Role)
+                .options(
+                    selectinload(Role.capability_links).selectinload(
+                        RoleCapability.capability
+                    )
+                )
+                .where(Role.key.in_(payload.workspace_roles))
+            )
+        ).all()
+        roles_by_key = {role.key: role for role in roles}
+        for role_key in payload.workspace_roles:
+            role = roles_by_key.get(role_key)
+            if role is None:
+                raise _conflict("Invite references unavailable workspace roles")
+            _require_role_capabilities_administerable(
+                context,
+                organization_id,
+                role,
+            )
 
     if payload.email is not None:
         duplicate_invite = await session.scalar(
@@ -1413,8 +1582,9 @@ async def list_organization_members(
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> OrganizationMembersListResponse:
-    _require_membership(context, organization_id, MembershipRole.admin)
-    _require_permission(context, Permission.members_manage)
+    if await _active_membership_row(session, context, organization_id) is None:
+        raise _not_found()
+    _require_capability(context, organization_id, Capability.workspace_member_view)
 
     total = await session.scalar(
         select(func.count())
@@ -1466,6 +1636,98 @@ async def list_organization_members(
 
 
 @router.get(
+    "/{organization_id}/authorization/context",
+    response_model=AuthorizationContextResponse,
+)
+async def get_current_authorization_context(
+    organization_id: UUID,
+    session: SessionDep,
+    context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
+) -> AuthorizationContextResponse:
+    if await _active_membership_row(session, context, organization_id) is None:
+        raise _not_found()
+
+    capabilities = authorization_service.effective_capabilities(
+        context,
+        workspace=organization_id,
+    )
+    return AuthorizationContextResponse(
+        workspace_id=organization_id,
+        roles=await _load_current_workspace_roles(
+            session,
+            context=context,
+            organization_id=organization_id,
+        ),
+        capabilities=sorted(capability.value for capability in capabilities),
+    )
+
+
+@router.get(
+    "/{organization_id}/roles",
+    response_model=WorkspaceRolesListResponse,
+)
+async def list_workspace_roles(
+    organization_id: UUID,
+    session: SessionDep,
+    context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
+) -> WorkspaceRolesListResponse:
+    if await _active_membership_row(session, context, organization_id) is None:
+        raise _not_found()
+    _require_capability(context, organization_id, Capability.role_view)
+
+    roles = await session.scalars(
+        select(Role)
+        .options(
+            selectinload(Role.capability_links).selectinload(RoleCapability.capability)
+        )
+        .where((Role.workspace_id.is_(None)) | (Role.workspace_id == organization_id))
+        .order_by(
+            Role.workspace_id.asc(),
+            Role.key.asc(),
+            Role.id.asc(),
+        )
+    )
+    return WorkspaceRolesListResponse(
+        roles=[_workspace_role_definition_response(role) for role in roles.all()]
+    )
+
+
+@router.get(
+    "/{organization_id}/member-role-assignments",
+    response_model=MemberRoleAssignmentsListResponse,
+)
+async def list_member_role_assignments(
+    organization_id: UUID,
+    session: SessionDep,
+    context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
+) -> MemberRoleAssignmentsListResponse:
+    if await _active_membership_row(session, context, organization_id) is None:
+        raise _not_found()
+    _require_capability(context, organization_id, Capability.workspace_member_view)
+
+    memberships = await session.scalars(
+        select(OrganizationMembership)
+        .options(
+            selectinload(OrganizationMembership.workspace_membership)
+            .selectinload(WorkspaceMembership.role_assignments)
+            .selectinload(WorkspaceMembershipRole.role)
+        )
+        .where(OrganizationMembership.organization_id == organization_id)
+        .where(OrganizationMembership.status == "active")
+        .order_by(
+            OrganizationMembership.created_at.asc(),
+            OrganizationMembership.id.asc(),
+        )
+    )
+    return MemberRoleAssignmentsListResponse(
+        assignments=[
+            _member_role_assignment_summary(membership)
+            for membership in memberships.all()
+        ]
+    )
+
+
+@router.get(
     "/{organization_id}/members/{member_id}/roles",
     response_model=WorkspaceRoleAssignmentsListResponse,
 )
@@ -1475,8 +1737,9 @@ async def list_member_workspace_roles(
     session: SessionDep,
     context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
 ) -> WorkspaceRoleAssignmentsListResponse:
-    _require_membership(context, organization_id, MembershipRole.admin)
-    _require_permission(context, Permission.members_manage)
+    if await _active_membership_row(session, context, organization_id) is None:
+        raise _not_found()
+    _require_capability(context, organization_id, Capability.workspace_member_view)
 
     _membership, workspace_membership = (
         await _workspace_membership_for_organization_member(
@@ -1518,6 +1781,11 @@ async def assign_member_workspace_role(
 ) -> WorkspaceRoleAssignmentResponse:
     if await _active_membership_row(session, context, organization_id) is None:
         raise _not_found()
+    _require_capability(
+        context,
+        organization_id,
+        Capability.workspace_member_roles_manage,
+    )
     _require_capability(context, organization_id, Capability.role_assign)
 
     membership, workspace_membership = (
@@ -1532,9 +1800,16 @@ async def assign_member_workspace_role(
         raise _not_found()
     if membership.user_id == context.user.id:
         raise _forbidden("Cannot assign workspace roles to yourself")
-    role = await session.get(Role, payload.role_id)
+    role = await session.scalar(
+        select(Role)
+        .options(
+            selectinload(Role.capability_links).selectinload(RoleCapability.capability)
+        )
+        .where(Role.id == payload.role_id)
+    )
     if role is None:
         raise _not_found()
+    _require_role_capabilities_administerable(context, organization_id, role)
 
     existing_assignment = await session.scalar(
         select(WorkspaceMembershipRole)
@@ -1615,6 +1890,11 @@ async def remove_member_workspace_role(
 ) -> None:
     if await _active_membership_row(session, context, organization_id) is None:
         raise _not_found()
+    _require_capability(
+        context,
+        organization_id,
+        Capability.workspace_member_roles_manage,
+    )
     _require_capability(context, organization_id, Capability.role_assign)
 
     membership, workspace_membership = (
@@ -1631,7 +1911,11 @@ async def remove_member_workspace_role(
         raise _forbidden("Cannot remove workspace roles from yourself")
     assignment = await session.scalar(
         select(WorkspaceMembershipRole)
-        .options(selectinload(WorkspaceMembershipRole.role))
+        .options(
+            selectinload(WorkspaceMembershipRole.role)
+            .selectinload(Role.capability_links)
+            .selectinload(RoleCapability.capability)
+        )
         .where(WorkspaceMembershipRole.membership_id == workspace_membership.id)
         .where(WorkspaceMembershipRole.role_id == role_id)
     )
@@ -1639,6 +1923,7 @@ async def remove_member_workspace_role(
         raise _not_found()
 
     role = assignment.role
+    _require_role_capabilities_administerable(context, organization_id, role)
     await session.delete(assignment)
     await RealtimePublisher(session).publish(
         organization_id=organization_id,
@@ -1677,6 +1962,67 @@ async def remove_member_workspace_role(
             membership=membership,
             action="removed",
             role=role,
+        ),
+    )
+    await session.commit()
+
+
+@router.delete(
+    "/{organization_id}/members/{member_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def remove_organization_member(
+    organization_id: UUID,
+    member_id: UUID,
+    session: SessionDep,
+    context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
+) -> None:
+    if await _active_membership_row(session, context, organization_id) is None:
+        raise _not_found()
+    _require_capability(context, organization_id, Capability.workspace_member_remove)
+
+    membership, workspace_membership = (
+        await _workspace_membership_for_organization_member(
+            session,
+            organization_id=organization_id,
+            member_id=member_id,
+            active_only=True,
+        )
+    )
+    if workspace_membership is None:
+        raise _not_found()
+    if (
+        membership.workspace_permission == WorkspacePermission.owner
+        and await _active_owner_count(session, organization_id) <= 1
+    ):
+        raise _conflict("Cannot remove the last workspace owner")
+
+    membership.status = "removed"
+    workspace_membership.status = "removed"
+    await RealtimePublisher(session).publish(
+        organization_id=organization_id,
+        event_type=RealtimeEventType.member_removed,
+        actor=context.user,
+        entity_type="member",
+        entity_id=membership.id,
+        payload={
+            "membershipId": str(membership.id),
+            "userId": str(membership.user_id),
+            "workspaceId": str(organization_id),
+            "status": membership.status,
+        },
+    )
+    await RealtimePublisher(session).publish(
+        organization_id=organization_id,
+        event_type=RealtimeEventType.profile_membership_updated,
+        actor=context.user,
+        entity_type="profile",
+        entity_id=workspace_membership.profile_id,
+        payload=_profile_workspace_payload(
+            profile_id=workspace_membership.profile_id,
+            workspace_id=organization_id,
+            membership_id=membership.id,
+            status=membership.status,
         ),
     )
     await session.commit()
