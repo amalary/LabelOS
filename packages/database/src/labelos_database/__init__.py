@@ -29,6 +29,7 @@ from labelos_database.models import (
     Organization,
     OrganizationMembership,
     ProfessionalRole,
+    PROFILE_MODULE_RELATIONSHIPS,
     ProfileAttribute,
     ProfileLink,
     ProfileModuleMixin,
