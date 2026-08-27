@@ -12,6 +12,7 @@ from labelos_database.capabilities import Capability
 from labelos_database.models import (
     Artist,
     ArtistProfile,
+    Campaign,
     MembershipDepartmentAccess,
     MembershipRole,
     Organization,
@@ -898,6 +899,14 @@ class AuthorizationService:
                     .join(ArtistProfile.artist)
                     .where(ArtistProfile.id == resource_id)
                     .where(Artist.organization_id == workspace_id)
+                )
+            ) is not None
+        if kind == ResourceKind.campaign:
+            return (
+                await session.scalar(
+                    select(Campaign.id)
+                    .where(Campaign.id == resource_id)
+                    .where(Campaign.organization_id == workspace_id)
                 )
             ) is not None
 

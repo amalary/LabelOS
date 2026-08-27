@@ -25,6 +25,7 @@ from labelos_api.authorization import (
 )
 from labelos_api.services import campaign_service
 from labelos_api.services.campaign_service import (
+    CampaignAuthorizationError,
     CampaignCreate,
     CampaignLifecycleError,
     CampaignNotFoundError,
@@ -225,7 +226,11 @@ async def _current_workspace_membership(
     )
 
 
-def _service_error(exc: CampaignNotFoundError | CampaignRelationshipError) -> None:
+def _service_error(
+    exc: CampaignNotFoundError | CampaignRelationshipError | CampaignAuthorizationError,
+) -> None:
+    if isinstance(exc, CampaignAuthorizationError):
+        _raise_capability_denial(exc.reason)
     if isinstance(exc, CampaignNotFoundError):
         raise _not_found() from exc
     raise _bad_request(str(exc)) from exc
@@ -328,7 +333,14 @@ async def list_campaigns(
         workspace_id=workspace_id,
         capability=Capability.marketing_campaign_view,
     )
-    campaigns = await campaign_service.list_workspace_campaigns(session, workspace_id)
+    try:
+        campaigns = await campaign_service.list_workspace_campaigns(
+            session,
+            workspace_id,
+            actor=context,
+        )
+    except CampaignAuthorizationError as exc:
+        _service_error(exc)
     return CampaignsListResponse(
         campaigns=[_campaign_response(campaign) for campaign in campaigns],
         total=len(campaigns),
@@ -368,8 +380,9 @@ async def create_campaign(
                 created_by_user_id=context.user.id,
                 created_by_profile_id=membership.profile_id,
             ),
+            actor=context,
         )
-    except CampaignRelationshipError as exc:
+    except (CampaignRelationshipError, CampaignAuthorizationError) as exc:
         _service_error(exc)
     return await _load_campaign_response(
         session,
@@ -399,8 +412,9 @@ async def get_campaign(
             session,
             workspace_id,
             campaign_id,
+            actor=context,
         )
-    except CampaignNotFoundError as exc:
+    except (CampaignNotFoundError, CampaignAuthorizationError) as exc:
         _service_error(exc)
     return _campaign_response(campaign)
 
@@ -428,8 +442,13 @@ async def update_campaign(
             workspace_id,
             campaign_id,
             CampaignUpdate(**payload.model_dump(exclude_unset=True)),
+            actor=context,
         )
-    except (CampaignNotFoundError, CampaignRelationshipError) as exc:
+    except (
+        CampaignNotFoundError,
+        CampaignRelationshipError,
+        CampaignAuthorizationError,
+    ) as exc:
         _service_error(exc)
     return await _load_campaign_response(
         session,
@@ -461,8 +480,9 @@ async def update_campaign_status(
             workspace_id,
             campaign_id,
             payload.status,
+            actor=context,
         )
-    except CampaignNotFoundError as exc:
+    except (CampaignNotFoundError, CampaignAuthorizationError) as exc:
         _service_error(exc)
     except CampaignLifecycleError as exc:
         raise _conflict(str(exc)) from exc
@@ -494,8 +514,9 @@ async def archive_campaign(
             session,
             workspace_id,
             campaign_id,
+            actor=context,
         )
-    except CampaignNotFoundError as exc:
+    except (CampaignNotFoundError, CampaignAuthorizationError) as exc:
         _service_error(exc)
     except CampaignLifecycleError as exc:
         raise _conflict(str(exc)) from exc
@@ -527,8 +548,9 @@ async def list_campaign_members(
             session,
             workspace_id,
             campaign_id,
+            actor=context,
         )
-    except CampaignNotFoundError as exc:
+    except (CampaignNotFoundError, CampaignAuthorizationError) as exc:
         _service_error(exc)
     return CampaignMembersListResponse(
         members=[_member_response(link) for link in links]
@@ -559,13 +581,15 @@ async def upsert_campaign_member(
             campaign_id,
             payload.workspace_membership_id,
             participation_status=payload.participation_status,
+            actor=context,
         )
-    except CampaignRelationshipError as exc:
+    except (CampaignRelationshipError, CampaignAuthorizationError) as exc:
         _service_error(exc)
     links = await campaign_service.list_campaign_members(
         session,
         workspace_id,
         campaign_id,
+        actor=context,
     )
     for loaded in links:
         if loaded.workspace_membership_id == link.workspace_membership_id:
@@ -596,8 +620,9 @@ async def remove_campaign_member(
             workspace_id,
             campaign_id,
             workspace_membership_id,
+            actor=context,
         )
-    except CampaignNotFoundError as exc:
+    except (CampaignNotFoundError, CampaignAuthorizationError) as exc:
         _service_error(exc)
     if not removed:
         raise _not_found()
@@ -625,8 +650,9 @@ async def list_campaign_artists(
             session,
             workspace_id,
             campaign_id,
+            actor=context,
         )
-    except CampaignNotFoundError as exc:
+    except (CampaignNotFoundError, CampaignAuthorizationError) as exc:
         _service_error(exc)
     return CampaignArtistsListResponse(
         artists=[_artist_link_response(link) for link in links]
@@ -658,13 +684,15 @@ async def upsert_campaign_artist(
             payload.artist_id,
             relationship_kind=payload.relationship_kind,
             sort_order=payload.sort_order,
+            actor=context,
         )
-    except CampaignRelationshipError as exc:
+    except (CampaignRelationshipError, CampaignAuthorizationError) as exc:
         _service_error(exc)
     links = await campaign_service.list_campaign_artists(
         session,
         workspace_id,
         campaign_id,
+        actor=context,
     )
     for loaded in links:
         if loaded.artist_id == link.artist_id:
@@ -695,8 +723,9 @@ async def remove_campaign_artist(
             workspace_id,
             campaign_id,
             artist_id,
+            actor=context,
         )
-    except CampaignNotFoundError as exc:
+    except (CampaignNotFoundError, CampaignAuthorizationError) as exc:
         _service_error(exc)
     if not removed:
         raise _not_found()
@@ -724,8 +753,9 @@ async def list_campaign_releases(
             session,
             workspace_id,
             campaign_id,
+            actor=context,
         )
-    except CampaignNotFoundError as exc:
+    except (CampaignNotFoundError, CampaignAuthorizationError) as exc:
         _service_error(exc)
     return CampaignReleasesListResponse(
         releases=[_release_link_response(link) for link in links]
@@ -756,13 +786,15 @@ async def upsert_campaign_release(
             campaign_id,
             payload.release_id,
             relationship_kind=payload.relationship_kind,
+            actor=context,
         )
-    except CampaignRelationshipError as exc:
+    except (CampaignRelationshipError, CampaignAuthorizationError) as exc:
         _service_error(exc)
     links = await campaign_service.list_campaign_releases(
         session,
         workspace_id,
         campaign_id,
+        actor=context,
     )
     for loaded in links:
         if loaded.release_id == link.release_id:
@@ -793,8 +825,9 @@ async def remove_campaign_release(
             workspace_id,
             campaign_id,
             release_id,
+            actor=context,
         )
-    except CampaignNotFoundError as exc:
+    except (CampaignNotFoundError, CampaignAuthorizationError) as exc:
         _service_error(exc)
     if not removed:
         raise _not_found()

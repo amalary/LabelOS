@@ -13,6 +13,13 @@ from labelos_database.models import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from labelos_api.authorization import (
+    AuthorizationActorInput,
+    AuthorizationResource,
+    Capability,
+    ResourceKind,
+    authorization_service,
+)
 from labelos_api.repositories import campaign_relationships, campaigns
 
 
@@ -30,6 +37,12 @@ class CampaignRelationshipError(CampaignServiceError):
 
 class CampaignLifecycleError(CampaignServiceError):
     pass
+
+
+class CampaignAuthorizationError(CampaignServiceError):
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 ALLOWED_CAMPAIGN_TRANSITIONS: dict[CampaignStatus, frozenset[CampaignStatus]] = {
@@ -194,6 +207,35 @@ async def _validate_relationships(
         raise CampaignRelationshipError("release_id must belong to workspace")
 
 
+async def _require_capability(
+    session: AsyncSession,
+    *,
+    actor: AuthorizationActorInput | None,
+    workspace_id: UUID,
+    capability: Capability,
+    campaign_id: UUID | None = None,
+) -> None:
+    if actor is None:
+        return
+    resource_kind = (
+        ResourceKind.campaign if campaign_id is not None else ResourceKind.workspace
+    )
+    resource = AuthorizationResource(
+        kind=resource_kind,
+        id=campaign_id or workspace_id,
+        workspace_id=workspace_id,
+    )
+    decision = await authorization_service.decide_capability(
+        session,
+        actor=actor,
+        workspace=workspace_id,
+        capability=capability,
+        resource=resource,
+    )
+    if not decision.allowed:
+        raise CampaignAuthorizationError(decision.reason)
+
+
 def _create_values(payload: CampaignCreate) -> dict[str, object]:
     values: dict[str, object] = {
         "name": payload.name,
@@ -228,7 +270,15 @@ def _update_values(payload: CampaignUpdate) -> dict[str, object]:
 async def list_workspace_campaigns(
     session: AsyncSession,
     workspace_id: UUID,
+    *,
+    actor: AuthorizationActorInput | None = None,
 ) -> list[Campaign]:
+    await _require_capability(
+        session,
+        actor=actor,
+        workspace_id=workspace_id,
+        capability=Capability.marketing_campaign_view,
+    )
     return await campaigns.list_campaigns(session, workspace_id)
 
 
@@ -236,7 +286,16 @@ async def get_campaign_by_id(
     session: AsyncSession,
     workspace_id: UUID,
     campaign_id: UUID,
+    *,
+    actor: AuthorizationActorInput | None = None,
 ) -> Campaign:
+    await _require_capability(
+        session,
+        actor=actor,
+        workspace_id=workspace_id,
+        capability=Capability.marketing_campaign_view,
+        campaign_id=campaign_id,
+    )
     campaign = await campaigns.get_campaign(session, workspace_id, campaign_id)
     if campaign is None:
         raise CampaignNotFoundError("Campaign not found")
@@ -247,7 +306,15 @@ async def create_campaign(
     session: AsyncSession,
     workspace_id: UUID,
     payload: CampaignCreate,
+    *,
+    actor: AuthorizationActorInput | None = None,
 ) -> Campaign:
+    await _require_capability(
+        session,
+        actor=actor,
+        workspace_id=workspace_id,
+        capability=Capability.marketing_campaign_create,
+    )
     values = _create_values(payload)
     await _validate_relationships(session, workspace_id, values)
     campaign = await campaigns.create_campaign(session, workspace_id, values)
@@ -260,7 +327,16 @@ async def update_campaign(
     workspace_id: UUID,
     campaign_id: UUID,
     payload: CampaignUpdate,
+    *,
+    actor: AuthorizationActorInput | None = None,
 ) -> Campaign:
+    await _require_capability(
+        session,
+        actor=actor,
+        workspace_id=workspace_id,
+        capability=Capability.marketing_campaign_edit,
+        campaign_id=campaign_id,
+    )
     values = _update_values(payload)
     await _validate_relationships(session, workspace_id, values)
     campaign = await campaigns.update_campaign(
@@ -280,7 +356,16 @@ async def change_campaign_status(
     workspace_id: UUID,
     campaign_id: UUID,
     status: CampaignStatus | str,
+    *,
+    actor: AuthorizationActorInput | None = None,
 ) -> Campaign:
+    await _require_capability(
+        session,
+        actor=actor,
+        workspace_id=workspace_id,
+        capability=Capability.marketing_campaign_approve,
+        campaign_id=campaign_id,
+    )
     campaign = await get_campaign_by_id(session, workspace_id, campaign_id)
     campaign.status = _assert_valid_transition(campaign.status, status)
     await session.commit()
@@ -291,7 +376,16 @@ async def archive_campaign(
     session: AsyncSession,
     workspace_id: UUID,
     campaign_id: UUID,
+    *,
+    actor: AuthorizationActorInput | None = None,
 ) -> Campaign:
+    await _require_capability(
+        session,
+        actor=actor,
+        workspace_id=workspace_id,
+        capability=Capability.marketing_campaign_edit,
+        campaign_id=campaign_id,
+    )
     return await change_campaign_status(
         session,
         workspace_id,
@@ -307,7 +401,15 @@ async def add_campaign_member(
     workspace_membership_id: UUID,
     *,
     participation_status: str = "active",
+    actor: AuthorizationActorInput | None = None,
 ) -> CampaignMember:
+    await _require_capability(
+        session,
+        actor=actor,
+        workspace_id=workspace_id,
+        capability=Capability.marketing_campaign_edit,
+        campaign_id=campaign_id,
+    )
     link = await campaign_relationships.add_campaign_member(
         session,
         workspace_id,
@@ -327,7 +429,16 @@ async def list_campaign_members(
     session: AsyncSession,
     workspace_id: UUID,
     campaign_id: UUID,
+    *,
+    actor: AuthorizationActorInput | None = None,
 ) -> list[CampaignMember]:
+    await _require_capability(
+        session,
+        actor=actor,
+        workspace_id=workspace_id,
+        capability=Capability.marketing_campaign_view,
+        campaign_id=campaign_id,
+    )
     links = await campaign_relationships.list_campaign_members(
         session,
         workspace_id,
@@ -343,7 +454,16 @@ async def remove_campaign_member(
     workspace_id: UUID,
     campaign_id: UUID,
     workspace_membership_id: UUID,
+    *,
+    actor: AuthorizationActorInput | None = None,
 ) -> bool:
+    await _require_capability(
+        session,
+        actor=actor,
+        workspace_id=workspace_id,
+        capability=Capability.marketing_campaign_edit,
+        campaign_id=campaign_id,
+    )
     await get_campaign_by_id(session, workspace_id, campaign_id)
     removed = await campaign_relationships.remove_campaign_member(
         session,
@@ -359,7 +479,16 @@ async def list_campaign_artists(
     session: AsyncSession,
     workspace_id: UUID,
     campaign_id: UUID,
+    *,
+    actor: AuthorizationActorInput | None = None,
 ) -> list[CampaignArtist]:
+    await _require_capability(
+        session,
+        actor=actor,
+        workspace_id=workspace_id,
+        capability=Capability.marketing_campaign_view,
+        campaign_id=campaign_id,
+    )
     links = await campaign_relationships.list_campaign_artists(
         session,
         workspace_id,
@@ -378,7 +507,15 @@ async def associate_artist(
     *,
     relationship_kind: str = "collaborator",
     sort_order: int = 0,
+    actor: AuthorizationActorInput | None = None,
 ) -> CampaignArtist:
+    await _require_capability(
+        session,
+        actor=actor,
+        workspace_id=workspace_id,
+        capability=Capability.marketing_campaign_edit,
+        campaign_id=campaign_id,
+    )
     link = await campaign_relationships.add_campaign_artist(
         session,
         workspace_id,
@@ -399,7 +536,16 @@ async def list_campaign_releases(
     session: AsyncSession,
     workspace_id: UUID,
     campaign_id: UUID,
+    *,
+    actor: AuthorizationActorInput | None = None,
 ) -> list[CampaignRelease]:
+    await _require_capability(
+        session,
+        actor=actor,
+        workspace_id=workspace_id,
+        capability=Capability.marketing_campaign_view,
+        campaign_id=campaign_id,
+    )
     links = await campaign_relationships.list_campaign_releases(
         session,
         workspace_id,
@@ -415,7 +561,16 @@ async def remove_artist_association(
     workspace_id: UUID,
     campaign_id: UUID,
     artist_id: UUID,
+    *,
+    actor: AuthorizationActorInput | None = None,
 ) -> bool:
+    await _require_capability(
+        session,
+        actor=actor,
+        workspace_id=workspace_id,
+        capability=Capability.marketing_campaign_edit,
+        campaign_id=campaign_id,
+    )
     await get_campaign_by_id(session, workspace_id, campaign_id)
     removed = await campaign_relationships.remove_campaign_artist(
         session,
@@ -434,7 +589,15 @@ async def associate_release(
     release_id: UUID,
     *,
     relationship_kind: str = "related",
+    actor: AuthorizationActorInput | None = None,
 ) -> CampaignRelease:
+    await _require_capability(
+        session,
+        actor=actor,
+        workspace_id=workspace_id,
+        capability=Capability.marketing_campaign_edit,
+        campaign_id=campaign_id,
+    )
     link = await campaign_relationships.add_campaign_release(
         session,
         workspace_id,
@@ -455,7 +618,16 @@ async def remove_release_association(
     workspace_id: UUID,
     campaign_id: UUID,
     release_id: UUID,
+    *,
+    actor: AuthorizationActorInput | None = None,
 ) -> bool:
+    await _require_capability(
+        session,
+        actor=actor,
+        workspace_id=workspace_id,
+        capability=Capability.marketing_campaign_edit,
+        campaign_id=campaign_id,
+    )
     await get_campaign_by_id(session, workspace_id, campaign_id)
     removed = await campaign_relationships.remove_campaign_release(
         session,

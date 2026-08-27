@@ -9,6 +9,7 @@ from labelos_database.base import Base
 from labelos_database.models import (
     Artist,
     Campaign,
+    CampaignMember,
     CampaignStatus,
     CampaignType,
     Department,
@@ -22,6 +23,7 @@ from labelos_database.models import (
     WorkspaceMembership,
     WorkspacePermission,
 )
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -47,6 +49,7 @@ class SeededCampaignApi:
     outside_profile_id: UUID
     owner_workspace_membership_id: UUID
     member_workspace_membership_id: UUID
+    viewer_workspace_membership_id: UUID
     outside_workspace_membership_id: UUID
     artist_id: UUID
     outside_artist_id: UUID
@@ -219,6 +222,7 @@ def campaigns_client(
                 outside_profile_id=outside_profile.id,
                 owner_workspace_membership_id=owner_workspace_membership.id,
                 member_workspace_membership_id=member_workspace_membership.id,
+                viewer_workspace_membership_id=viewer_workspace_membership.id,
                 outside_workspace_membership_id=outside_workspace_membership.id,
                 artist_id=artist.id,
                 outside_artist_id=outside_artist.id,
@@ -283,6 +287,36 @@ def _set_context(
         )
 
     client.app.dependency_overrides[get_current_user_context] = override_context
+
+
+async def _grant_campaign_capabilities(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    seeded: SeededCampaignApi,
+    *capabilities: str,
+) -> None:
+    async with sessionmaker() as session:
+        membership = await session.scalar(
+            select(OrganizationMembership)
+            .where(OrganizationMembership.organization_id == seeded.workspace_id)
+            .where(OrganizationMembership.user_id == seeded.viewer_user_id)
+        )
+        assert membership is not None
+        membership.capability_permissions = list(capabilities)
+        await session.commit()
+
+
+async def _add_viewer_to_campaign(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    seeded: SeededCampaignApi,
+) -> None:
+    async with sessionmaker() as session:
+        session.add(
+            CampaignMember(
+                campaign_id=seeded.campaign_id,
+                workspace_membership_id=seeded.viewer_workspace_membership_id,
+            )
+        )
+        await session.commit()
 
 
 def test_campaigns_require_authentication(client: TestClient) -> None:
@@ -449,6 +483,154 @@ def test_campaign_api_returns_clear_errors_for_scope_capability_and_state(
     )
     assert cross_workspace.status_code == 404
     assert cross_workspace.json() == {"detail": "Not found"}
+
+
+def test_campaign_api_allows_explicit_campaign_capability_grants(
+    campaigns_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededCampaignApi,
+    ],
+) -> None:
+    client, sessionmaker, seeded = campaigns_client
+    asyncio.run(
+        _grant_campaign_capabilities(
+            sessionmaker,
+            seeded,
+            "marketing.campaign.view",
+            "marketing.campaign.create",
+            "marketing.campaign.edit",
+            "marketing.campaign.approve",
+        )
+    )
+    _set_context(
+        client,
+        seeded,
+        user_id=seeded.viewer_user_id,
+        email="campaign-viewer@example.com",
+        display_name="Viewer",
+        workspace_permission=WorkspacePermission.guest,
+    )
+    base = f"/api/v1/workspaces/{seeded.workspace_id}/campaigns"
+
+    listed = client.get(base)
+    created = client.post(base, json={"name": "Viewer Created Campaign"})
+    campaign_id = created.json()["id"]
+    updated = client.patch(f"{base}/{campaign_id}", json={"name": "Viewer Updated"})
+    planned = client.patch(f"{base}/{campaign_id}/status", json={"status": "planning"})
+    archived = client.post(f"{base}/{campaign_id}/archive")
+
+    assert listed.status_code == 200
+    assert created.status_code == 201
+    assert updated.status_code == 200
+    assert updated.json()["name"] == "Viewer Updated"
+    assert planned.status_code == 200
+    assert planned.json()["status"] == "planning"
+    assert archived.status_code == 200
+    assert archived.json()["status"] == "archived"
+
+
+def test_campaign_api_denies_actions_without_required_campaign_capability(
+    campaigns_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededCampaignApi,
+    ],
+) -> None:
+    client, sessionmaker, seeded = campaigns_client
+    asyncio.run(
+        _grant_campaign_capabilities(
+            sessionmaker,
+            seeded,
+            "marketing.campaign.view",
+        )
+    )
+    _set_context(
+        client,
+        seeded,
+        user_id=seeded.viewer_user_id,
+        email="campaign-viewer@example.com",
+        display_name="Viewer",
+        workspace_permission=WorkspacePermission.guest,
+    )
+    base = f"/api/v1/workspaces/{seeded.workspace_id}/campaigns"
+
+    listed = client.get(base)
+    created = client.post(base, json={"name": "Denied Campaign"})
+    updated = client.patch(f"{base}/{seeded.campaign_id}", json={"name": "Denied"})
+    status_update = client.patch(
+        f"{base}/{seeded.campaign_id}/status",
+        json={"status": "planning"},
+    )
+    member_update = client.put(
+        f"{base}/{seeded.campaign_id}/members",
+        json={"workspace_membership_id": str(seeded.member_workspace_membership_id)},
+    )
+
+    assert listed.status_code == 200
+    for response in (created, updated, status_update, member_update):
+        assert response.status_code == 403
+        assert response.json() == {"detail": "Insufficient capability permission"}
+
+
+def test_campaign_membership_does_not_bypass_campaign_authorization(
+    campaigns_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededCampaignApi,
+    ],
+) -> None:
+    client, sessionmaker, seeded = campaigns_client
+    asyncio.run(_add_viewer_to_campaign(sessionmaker, seeded))
+    _set_context(
+        client,
+        seeded,
+        user_id=seeded.viewer_user_id,
+        email="campaign-viewer@example.com",
+        display_name="Viewer",
+        workspace_permission=WorkspacePermission.guest,
+    )
+
+    response = client.get(
+        f"/api/v1/workspaces/{seeded.workspace_id}/campaigns/"
+        f"{seeded.campaign_id}/members"
+    )
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Insufficient capability permission"}
+
+
+def test_campaign_api_preserves_workspace_isolation_with_campaign_capability(
+    campaigns_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededCampaignApi,
+    ],
+) -> None:
+    client, sessionmaker, seeded = campaigns_client
+    asyncio.run(
+        _grant_campaign_capabilities(
+            sessionmaker,
+            seeded,
+            "marketing.campaign.view",
+        )
+    )
+    _set_context(
+        client,
+        seeded,
+        user_id=seeded.viewer_user_id,
+        email="campaign-viewer@example.com",
+        display_name="Viewer",
+        workspace_permission=WorkspacePermission.guest,
+    )
+
+    response = client.get(
+        f"/api/v1/workspaces/{seeded.workspace_id}/campaigns/"
+        f"{seeded.outside_campaign_id}"
+    )
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Not found"}
 
 
 def test_campaign_openapi_contract_exposes_stable_fields(
