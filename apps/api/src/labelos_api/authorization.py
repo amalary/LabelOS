@@ -489,13 +489,22 @@ class AuthorizationService:
             )
 
         allowed = required in effective
+        reason = "capability_allowed" if allowed else "missing_capability"
+        if allowed:
+            allowed, reason = await self._resource_action_is_authorized(
+                session,
+                capability=required,
+                membership=membership,
+                workspace_membership=workspace_membership,
+                resource=normalized_resource,
+            )
         return AuthorizationDecision(
             actor=actor_ref,
             action=required,
             workspace_id=workspace_id,
             resource=normalized_resource,
             allowed=allowed,
-            reason="capability_allowed" if allowed else "missing_capability",
+            reason=reason,
         )
 
     def can(
@@ -893,6 +902,48 @@ class AuthorizationService:
             ) is not None
 
         return False
+
+    async def _resource_action_is_authorized(
+        self,
+        session: AsyncSession,
+        *,
+        capability: Capability,
+        membership: OrganizationMembership | LegacyWorkspaceAuthorizationMembership,
+        workspace_membership: WorkspaceMembership,
+        resource: AuthorizationResource | None,
+    ) -> tuple[bool, str]:
+        if (
+            capability != Capability.artist_profile_edit
+            or resource is None
+            or str(resource.kind) != ResourceKind.artist_profile.value
+            or not isinstance(resource.id, UUID)
+        ):
+            return True, "capability_allowed"
+
+        target_profile_id = await session.scalar(
+            select(ArtistProfile.universal_profile_id).where(
+                ArtistProfile.id == resource.id
+            )
+        )
+        if target_profile_id is None:
+            return False, "invalid_resource_scope"
+        if target_profile_id == workspace_membership.profile_id:
+            return True, "capability_allowed"
+        if membership.workspace_permission in {
+            WorkspacePermission.owner,
+            WorkspacePermission.admin,
+        }:
+            return True, "capability_allowed"
+
+        for role in workspace_membership.roles:
+            has_capability = any(
+                capability_row.key == capability.value
+                for capability_row in role.capabilities
+            )
+            if has_capability and role.key != "artist":
+                return True, "capability_allowed"
+
+        return False, "resource_owner_mismatch"
 
     def _actor_ref(self, actor: WorkspaceAuthorizationContext) -> AuthorizationActor:
         actor_ref = getattr(actor, "authorization_actor", None)

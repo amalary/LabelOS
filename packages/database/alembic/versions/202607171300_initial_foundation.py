@@ -77,7 +77,6 @@ def upgrade() -> None:
         "member",
         name="organization_membership_role",
     )
-    organization_membership_role.create(op.get_bind(), checkfirst=True)
     op.create_table(
         "organization_memberships",
         sa.Column("id", sa.Uuid(), nullable=False),
