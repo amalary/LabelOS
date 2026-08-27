@@ -205,9 +205,19 @@ const activityEventMappers: Partial<Record<ActivityEventType, ActivityEventMappe
     description: `${entityName(event, "A release")} was updated`,
     tone: "release",
   }),
+  "campaign.created": (event) => ({
+    title: "Campaign created",
+    description: `${actorName(event)} created ${textValue(event.payload, ["campaignName", "name"], "a campaign")}`,
+    tone: "campaign",
+  }),
   "campaign.updated": (event) => ({
     title: "Campaign updated",
-    description: `${entityName(event, "A campaign")} was updated`,
+    description: `${textValue(event.payload, ["campaignName", "name"], entityName(event, "A campaign"))} was updated`,
+    tone: "campaign",
+  }),
+  "campaign.status_changed": (event) => ({
+    title: "Campaign status changed",
+    description: `${textValue(event.payload, ["campaignName", "name"], "A campaign")} moved to ${textValue(event.payload, ["status"], "a new status")}`,
     tone: "campaign",
   }),
   "campaign.member_added": (event) => ({
@@ -223,6 +233,56 @@ const activityEventMappers: Partial<Record<ActivityEventType, ActivityEventMappe
   "campaign.member_removed": (event) => ({
     title: "Campaign member removed",
     description: `${textValue(event.payload, ["displayName"], "A teammate")} left ${textValue(event.payload, ["campaignName", "name"], "a campaign")}`,
+    tone: "campaign",
+  }),
+  "campaign.artist_associated": (event) => ({
+    title: "Campaign artist associated",
+    description: `${textValue(event.payload, ["artistName"], "An artist")} was linked to ${textValue(event.payload, ["campaignName", "name"], "a campaign")}`,
+    tone: "campaign",
+  }),
+  "campaign.artist_removed": (event) => ({
+    title: "Campaign artist removed",
+    description: `${textValue(event.payload, ["artistName"], "An artist")} was removed from ${textValue(event.payload, ["campaignName", "name"], "a campaign")}`,
+    tone: "campaign",
+  }),
+  "campaign.release_associated": (event) => ({
+    title: "Campaign release associated",
+    description: `${textValue(event.payload, ["releaseTitle"], "A release")} was linked to ${textValue(event.payload, ["campaignName", "name"], "a campaign")}`,
+    tone: "campaign",
+  }),
+  "campaign.release_removed": (event) => ({
+    title: "Campaign release removed",
+    description: `${textValue(event.payload, ["releaseTitle"], "A release")} was removed from ${textValue(event.payload, ["campaignName", "name"], "a campaign")}`,
+    tone: "campaign",
+  }),
+  "campaign.goal_created": (event) => ({
+    title: "Campaign goal created",
+    description: `${textValue(event.payload, ["goalTitle", "title"], "A goal")} was added to ${textValue(event.payload, ["campaignName"], "a campaign")}`,
+    tone: "campaign",
+  }),
+  "campaign.goal_updated": (event) => ({
+    title: "Campaign goal updated",
+    description: `${textValue(event.payload, ["goalTitle", "title"], "A goal")} was updated`,
+    tone: "campaign",
+  }),
+  "campaign.goal_completed": (event) => ({
+    title: "Campaign goal completed",
+    description: `${textValue(event.payload, ["goalTitle", "title"], "A goal")} was completed`,
+    tone: "campaign",
+  }),
+  "campaign.milestone_created": (event) => ({
+    title: "Campaign milestone created",
+    description: `${textValue(event.payload, ["milestoneTitle", "title"], "A milestone")} was added to ${textValue(event.payload, ["campaignName"], "a campaign")}`,
+    tone: "campaign",
+  }),
+  "campaign.milestone_updated": (event) => ({
+    title: "Campaign milestone updated",
+    description: `${textValue(event.payload, ["milestoneTitle", "title"], "A milestone")} was updated`,
+    tone: "campaign",
+  }),
+  "campaign.milestone_completed": (event) => ({
+    title: "Campaign milestone completed",
+    description: `${textValue(event.payload, ["milestoneTitle", "title"], "A milestone")} was completed`,
     tone: "campaign",
   }),
   "approval.updated": (event) => ({

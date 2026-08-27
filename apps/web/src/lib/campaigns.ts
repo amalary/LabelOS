@@ -366,6 +366,38 @@ export function invalidateCampaignCache(predicate?: (key: string) => boolean) {
   }
 }
 
+export function shouldInvalidateCampaignRealtimeCacheKey({
+  campaignId,
+  eventType,
+  key,
+  workspaceId,
+}: {
+  campaignId: string | null;
+  eventType: string;
+  key: string;
+  workspaceId: string;
+}) {
+  if (key === campaignQueryKeys.workspaceList(workspaceId)) {
+    return true;
+  }
+  if (!key.startsWith(`${campaignQueryKeys.all}:`)) {
+    return false;
+  }
+  if (!campaignId) {
+    return key.startsWith(`campaigns:workspace-list:${workspaceId}`);
+  }
+  if (key === campaignQueryKeys.detail(workspaceId, campaignId)) {
+    return true;
+  }
+  if (eventType.startsWith("campaign.goal_")) {
+    return key === campaignQueryKeys.goals(workspaceId, campaignId);
+  }
+  if (eventType.startsWith("campaign.milestone_")) {
+    return key === campaignQueryKeys.milestones(workspaceId, campaignId);
+  }
+  return false;
+}
+
 export function clearCampaignCache() {
   cache.clear();
   activeMutationCount = 0;

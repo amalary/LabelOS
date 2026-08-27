@@ -320,6 +320,19 @@ async def _add_viewer_to_campaign(
         await session.commit()
 
 
+async def _realtime_events(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    organization_id: UUID,
+) -> list[RealtimeEvent]:
+    async with sessionmaker() as session:
+        rows = await session.scalars(
+            select(RealtimeEvent)
+            .where(RealtimeEvent.organization_id == organization_id)
+            .order_by(RealtimeEvent.created_at.asc(), RealtimeEvent.id.asc())
+        )
+        return list(rows.all())
+
+
 def test_campaigns_require_authentication(client: TestClient) -> None:
     response = client.get(f"/api/v1/workspaces/{uuid4()}/campaigns")
 
@@ -459,16 +472,7 @@ def test_campaign_team_membership_changes_publish_activity_events(
     assert updated.status_code == 200
     assert removed.status_code == 204
 
-    async def events() -> list[RealtimeEvent]:
-        async with sessionmaker() as session:
-            rows = await session.scalars(
-                select(RealtimeEvent)
-                .where(RealtimeEvent.organization_id == seeded.workspace_id)
-                .order_by(RealtimeEvent.created_at.asc())
-            )
-            return list(rows.all())
-
-    records = asyncio.run(events())
+    records = asyncio.run(_realtime_events(sessionmaker, seeded.workspace_id))
     assert [record.event_type for record in records] == [
         "campaign.member_added",
         "campaign.member_updated",
@@ -479,6 +483,127 @@ def test_campaign_team_membership_changes_publish_activity_events(
     assert records[0].actor_user_id == seeded.owner_user_id
     assert records[0].payload["displayName"] == "Campaign Member"
     assert records[1].payload["responsibilityLabel"] == "creative lead"
+
+
+def test_campaign_mutations_publish_structured_activity_events(
+    campaigns_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededCampaignApi,
+    ],
+) -> None:
+    client, sessionmaker, seeded = campaigns_client
+    _set_context(client, seeded)
+    base = f"/api/v1/workspaces/{seeded.workspace_id}/campaigns"
+
+    created = client.post(
+        base,
+        json={
+            "name": "Evented Campaign",
+            "campaign_type": "release",
+            "status": "planning",
+        },
+    )
+    assert created.status_code == 201
+    campaign_id = created.json()["id"]
+
+    updated = client.patch(
+        f"{base}/{campaign_id}",
+        json={"name": "Evented Campaign Updated"},
+    )
+    activated = client.patch(f"{base}/{campaign_id}/status", json={"status": "active"})
+    artist = client.put(
+        f"{base}/{campaign_id}/artists",
+        json={"artist_id": str(seeded.artist_id), "relationship_kind": "primary"},
+    )
+    release = client.put(
+        f"{base}/{campaign_id}/releases",
+        json={"release_id": str(seeded.release_id), "relationship_kind": "focus"},
+    )
+    goal = client.post(f"{base}/{campaign_id}/goals", json={"title": "Reach fans"})
+    goal_completed = client.patch(
+        f"{base}/{campaign_id}/goals/{goal.json()['id']}",
+        json={"status": "completed"},
+    )
+    milestone = client.post(
+        f"{base}/{campaign_id}/milestones",
+        json={"title": "Creative locked"},
+    )
+    milestone_completed = client.post(
+        f"{base}/{campaign_id}/milestones/{milestone.json()['id']}/complete"
+    )
+
+    for response in (
+        updated,
+        activated,
+        artist,
+        release,
+        goal,
+        goal_completed,
+        milestone,
+        milestone_completed,
+    ):
+        assert response.status_code in {200, 201}
+
+    records = [
+        record
+        for record in asyncio.run(_realtime_events(sessionmaker, seeded.workspace_id))
+        if record.entity_id == campaign_id
+    ]
+
+    assert [record.event_type for record in records] == [
+        "campaign.created",
+        "campaign.updated",
+        "campaign.status_changed",
+        "campaign.artist_associated",
+        "campaign.release_associated",
+        "campaign.goal_created",
+        "campaign.goal_completed",
+        "campaign.milestone_created",
+        "campaign.milestone_completed",
+    ]
+    assert all(record.entity_type == "campaign" for record in records)
+    assert all(record.actor_user_id == seeded.owner_user_id for record in records)
+    assert records[0].payload["campaignName"] == "Evented Campaign"
+    assert records[1].payload["changedFields"] == "name"
+    assert records[2].payload["previousStatus"] == "planning"
+    assert records[2].payload["status"] == "active"
+    assert records[3].payload["artistName"] == "Alpha Artist"
+    assert records[4].payload["releaseTitle"] == "Alpha Single"
+    assert records[7].payload["milestoneTitle"] == "Creative locked"
+
+
+def test_campaign_activity_events_preserve_workspace_isolation(
+    campaigns_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededCampaignApi,
+    ],
+) -> None:
+    client, sessionmaker, seeded = campaigns_client
+    _set_context(client, seeded)
+    base = f"/api/v1/workspaces/{seeded.workspace_id}/campaigns/{seeded.campaign_id}"
+
+    invalid_artist = client.put(
+        f"{base}/artists",
+        json={"artist_id": str(seeded.outside_artist_id)},
+    )
+    invalid_release = client.put(
+        f"{base}/releases",
+        json={"release_id": str(seeded.outside_release_id)},
+    )
+    invalid_member = client.put(
+        f"{base}/members",
+        json={"workspace_membership_id": str(seeded.outside_workspace_membership_id)},
+    )
+
+    assert invalid_artist.status_code == 400
+    assert invalid_release.status_code == 400
+    assert invalid_member.status_code == 400
+    assert asyncio.run(_realtime_events(sessionmaker, seeded.workspace_id)) == []
+    assert (
+        asyncio.run(_realtime_events(sessionmaker, seeded.outside_workspace_id)) == []
+    )
 
 
 def test_campaign_api_manages_goals_and_milestones(

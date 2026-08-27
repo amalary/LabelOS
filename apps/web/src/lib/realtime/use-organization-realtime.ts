@@ -13,6 +13,7 @@ import {
 import { usePathname, useRouter } from "next/navigation";
 
 import { clearOrganizationScopedBrowserCaches } from "../browser-cache";
+import { invalidateCampaignCache, shouldInvalidateCampaignRealtimeCacheKey } from "../campaigns";
 import { invalidateProfileCache } from "../profiles";
 import {
   invalidateWorkspaceCapabilityCache,
@@ -48,6 +49,7 @@ const OrganizationRealtimeContext = createContext<OrganizationRealtimeContextVal
 
 const maxRecentActivityEvents = 25;
 const profileEventPrefix = "profile.";
+const campaignEventPrefix = "campaign.";
 const artistProfileEventTypes = new Set<string>([
   "profile.artist_updated",
   "profile.artist_profile_created",
@@ -262,6 +264,20 @@ export function useOrganizationRealtime(organizationId: string | null): Organiza
               }),
             );
           }
+          if (event.type.startsWith(campaignEventPrefix)) {
+            const campaignId =
+              typeof event.payload.campaignId === "string"
+                ? event.payload.campaignId
+                : event.entity_id;
+            invalidateCampaignCache((key) =>
+              shouldInvalidateCampaignRealtimeCacheKey({
+                campaignId,
+                eventType: event.type,
+                key,
+                workspaceId: organizationId,
+              }),
+            );
+          }
           if (
             event.type === "member.updated" ||
             event.type === "member.role_changed" ||
@@ -283,7 +299,9 @@ export function useOrganizationRealtime(organizationId: string | null): Organiza
           }
           const isDashboardActivityRefresh =
             pathname === "/dashboard" && activityEventTypes.has(event.type);
-          if (!isDashboardActivityRefresh) {
+          const isCampaignWorkspaceRefresh =
+            pathname.startsWith("/campaigns") && event.type.startsWith(campaignEventPrefix);
+          if (!isDashboardActivityRefresh && !isCampaignWorkspaceRefresh) {
             clearOrganizationScopedBrowserCaches();
             router.refresh();
           }

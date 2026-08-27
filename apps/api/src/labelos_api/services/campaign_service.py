@@ -227,6 +227,68 @@ def _campaign_member_payload(
     }
 
 
+def _campaign_payload(
+    campaign: Campaign,
+    *,
+    action: str,
+    changed_fields: list[str] | None = None,
+    previous_status: str | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "action": action,
+        "campaignId": str(campaign.id),
+        "campaignName": campaign.name,
+        "name": campaign.name,
+        "status": (
+            campaign.status.value
+            if isinstance(campaign.status, CampaignStatus)
+            else str(campaign.status)
+        ),
+        "campaignType": (
+            campaign.campaign_type.value
+            if isinstance(campaign.campaign_type, CampaignType)
+            else str(campaign.campaign_type)
+        ),
+        "ownerProfileId": (
+            str(campaign.owner_profile_id)
+            if campaign.owner_profile_id is not None
+            else None
+        ),
+        "primaryArtistId": (
+            str(campaign.primary_artist_id)
+            if campaign.primary_artist_id is not None
+            else None
+        ),
+        "releaseId": (
+            str(campaign.release_id) if campaign.release_id is not None else None
+        ),
+    }
+    if changed_fields is not None:
+        payload["changedFields"] = ",".join(changed_fields)
+    if previous_status is not None:
+        payload["previousStatus"] = previous_status
+    return payload
+
+
+async def _publish_campaign_event(
+    session: AsyncSession,
+    *,
+    workspace_id: UUID,
+    event_type: RealtimeEventType,
+    actor: AuthorizationActorInput | None,
+    campaign: Campaign,
+    payload: dict[str, object] | None = None,
+) -> None:
+    await RealtimePublisher(session).publish(
+        organization_id=workspace_id,
+        event_type=event_type,
+        actor=_actor_user(actor),
+        entity_type="campaign",
+        entity_id=campaign.id,
+        payload=payload or _campaign_payload(campaign, action=event_type.value),
+    )
+
+
 async def _publish_campaign_member_event(
     session: AsyncSession,
     *,
@@ -244,6 +306,92 @@ async def _publish_campaign_member_event(
         entity_id=campaign.id,
         payload=_campaign_member_payload(campaign=campaign, link=link),
     )
+
+
+async def _get_campaign_for_event(
+    session: AsyncSession,
+    workspace_id: UUID,
+    campaign_id: UUID,
+) -> Campaign:
+    campaign = await campaigns.get_campaign(session, workspace_id, campaign_id)
+    if campaign is None:
+        raise CampaignNotFoundError("Campaign not found")
+    return campaign
+
+
+def _goal_payload(
+    *,
+    campaign: Campaign,
+    goal: CampaignGoal,
+    action: str,
+    changed_fields: list[str] | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "action": action,
+        "campaignId": str(campaign.id),
+        "campaignName": campaign.name,
+        "goalId": str(goal.id),
+        "goalTitle": goal.title,
+        "title": goal.title,
+        "status": goal.status,
+        "targetValue": goal.target_value,
+    }
+    if changed_fields is not None:
+        payload["changedFields"] = ",".join(changed_fields)
+    return payload
+
+
+def _milestone_payload(
+    *,
+    campaign: Campaign,
+    milestone: CampaignMilestone,
+    action: str,
+    changed_fields: list[str] | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "action": action,
+        "campaignId": str(campaign.id),
+        "campaignName": campaign.name,
+        "milestoneId": str(milestone.id),
+        "milestoneTitle": milestone.title,
+        "title": milestone.title,
+        "status": milestone.status,
+        "targetDate": (
+            milestone.target_date.isoformat()
+            if milestone.target_date is not None
+            else None
+        ),
+        "completedAt": (
+            milestone.completed_at.isoformat()
+            if milestone.completed_at is not None
+            else None
+        ),
+    }
+    if changed_fields is not None:
+        payload["changedFields"] = ",".join(changed_fields)
+    return payload
+
+
+def _relationship_payload(
+    *,
+    campaign: Campaign,
+    action: str,
+    relationship_kind: str | None = None,
+    artist_id: UUID | None = None,
+    artist_name: str | None = None,
+    release_id: UUID | None = None,
+    release_title: str | None = None,
+) -> dict[str, object]:
+    return {
+        "action": action,
+        "campaignId": str(campaign.id),
+        "campaignName": campaign.name,
+        "artistId": str(artist_id) if artist_id is not None else None,
+        "artistName": artist_name,
+        "releaseId": str(release_id) if release_id is not None else None,
+        "releaseTitle": release_title,
+        "relationshipKind": relationship_kind,
+    }
 
 
 async def _validate_profile_relationship(
@@ -478,6 +626,15 @@ async def create_campaign_goal(
     )
     if goal is None:
         raise CampaignNotFoundError("Campaign not found")
+    campaign = await _get_campaign_for_event(session, workspace_id, campaign_id)
+    await _publish_campaign_event(
+        session,
+        workspace_id=workspace_id,
+        event_type=RealtimeEventType.campaign_goal_created,
+        actor=actor,
+        campaign=campaign,
+        payload=_goal_payload(campaign=campaign, goal=goal, action="created"),
+    )
     await session.commit()
     return goal
 
@@ -499,15 +656,39 @@ async def update_campaign_goal(
         campaign_id=campaign_id,
     )
     await _ensure_campaign_exists(session, workspace_id, campaign_id)
+    values = _goal_update_values(payload)
     goal = await campaign_planning.update_goal(
         session,
         workspace_id,
         campaign_id,
         goal_id,
-        _goal_update_values(payload),
+        values,
     )
     if goal is None:
         raise CampaignPlanningItemNotFoundError("Campaign goal not found")
+    campaign = await _get_campaign_for_event(session, workspace_id, campaign_id)
+    event_type = (
+        RealtimeEventType.campaign_goal_completed
+        if values.get("status") == "completed"
+        else RealtimeEventType.campaign_goal_updated
+    )
+    await _publish_campaign_event(
+        session,
+        workspace_id=workspace_id,
+        event_type=event_type,
+        actor=actor,
+        campaign=campaign,
+        payload=_goal_payload(
+            campaign=campaign,
+            goal=goal,
+            action=(
+                "completed"
+                if event_type == RealtimeEventType.campaign_goal_completed
+                else "updated"
+            ),
+            changed_fields=sorted(values),
+        ),
+    )
     await session.commit()
     return goal
 
@@ -616,6 +797,19 @@ async def create_campaign_milestone(
     )
     if milestone is None:
         raise CampaignNotFoundError("Campaign not found")
+    campaign = await _get_campaign_for_event(session, workspace_id, campaign_id)
+    await _publish_campaign_event(
+        session,
+        workspace_id=workspace_id,
+        event_type=RealtimeEventType.campaign_milestone_created,
+        actor=actor,
+        campaign=campaign,
+        payload=_milestone_payload(
+            campaign=campaign,
+            milestone=milestone,
+            action="created",
+        ),
+    )
     await session.commit()
     return milestone
 
@@ -637,15 +831,39 @@ async def update_campaign_milestone(
         campaign_id=campaign_id,
     )
     await _ensure_campaign_exists(session, workspace_id, campaign_id)
+    values = _milestone_update_values(payload)
     milestone = await campaign_planning.update_milestone(
         session,
         workspace_id,
         campaign_id,
         milestone_id,
-        _milestone_update_values(payload),
+        values,
     )
     if milestone is None:
         raise CampaignPlanningItemNotFoundError("Campaign milestone not found")
+    campaign = await _get_campaign_for_event(session, workspace_id, campaign_id)
+    event_type = (
+        RealtimeEventType.campaign_milestone_completed
+        if values.get("status") == "completed"
+        else RealtimeEventType.campaign_milestone_updated
+    )
+    await _publish_campaign_event(
+        session,
+        workspace_id=workspace_id,
+        event_type=event_type,
+        actor=actor,
+        campaign=campaign,
+        payload=_milestone_payload(
+            campaign=campaign,
+            milestone=milestone,
+            action=(
+                "completed"
+                if event_type == RealtimeEventType.campaign_milestone_completed
+                else "updated"
+            ),
+            changed_fields=sorted(values),
+        ),
+    )
     await session.commit()
     return milestone
 
@@ -751,6 +969,14 @@ async def create_campaign(
     values = _create_values(payload)
     await _validate_relationships(session, workspace_id, values)
     campaign = await campaigns.create_campaign(session, workspace_id, values)
+    await _publish_campaign_event(
+        session,
+        workspace_id=workspace_id,
+        event_type=RealtimeEventType.campaign_created,
+        actor=actor,
+        campaign=campaign,
+        payload=_campaign_payload(campaign, action="created"),
+    )
     await session.commit()
     return campaign
 
@@ -780,6 +1006,18 @@ async def update_campaign(
     )
     if campaign is None:
         raise CampaignNotFoundError("Campaign not found")
+    await _publish_campaign_event(
+        session,
+        workspace_id=workspace_id,
+        event_type=RealtimeEventType.campaign_updated,
+        actor=actor,
+        campaign=campaign,
+        payload=_campaign_payload(
+            campaign,
+            action="updated",
+            changed_fields=sorted(values),
+        ),
+    )
     await session.commit()
     return campaign
 
@@ -800,7 +1038,25 @@ async def change_campaign_status(
         campaign_id=campaign_id,
     )
     campaign = await get_campaign_by_id(session, workspace_id, campaign_id)
+    previous_status = (
+        campaign.status.value
+        if isinstance(campaign.status, CampaignStatus)
+        else str(campaign.status)
+    )
     campaign.status = _assert_valid_transition(campaign.status, status)
+    await _publish_campaign_event(
+        session,
+        workspace_id=workspace_id,
+        event_type=RealtimeEventType.campaign_status_changed,
+        actor=actor,
+        campaign=campaign,
+        payload=_campaign_payload(
+            campaign,
+            action="status_changed",
+            changed_fields=["status"],
+            previous_status=previous_status,
+        ),
+    )
     await session.commit()
     return campaign
 
@@ -819,12 +1075,28 @@ async def archive_campaign(
         capability=Capability.marketing_campaign_edit,
         campaign_id=campaign_id,
     )
-    return await change_campaign_status(
-        session,
-        workspace_id,
-        campaign_id,
-        CampaignStatus.archived,
+    campaign = await get_campaign_by_id(session, workspace_id, campaign_id)
+    previous_status = (
+        campaign.status.value
+        if isinstance(campaign.status, CampaignStatus)
+        else str(campaign.status)
     )
+    campaign.status = _assert_valid_transition(campaign.status, CampaignStatus.archived)
+    await _publish_campaign_event(
+        session,
+        workspace_id=workspace_id,
+        event_type=RealtimeEventType.campaign_status_changed,
+        actor=actor,
+        campaign=campaign,
+        payload=_campaign_payload(
+            campaign,
+            action="archived",
+            changed_fields=["status"],
+            previous_status=previous_status,
+        ),
+    )
+    await session.commit()
+    return campaign
 
 
 async def add_campaign_member(
@@ -1005,6 +1277,30 @@ async def associate_artist(
         raise CampaignRelationshipError(
             "Campaign and artist must belong to the same workspace"
         )
+    campaign = await _get_campaign_for_event(session, workspace_id, campaign_id)
+    loaded_links = await campaign_relationships.list_campaign_artists(
+        session,
+        workspace_id,
+        campaign_id,
+    )
+    loaded_link = next(
+        (item for item in loaded_links or [] if item.artist_id == artist_id),
+        None,
+    )
+    await _publish_campaign_event(
+        session,
+        workspace_id=workspace_id,
+        event_type=RealtimeEventType.campaign_artist_associated,
+        actor=actor,
+        campaign=campaign,
+        payload=_relationship_payload(
+            campaign=campaign,
+            action="associated",
+            artist_id=artist_id,
+            artist_name=loaded_link.artist.name if loaded_link is not None else None,
+            relationship_kind=link.relationship_kind,
+        ),
+    )
     await session.commit()
     return link
 
@@ -1048,13 +1344,34 @@ async def remove_artist_association(
         capability=Capability.marketing_campaign_edit,
         campaign_id=campaign_id,
     )
-    await get_campaign_by_id(session, workspace_id, campaign_id)
+    campaign = await get_campaign_by_id(session, workspace_id, campaign_id)
+    links = await campaign_relationships.list_campaign_artists(
+        session,
+        workspace_id,
+        campaign_id,
+    )
+    link = next((item for item in links or [] if item.artist_id == artist_id), None)
     removed = await campaign_relationships.remove_campaign_artist(
         session,
         workspace_id,
         campaign_id,
         artist_id,
     )
+    if removed and link is not None:
+        await _publish_campaign_event(
+            session,
+            workspace_id=workspace_id,
+            event_type=RealtimeEventType.campaign_artist_removed,
+            actor=actor,
+            campaign=campaign,
+            payload=_relationship_payload(
+                campaign=campaign,
+                action="removed",
+                artist_id=artist_id,
+                artist_name=link.artist.name,
+                relationship_kind=link.relationship_kind,
+            ),
+        )
     await session.commit()
     return removed
 
@@ -1086,6 +1403,32 @@ async def associate_release(
         raise CampaignRelationshipError(
             "Campaign and release must belong to the same workspace"
         )
+    campaign = await _get_campaign_for_event(session, workspace_id, campaign_id)
+    loaded_links = await campaign_relationships.list_campaign_releases(
+        session,
+        workspace_id,
+        campaign_id,
+    )
+    loaded_link = next(
+        (item for item in loaded_links or [] if item.release_id == release_id),
+        None,
+    )
+    await _publish_campaign_event(
+        session,
+        workspace_id=workspace_id,
+        event_type=RealtimeEventType.campaign_release_associated,
+        actor=actor,
+        campaign=campaign,
+        payload=_relationship_payload(
+            campaign=campaign,
+            action="associated",
+            release_id=release_id,
+            release_title=(
+                loaded_link.release.title if loaded_link is not None else None
+            ),
+            relationship_kind=link.relationship_kind,
+        ),
+    )
     await session.commit()
     return link
 
@@ -1105,12 +1448,33 @@ async def remove_release_association(
         capability=Capability.marketing_campaign_edit,
         campaign_id=campaign_id,
     )
-    await get_campaign_by_id(session, workspace_id, campaign_id)
+    campaign = await get_campaign_by_id(session, workspace_id, campaign_id)
+    links = await campaign_relationships.list_campaign_releases(
+        session,
+        workspace_id,
+        campaign_id,
+    )
+    link = next((item for item in links or [] if item.release_id == release_id), None)
     removed = await campaign_relationships.remove_campaign_release(
         session,
         workspace_id,
         campaign_id,
         release_id,
     )
+    if removed and link is not None:
+        await _publish_campaign_event(
+            session,
+            workspace_id=workspace_id,
+            event_type=RealtimeEventType.campaign_release_removed,
+            actor=actor,
+            campaign=campaign,
+            payload=_relationship_payload(
+                campaign=campaign,
+                action="removed",
+                release_id=release_id,
+                release_title=link.release.title,
+                relationship_kind=link.relationship_kind,
+            ),
+        )
     await session.commit()
     return removed

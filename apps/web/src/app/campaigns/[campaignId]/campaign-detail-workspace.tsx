@@ -13,7 +13,9 @@ import {
   useCampaignGoals,
   useCampaignMilestones,
 } from "../../../lib/campaigns";
+import { useOrganizationRealtimeContext } from "../../../lib/realtime/use-organization-realtime";
 import { useActiveWorkspace, useActiveWorkspaceProfile } from "../../../lib/workspace-context";
+import { mapActivityEvents } from "../../dashboard/_components/activity-event-map";
 
 const futureSections = ["Marketing", "Assets", "Legal", "Analytics", "Budget", "Agents"];
 
@@ -265,10 +267,34 @@ function ReleasesSection({ campaign }: { campaign: Campaign }) {
 }
 
 function ActivitySection({ campaign }: { campaign: Campaign }) {
+  const realtime = useOrganizationRealtimeContext();
+  const liveEvents = useMemo(
+    () =>
+      mapActivityEvents(
+        (realtime?.recentActivityEvents ?? []).filter(
+          (event) =>
+            event.type.startsWith("campaign.") &&
+            (event.entityId === campaign.id || event.payload?.campaignId === campaign.id),
+        ),
+      ),
+    [campaign.id, realtime?.recentActivityEvents],
+  );
+
   return (
     <Card>
       <SectionHeader title="Activity" />
       <div className="mt-4 grid gap-3">
+        {liveEvents.map((event) => (
+          <div className="rounded-md border border-slate-200 bg-white px-4 py-3" key={event.id}>
+            <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:justify-between">
+              <div>
+                <p className="text-sm font-semibold text-slate-950">{event.title}</p>
+                <p className="mt-1 text-sm text-slate-500">{event.description}</p>
+              </div>
+              <p className="text-xs font-medium text-slate-500">{event.timestamp}</p>
+            </div>
+          </div>
+        ))}
         <div className="rounded-md border border-slate-200 bg-slate-50 px-4 py-3">
           <p className="text-sm font-semibold text-slate-950">Campaign updated</p>
           <p className="mt-1 text-sm text-slate-500">
@@ -280,9 +306,9 @@ function ActivitySection({ campaign }: { campaign: Campaign }) {
             }).format(new Date(campaign.updated_at))}
           </p>
         </div>
-        <p className="text-sm leading-6 text-slate-500">
-          Detailed campaign events will appear here as workspace activity expands.
-        </p>
+        {liveEvents.length === 0 ? (
+          <p className="text-sm leading-6 text-slate-500">No live campaign activity yet.</p>
+        ) : null}
       </div>
     </Card>
   );

@@ -8,6 +8,7 @@ import {
   getCampaignMilestones,
   getCampaigns,
   removeCampaignMember,
+  shouldInvalidateCampaignRealtimeCacheKey,
   upsertCampaignMember,
 } from "./campaigns";
 
@@ -174,6 +175,31 @@ describe("campaign data layer", () => {
       "/api/workspaces/workspace_01/campaigns/campaign_01/members/membership_01",
       expect.objectContaining({ method: "DELETE" }),
     );
+  });
+
+  it("targets campaign caches from realtime campaign events", () => {
+    const shouldInvalidate = (key: string, eventType = "campaign.updated") =>
+      shouldInvalidateCampaignRealtimeCacheKey({
+        campaignId: "campaign_01",
+        eventType,
+        key,
+        workspaceId: "workspace_01",
+      });
+
+    expect(shouldInvalidate("campaigns:workspace-list:workspace_01")).toBe(true);
+    expect(shouldInvalidate("campaigns:detail:workspace_01:campaign_01")).toBe(true);
+    expect(shouldInvalidate("campaigns:detail:workspace_01:campaign_02")).toBe(false);
+    expect(shouldInvalidate("campaigns:goals:workspace_01:campaign_01")).toBe(false);
+    expect(
+      shouldInvalidate("campaigns:goals:workspace_01:campaign_01", "campaign.goal_updated"),
+    ).toBe(true);
+    expect(
+      shouldInvalidate(
+        "campaigns:milestones:workspace_01:campaign_01",
+        "campaign.milestone_completed",
+      ),
+    ).toBe(true);
+    expect(shouldInvalidate("campaigns:workspace-list:workspace_02")).toBe(false);
   });
 
   it("maps failed campaign responses to typed errors", async () => {

@@ -19,7 +19,22 @@ export type RealtimeEventType =
   | "artist.updated"
   | "artist.status_changed"
   | "release.updated"
+  | "campaign.created"
   | "campaign.updated"
+  | "campaign.status_changed"
+  | "campaign.member_added"
+  | "campaign.member_updated"
+  | "campaign.member_removed"
+  | "campaign.artist_associated"
+  | "campaign.artist_removed"
+  | "campaign.release_associated"
+  | "campaign.release_removed"
+  | "campaign.goal_created"
+  | "campaign.goal_updated"
+  | "campaign.goal_completed"
+  | "campaign.milestone_created"
+  | "campaign.milestone_updated"
+  | "campaign.milestone_completed"
   | "approval.updated"
   | "agent.started"
   | "agent.completed"
@@ -65,7 +80,22 @@ export const activityEventTypes = new Set<RealtimeEventType>([
   "artist.updated",
   "artist.status_changed",
   "release.updated",
+  "campaign.created",
   "campaign.updated",
+  "campaign.status_changed",
+  "campaign.member_added",
+  "campaign.member_updated",
+  "campaign.member_removed",
+  "campaign.artist_associated",
+  "campaign.artist_removed",
+  "campaign.release_associated",
+  "campaign.release_removed",
+  "campaign.goal_created",
+  "campaign.goal_updated",
+  "campaign.goal_completed",
+  "campaign.milestone_created",
+  "campaign.milestone_updated",
+  "campaign.milestone_completed",
   "approval.updated",
   "agent.started",
   "agent.completed",
@@ -93,7 +123,22 @@ export const refetchEventTypes = new Set<RealtimeEventType>([
   "artist.updated",
   "artist.status_changed",
   "release.updated",
+  "campaign.created",
   "campaign.updated",
+  "campaign.status_changed",
+  "campaign.member_added",
+  "campaign.member_updated",
+  "campaign.member_removed",
+  "campaign.artist_associated",
+  "campaign.artist_removed",
+  "campaign.release_associated",
+  "campaign.release_removed",
+  "campaign.goal_created",
+  "campaign.goal_updated",
+  "campaign.goal_completed",
+  "campaign.milestone_created",
+  "campaign.milestone_updated",
+  "campaign.milestone_completed",
   "approval.updated",
   "agent.started",
   "agent.completed",
