@@ -1,73 +1,49 @@
 # Campaign Domain Contract
 
-Stage 2 formalizes the canonical Campaign domain for LabelOS. This contract
-extends the existing organization-owned `campaigns` resource; it does not replace
-the table or reinterpret existing campaign records as releases.
+Stage 12 defines Campaigns as a production integration boundary for LabelOS. The
+current feature owns the core Campaign record, campaign team links, artist and
+release links, goals, milestones, realtime activity, and workspace-scoped API
+contracts. It intentionally does not create speculative tables for future
+departments.
 
-## Definition
+## Domain Model
 
 A Campaign is a workspace-scoped operational container. It coordinates work
-across artists, releases, people, goals, milestones, assets, departments, and
-eventually AI agents.
+across artists, releases, people, goals, milestones, departments, and eventually
+AI agents. Campaigns are broader than release plans: one campaign may coordinate
+zero, one, or many releases.
 
-Campaigns are broader than release plans. A campaign may coordinate one release,
-many releases, no releases, a catalog initiative, an artist development effort,
-or a marketing workstream. Application code must not assume one campaign equals
-one release.
+Workspaces are currently backed by `organizations`, so the database ownership
+column remains `organization_id`. API and service boundaries use `workspace_id`
+terminology and map it to `organization_id` internally.
 
-In the current schema, workspaces are backed by `organizations`, so the canonical
-workspace ownership column remains `organization_id`. New APIs and service code
-should use `workspace_id` terminology at boundaries while mapping to
-`organization_id` until a distinct workspace table exists.
+| Model               | Purpose                                                 |
+| ------------------- | ------------------------------------------------------- |
+| `Campaign`          | Canonical workspace-owned campaign record.              |
+| `CampaignMember`    | Campaign participation link to `workspace_memberships`. |
+| `CampaignArtist`    | Campaign association to workspace catalog `artists`.    |
+| `CampaignRelease`   | Many-to-many association to workspace `releases`.       |
+| `CampaignGoal`      | Lightweight campaign outcome target.                    |
+| `CampaignMilestone` | Lightweight campaign planning checkpoint.               |
 
-## Core Model
+Core fields:
 
-The canonical Campaign model supports:
-
-| Field | Required | Notes |
-| --- | --- | --- |
-| `id` | Yes | Stable Campaign identifier. |
-| `organization_id` | Yes | Current workspace ownership boundary. |
-| `name` | Yes | Human-readable campaign name. |
-| `description` | No | Operational brief or summary. |
-| `campaign_type` | Yes | Extensible type enum. |
-| `status` | Yes | Lifecycle status enum. |
-| `start_date` | No | Planned or actual start date. |
-| `target_end_date` | No | Planned target completion date. |
-| `created_at` | Yes | Timestamp from the shared timestamp mixin. |
-| `updated_at` | Yes | Timestamp from the shared timestamp mixin. |
-| `created_by_user_id` | No | Auth user that created the record, when known. |
-| `created_by_profile_id` | No | Universal Profile for the creator, when known. |
-| `owner_profile_id` | No | Universal Profile accountable for the campaign. |
-| `primary_artist_id` | No | Optional primary workspace catalog artist. |
-| `release_id` | No | Legacy nullable single-release pointer retained for compatibility. |
-
-`created_by_profile_id` and `owner_profile_id` must refer to profiles that are
-members of the campaign workspace when supplied. This is a service-level invariant
-until profile/workspace membership constraints can be expressed directly.
-
-`primary_artist_id` points at the workspace-owned `artists` catalog resource. If
-that artist has an `artist_profiles` row, consumers can traverse from the catalog
-artist to the person-backed artist profile.
-
-## Campaign Types
-
-Initial campaign types are intentionally small:
-
-- `release` - work coordinated around one or more releases.
-- `marketing` - audience, content, advertising, publicity, or growth work.
-- `artist_development` - career, creative, audience, or operational development
-  for an artist.
-- `catalog` - back catalog, archival, rights, or catalog growth initiatives.
-- `other` - valid fallback for imported or not-yet-classified work.
-
-New types should be added only when they change behavior, permissions, workflow,
-reporting, or user-facing grouping. Free-form labels and tags should live in a
-separate taxonomy or metadata layer rather than expanding this enum prematurely.
+| Field                                         | Notes                                                                |
+| --------------------------------------------- | -------------------------------------------------------------------- |
+| `id`                                          | Stable Campaign identifier.                                          |
+| `organization_id`                             | Workspace isolation boundary.                                        |
+| `name`, `description`                         | Human name and optional brief.                                       |
+| `campaign_type`                               | `release`, `marketing`, `artist_development`, `catalog`, or `other`. |
+| `status`                                      | Lifecycle state.                                                     |
+| `start_date`, `target_end_date`               | Optional planning dates.                                             |
+| `created_by_user_id`, `created_by_profile_id` | Creator audit references when known.                                 |
+| `owner_profile_id`                            | Accountable Universal Profile when assigned.                         |
+| `primary_artist_id`                           | Optional primary workspace catalog artist.                           |
+| `release_id`                                  | Legacy nullable single-release pointer retained for compatibility.   |
 
 ## Lifecycle
 
-Canonical Campaign lifecycle values:
+Canonical statuses are:
 
 - `draft` - captured but not ready for planning or execution.
 - `planning` - being scoped, staffed, scheduled, or budgeted.
@@ -77,59 +53,150 @@ Canonical Campaign lifecycle values:
 - `cancelled` - stopped before completion and not expected to resume.
 - `archived` - retained for history and hidden from active operational views.
 
-Operational views should treat only `planning`, `active`, and `paused` as open
-work by default. Destructive deletion is not part of the lifecycle contract;
-archival should be preferred for records with downstream activity.
+Allowed transitions are enforced in `labelos_api.services.campaign_service`.
+Operational views should treat `planning`, `active`, and `paused` as open work.
+Archive is preferred over destructive deletion for records with downstream
+activity.
 
-## Release Coordination
+## Relationship Model
 
-The existing nullable `campaigns.release_id` is retained as a compatibility
-pointer for old code and simple single-release workflows. New domain logic should
-prefer an association table that links campaigns to releases.
+Relationships must preserve workspace isolation:
 
-Rules:
+- `owner_profile_id` and `created_by_profile_id` must belong to active workspace
+  members when supplied.
+- `created_by_user_id` must map to an active workspace member when supplied.
+- `primary_artist_id` and `CampaignArtist.artist_id` must belong to the same
+  workspace.
+- `release_id` and `CampaignRelease.release_id` must belong to the same
+  workspace.
+- `CampaignMember.workspace_membership_id` must be active in the campaign
+  workspace.
 
-- A campaign can link to zero, one, or many releases.
-- A release can participate in zero, one, or many campaigns.
-- `campaigns.release_id` may mirror the primary release while legacy callers
-  still depend on it, but it must not be treated as the complete set of releases.
-- Multi-release workflows should write to the campaign-release association first.
-- Services must verify that linked releases share the campaign workspace.
+`campaigns.release_id` remains a compatibility pointer. The Campaign service
+keeps it aligned with release associations: the first linked release populates
+the pointer, a `primary` relationship replaces it, and removing the pointed
+release falls back to another primary link, then the first remaining link, then
+`null`. New release-aware code must still read and write `campaign_releases` for
+the complete relationship set.
 
-## Attachment Points
+Future integration attachment points:
 
-Stage 2 creates contract-level attachment points without implementing every
-future subsystem:
+| Area               | Boundary                                                                                                                     |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------- |
+| Release Operations | Attach release operations records to `campaign_id` and validate linked releases through `campaign_releases`.                 |
+| Marketing          | Use `Campaign.campaign_type = marketing` plus future plans, channels, calendars, and spend rows keyed by `campaign_id`.      |
+| Legal / Contracts  | Link contract reviews, rights checks, and policy gates by `campaign_id`; do not infer legal access from campaign membership. |
+| Assets             | Attach creative, audio, video, artwork, and file references by `campaign_id` after an asset registry exists.                 |
+| Finance / Budgets  | Attach budget, forecast, spend, and approval records by `campaign_id`; keep finance authorization separate.                  |
+| Analytics          | Attribute metrics, reports, and events with `campaign_id` while preserving raw event workspace ownership.                    |
+| Approvals          | Attach approval requests and signoff history by `campaign_id` with immutable audit metadata.                                 |
+| AI agents          | Agent assignments, recommendations, and run history must include `campaign_id`, actor/run metadata, and human review state.  |
 
-| Area | Attachment Point |
-| --- | --- |
-| Releases | Campaign-release association records. |
-| Marketing | Campaign type plus future marketing plans, channels, calendars, and spend. |
-| Legal | Future legal reviews, contract links, rights checks, and policy gates. |
-| Tasks | Future campaign-owned tasks, milestones, assignments, and dependencies. |
-| Assets | Future campaign asset links for creative, audio, video, imagery, and files. |
-| Budgets | Future budget, spend, forecast, and approval records. |
-| Analytics | Future campaign-attributed metrics, events, reports, and goals. |
-| Approvals | Future campaign approval requests, states, signoffs, and escalation history. |
-| Agents | Future AI agent assignments, run history, recommendations, and audit metadata. |
+Do not add empty tables for these areas until a concrete workflow needs a
+foreign key, API contract, or persisted state.
 
-Each future subsystem should attach to Campaign by `campaign_id` and preserve
-workspace isolation. Cross-workspace campaign coordination requires a separate
-explicit collaboration model and is out of scope for this contract.
+## Capability Mapping
 
-## Authorization And Realtime
+Campaign API operations use capability checks as the authoritative backend
+control:
 
-Existing campaign capabilities remain valid:
+| Capability                   | Used For                                                                                                    |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `marketing.campaign.view`    | List and read campaigns, members, artists, releases, goals, and milestones.                                 |
+| `marketing.campaign.create`  | Create campaign records.                                                                                    |
+| `marketing.campaign.edit`    | Update campaign fields, archive campaigns, mutate team and relationship links, mutate goals and milestones. |
+| `marketing.campaign.approve` | Change lifecycle status through the status endpoint.                                                        |
 
-- `marketing.campaign.view`
-- `marketing.campaign.create`
-- `marketing.campaign.edit`
-- `marketing.campaign.approve`
+Legacy WorkOS-style permissions `campaigns:view` and `campaigns:manage` remain
+compatibility inputs only. Frontend checks are advisory; backend checks are
+authoritative.
 
-The legacy WorkOS-style permissions `campaigns:view` and `campaigns:manage`
-remain compatibility permissions. Future workflow-specific operations should use
-capabilities rather than adding broad permissions.
+## API Surface
 
-Realtime event types such as `campaign.updated` should identify the Campaign as
-the entity and include workspace-scoped payloads. Agent-executed campaign changes
-must include actor and audit metadata when the agent subsystem is attached.
+Backend routes live under `/api/v1/workspaces/{workspace_id}/campaigns`.
+Frontend proxy routes live under `/api/workspaces/{workspaceId}/campaigns`.
+
+Core endpoints:
+
+- `GET /campaigns?limit=50&offset=0` returns `{ campaigns, total, limit, offset }`.
+- `POST /campaigns` creates a Campaign.
+- `GET /campaigns/{campaign_id}` reads one Campaign.
+- `PATCH /campaigns/{campaign_id}` updates editable fields.
+- `PATCH /campaigns/{campaign_id}/status` changes lifecycle status.
+- `POST /campaigns/{campaign_id}/archive` archives through lifecycle rules.
+- `GET|PUT|DELETE /campaigns/{campaign_id}/members[...]`.
+- `GET|PUT|DELETE /campaigns/{campaign_id}/artists[...]`.
+- `GET|PUT|DELETE /campaigns/{campaign_id}/releases[...]`.
+- `GET|POST|PATCH|DELETE /campaigns/{campaign_id}/goals[...]`.
+- `GET|POST|PATCH|DELETE /campaigns/{campaign_id}/milestones[...]`.
+- `POST /milestones/{milestone_id}/complete` and archive helpers for planning
+  workflow shortcuts.
+
+List pagination is offset-based and bounded to `limit <= 100`. Relationship and
+planning sublists are currently unpaged because they are narrow child
+collections; add pagination there only when product usage requires larger
+collections.
+
+## Realtime And Activity
+
+Campaign mutations enqueue workspace-scoped realtime events in the caller's
+database transaction. Events become visible after commit and use
+`entity_type = "campaign"` with the Campaign id as `entity_id`.
+
+Current event families:
+
+- `campaign.created`, `campaign.updated`, `campaign.status_changed`
+- `campaign.member_added`, `campaign.member_updated`, `campaign.member_removed`
+- `campaign.artist_associated`, `campaign.artist_removed`
+- `campaign.release_associated`, `campaign.release_removed`
+- `campaign.goal_created`, `campaign.goal_updated`, `campaign.goal_completed`
+- `campaign.milestone_created`, `campaign.milestone_updated`,
+  `campaign.milestone_completed`
+
+Payloads include workspace-safe identifiers and display fields such as
+`campaignId`, `campaignName`, relationship ids, changed fields, and previous
+status where useful. Future agent-executed changes must include the initiating
+agent/run identity and human review metadata.
+
+## Frontend Routes
+
+- `/campaigns` lists workspace campaigns, supports create, handles loading,
+  error, empty, read-only, and paged list states.
+- `/campaigns/[campaignId]` shows overview, team, goals, milestones, releases,
+  activity, and future attachment placeholders.
+- `/api/workspaces/[workspaceId]/campaigns...` proxies browser requests to the
+  FastAPI workspace API and preserves query strings for list pagination.
+
+## Known Limitations
+
+- Campaign filtering, sorting controls, and cursor pagination are not implemented.
+- Goal and milestone editors are represented in the API but the detail UI only
+  displays current data.
+- Campaign member management UI is not implemented beyond display and placeholder
+  controls.
+- `release_id` remains a compatibility pointer and does not represent the full
+  campaign release set.
+- Campaign activity is an event stream, not a complete immutable audit ledger.
+- Department-specific authorization is not yet layered onto each future
+  relationship type.
+
+## Intentionally Deferred
+
+- Release Operations department workflows.
+- Marketing calendar/channel/spend planning.
+- Legal contract review and rights workflows.
+- Asset registry and campaign asset attachment UI.
+- Finance budgets, forecasts, spend actuals, and finance approvals.
+- Analytics ingestion, attribution reports, and campaign performance dashboards.
+- Approval queues, signoff policies, and escalation workflows.
+- AI agent assignment, run history, recommendations, and human-in-the-loop review.
+- Cross-workspace campaigns and external collaborator access models.
+
+## Recommended Next Feature
+
+Build the Approval Queue as the next Campaign-adjacent feature. Campaign status
+changes already distinguish edit from approve capability, and future release,
+legal, asset, budget, and agent workflows all need the same human signoff
+primitive. A shared approval model should attach to `campaign_id` only when the
+first approval workflow is implemented, preserve workspace isolation, emit
+realtime activity, and store immutable decision metadata.

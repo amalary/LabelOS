@@ -88,7 +88,7 @@ const kpiConfig: Array<{
     icon: "AC",
     description: "Campaign records in this workspace",
     emptyDescription: "No active campaigns yet.",
-    href: "/dashboard/campaigns/new",
+    href: "/campaigns",
     actionLabel: "Create a campaign ->",
     valueKey: "active_campaigns",
   },

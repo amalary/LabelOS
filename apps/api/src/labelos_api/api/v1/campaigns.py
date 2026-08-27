@@ -2,7 +2,7 @@ from datetime import date, datetime
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from labelos_database.models import (
     Campaign,
     CampaignArtist,
@@ -217,6 +217,8 @@ class CampaignResponse(BaseModel):
 class CampaignsListResponse(BaseModel):
     campaigns: list[CampaignResponse]
     total: int
+    limit: int
+    offset: int
 
 
 class CampaignMembersListResponse(BaseModel):
@@ -479,6 +481,8 @@ async def list_campaigns(
     workspace_id: UUID,
     session: SessionDep,
     context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
 ) -> CampaignsListResponse:
     await _require_campaign_capability(
         session,
@@ -487,16 +491,20 @@ async def list_campaigns(
         capability=Capability.marketing_campaign_view,
     )
     try:
-        campaigns = await campaign_service.list_workspace_campaigns(
+        page = await campaign_service.list_workspace_campaigns(
             session,
             workspace_id,
             actor=context,
+            limit=limit,
+            offset=offset,
         )
     except CampaignAuthorizationError as exc:
         _service_error(exc)
     return CampaignsListResponse(
-        campaigns=[_campaign_response(campaign) for campaign in campaigns],
-        total=len(campaigns),
+        campaigns=[_campaign_response(campaign) for campaign in page.campaigns],
+        total=page.total,
+        limit=page.limit,
+        offset=page.offset,
     )
 
 
@@ -535,7 +543,11 @@ async def create_campaign(
             ),
             actor=context,
         )
-    except (CampaignRelationshipError, CampaignAuthorizationError) as exc:
+    except (
+        CampaignNotFoundError,
+        CampaignRelationshipError,
+        CampaignAuthorizationError,
+    ) as exc:
         _service_error(exc)
     return await _load_campaign_response(
         session,
@@ -1111,7 +1123,11 @@ async def upsert_campaign_member(
             responsibility_label=payload.responsibility_label,
             actor=context,
         )
-    except (CampaignRelationshipError, CampaignAuthorizationError) as exc:
+    except (
+        CampaignNotFoundError,
+        CampaignRelationshipError,
+        CampaignAuthorizationError,
+    ) as exc:
         _service_error(exc)
     links = await campaign_service.list_campaign_members(
         session,
@@ -1223,7 +1239,11 @@ async def upsert_campaign_artist(
             sort_order=payload.sort_order,
             actor=context,
         )
-    except (CampaignRelationshipError, CampaignAuthorizationError) as exc:
+    except (
+        CampaignNotFoundError,
+        CampaignRelationshipError,
+        CampaignAuthorizationError,
+    ) as exc:
         _service_error(exc)
     links = await campaign_service.list_campaign_artists(
         session,
@@ -1325,7 +1345,11 @@ async def upsert_campaign_release(
             relationship_kind=payload.relationship_kind,
             actor=context,
         )
-    except (CampaignRelationshipError, CampaignAuthorizationError) as exc:
+    except (
+        CampaignNotFoundError,
+        CampaignRelationshipError,
+        CampaignAuthorizationError,
+    ) as exc:
         _service_error(exc)
     links = await campaign_service.list_campaign_releases(
         session,

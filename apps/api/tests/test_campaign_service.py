@@ -194,13 +194,13 @@ def test_campaign_service_creates_lists_gets_and_updates_campaigns(
                     owner_profile_id=creator_profile.id,
                 ),
             )
-            listed = await list_workspace_campaigns(session, workspace.id)
+            page = await list_workspace_campaigns(session, workspace.id)
 
             return (
                 loaded_name,
                 updated.campaign_type,
                 updated.status,
-                [campaign.name for campaign in listed],
+                [campaign.name for campaign in page.campaigns],
                 updated.description,
             )
 
@@ -246,13 +246,48 @@ def test_campaign_service_enforces_workspace_isolation_for_campaign_records(
                     CampaignUpdate(name="Cross Workspace Edit"),
                 )
             except CampaignNotFoundError:
-                return [campaign.name for campaign in visible], blocked_get
+                return [campaign.name for campaign in visible.campaigns], blocked_get
             raise AssertionError("Expected cross-workspace update to be blocked")
 
     names, blocked_get = asyncio.run(run())
 
     assert names == ["Alpha Campaign"]
     assert blocked_get is True
+
+
+def test_campaign_service_bounds_campaign_list_pagination(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async def run() -> tuple[int, bool, bool]:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            assert isinstance(workspace, Organization)
+
+            await create_campaign(session, workspace.id, CampaignCreate(name="One"))
+            page = await list_workspace_campaigns(
+                session,
+                workspace.id,
+                limit=1,
+                offset=0,
+            )
+            invalid_limit_rejected = False
+            invalid_offset_rejected = False
+            try:
+                await list_workspace_campaigns(session, workspace.id, limit=101)
+            except CampaignRelationshipError:
+                invalid_limit_rejected = True
+            try:
+                await list_workspace_campaigns(session, workspace.id, offset=-1)
+            except CampaignRelationshipError:
+                invalid_offset_rejected = True
+            return len(page.campaigns), invalid_limit_rejected, invalid_offset_rejected
+
+    count, invalid_limit_rejected, invalid_offset_rejected = asyncio.run(run())
+
+    assert count == 1
+    assert invalid_limit_rejected is True
+    assert invalid_offset_rejected is True
 
 
 def test_campaign_service_rejects_invalid_campaign_relationships(
@@ -434,6 +469,86 @@ def test_campaign_service_manages_member_artist_and_release_associations(
     result = asyncio.run(run())
 
     assert result == ("confirmed", "primary", "focus", True, True, True, True)
+
+
+def test_campaign_service_keeps_legacy_release_pointer_in_sync(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async def run() -> tuple[bool, bool, bool, bool]:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            release = data["release"]
+            assert isinstance(workspace, Organization)
+            assert isinstance(release, Release)
+
+            follow_up_release = Release(
+                title="Follow Up Release",
+                organization=workspace,
+            )
+            session.add(follow_up_release)
+            await session.flush()
+
+            campaign = await create_campaign(
+                session,
+                workspace.id,
+                CampaignCreate(name="Release Pointer Campaign"),
+            )
+            await associate_release(
+                session,
+                workspace.id,
+                campaign.id,
+                release.id,
+                relationship_kind="focus",
+            )
+            first_linked = await get_campaign_by_id(session, workspace.id, campaign.id)
+            first_release_synced = first_linked.release_id == release.id
+
+            await associate_release(
+                session,
+                workspace.id,
+                campaign.id,
+                follow_up_release.id,
+                relationship_kind="primary",
+            )
+            primary_linked = await get_campaign_by_id(
+                session,
+                workspace.id,
+                campaign.id,
+            )
+            primary_release_synced = primary_linked.release_id == follow_up_release.id
+
+            await remove_release_association(
+                session,
+                workspace.id,
+                campaign.id,
+                follow_up_release.id,
+            )
+            fallback_linked = await get_campaign_by_id(
+                session,
+                workspace.id,
+                campaign.id,
+            )
+            fallback_release_synced = fallback_linked.release_id == release.id
+
+            await remove_release_association(
+                session,
+                workspace.id,
+                campaign.id,
+                release.id,
+            )
+            cleared = await get_campaign_by_id(session, workspace.id, campaign.id)
+
+            return (
+                first_release_synced,
+                primary_release_synced,
+                fallback_release_synced,
+                cleared.release_id is None,
+            )
+
+    result = asyncio.run(run())
+
+    assert result == (True, True, True, True)
 
 
 def test_campaign_service_validates_lifecycle_transitions(

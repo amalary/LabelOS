@@ -78,6 +78,8 @@ export type Campaign = {
 export type CampaignsList = {
   campaigns: Campaign[];
   total: number;
+  limit: number;
+  offset: number;
 };
 
 export type CampaignMembersList = {
@@ -88,6 +90,11 @@ export type CampaignMemberUpsert = {
   workspace_membership_id: string;
   participation_status?: string;
   responsibility_label?: string | null;
+};
+
+export type CampaignListOptions = {
+  limit?: number;
+  offset?: number;
 };
 
 export type CampaignCreate = {
@@ -168,7 +175,12 @@ let activeMutationCount = 0;
 
 export const campaignQueryKeys = {
   all: "campaigns",
-  workspaceList: (workspaceId: string) => `campaigns:workspace-list:${workspaceId}`,
+  workspaceList: (workspaceId: string, options?: CampaignListOptions) =>
+    options?.limit || options?.offset
+      ? `campaigns:workspace-list:${workspaceId}:limit:${options.limit ?? 50}:offset:${
+          options.offset ?? 0
+        }`
+      : `campaigns:workspace-list:${workspaceId}`,
   detail: (workspaceId: string, campaignId: string) =>
     `campaigns:detail:${workspaceId}:${campaignId}`,
   goals: (workspaceId: string, campaignId: string) =>
@@ -377,7 +389,8 @@ export function shouldInvalidateCampaignRealtimeCacheKey({
   key: string;
   workspaceId: string;
 }) {
-  if (key === campaignQueryKeys.workspaceList(workspaceId)) {
+  const workspaceListPrefix = `campaigns:workspace-list:${workspaceId}:`;
+  if (key === campaignQueryKeys.workspaceList(workspaceId) || key.startsWith(workspaceListPrefix)) {
     return true;
   }
   if (!key.startsWith(`${campaignQueryKeys.all}:`)) {
@@ -404,8 +417,25 @@ export function clearCampaignCache() {
   mutationVersion = 0;
 }
 
-export function getCampaigns(workspaceId: string): Promise<CampaignsList> {
-  return campaignJson<CampaignsList>(`/api/workspaces/${workspaceId}/campaigns`);
+function campaignListQuery(options?: CampaignListOptions): string {
+  const params = new URLSearchParams();
+  if (options?.limit !== undefined) {
+    params.set("limit", String(options.limit));
+  }
+  if (options?.offset !== undefined) {
+    params.set("offset", String(options.offset));
+  }
+  const query = params.toString();
+  return query ? `?${query}` : "";
+}
+
+export function getCampaigns(
+  workspaceId: string,
+  options?: CampaignListOptions,
+): Promise<CampaignsList> {
+  return campaignJson<CampaignsList>(
+    `/api/workspaces/${workspaceId}/campaigns${campaignListQuery(options)}`,
+  );
 }
 
 export function createCampaign(workspaceId: string, payload: CampaignCreate): Promise<Campaign> {
@@ -473,9 +503,17 @@ export function removeCampaignMember(
   );
 }
 
-export function useCampaigns(workspaceId: string | null): CampaignResourceState<CampaignsList> {
-  const key = workspaceId ? campaignQueryKeys.workspaceList(workspaceId) : null;
-  const fetcher = useCallback(() => getCampaigns(workspaceId ?? ""), [workspaceId]);
+export function useCampaigns(
+  workspaceId: string | null,
+  options?: CampaignListOptions,
+): CampaignResourceState<CampaignsList> {
+  const limit = options?.limit;
+  const offset = options?.offset;
+  const key = workspaceId ? campaignQueryKeys.workspaceList(workspaceId, { limit, offset }) : null;
+  const fetcher = useCallback(
+    () => getCampaigns(workspaceId ?? "", { limit, offset }),
+    [limit, offset, workspaceId],
+  );
   return useCampaignResource(key, workspaceId ? fetcher : null);
 }
 
@@ -546,7 +584,12 @@ export function useCreateCampaign(
         detailEntry.data = campaign;
         detailEntry.error = null;
         emit(detailEntry);
-        invalidateCampaignCache((key) => key === campaignQueryKeys.workspaceList(workspaceId));
+        const workspaceListPrefix = `campaigns:workspace-list:${workspaceId}:`;
+        invalidateCampaignCache(
+          (key) =>
+            key === campaignQueryKeys.workspaceList(workspaceId) ||
+            key.startsWith(workspaceListPrefix),
+        );
         return campaign;
       } catch (error) {
         entry.error =

@@ -1,4 +1,5 @@
 from collections.abc import Mapping
+from dataclasses import dataclass
 from uuid import UUID
 
 from labelos_database.models import (
@@ -11,7 +12,7 @@ from labelos_database.models import (
     UniversalProfile,
     WorkspaceMembership,
 )
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -29,17 +30,40 @@ def _campaign_load_options():
     )
 
 
+@dataclass(frozen=True, kw_only=True)
+class CampaignListPage:
+    campaigns: list[Campaign]
+    total: int
+    limit: int
+    offset: int
+
+
 async def list_campaigns(
     session: AsyncSession,
     workspace_id: UUID,
-) -> list[Campaign]:
+    *,
+    limit: int,
+    offset: int,
+) -> CampaignListPage:
+    total = await session.scalar(
+        select(func.count())
+        .select_from(Campaign)
+        .where(Campaign.organization_id == workspace_id)
+    )
     rows = await session.scalars(
         select(Campaign)
         .options(*_campaign_load_options())
         .where(Campaign.organization_id == workspace_id)
         .order_by(Campaign.created_at.desc(), Campaign.name)
+        .limit(limit)
+        .offset(offset)
     )
-    return list(rows.all())
+    return CampaignListPage(
+        campaigns=list(rows.all()),
+        total=total or 0,
+        limit=limit,
+        offset=offset,
+    )
 
 
 async def get_campaign(

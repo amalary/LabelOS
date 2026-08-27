@@ -419,6 +419,8 @@ def test_campaign_api_supports_core_workflow_and_normalized_relationships(
     assert listed.status_code == 200
     body = listed.json()
     assert body["total"] == 2
+    assert body["limit"] == 50
+    assert body["offset"] == 0
     created_record = next(
         item for item in body["campaigns"] if item["id"] == campaign_id
     )
@@ -435,6 +437,36 @@ def test_campaign_api_supports_core_workflow_and_normalized_relationships(
     archived = client.post(f"{base}/{campaign_id}/archive")
     assert archived.status_code == 200
     assert archived.json()["status"] == "archived"
+
+
+def test_campaign_list_supports_bounded_pagination(
+    campaigns_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededCampaignApi,
+    ],
+) -> None:
+    client, _sessionmaker, seeded = campaigns_client
+    _set_context(client, seeded)
+    base = f"/api/v1/workspaces/{seeded.workspace_id}/campaigns"
+
+    created = client.post(base, json={"name": "Paged Campaign"})
+    assert created.status_code == 201
+
+    first_page = client.get(base, params={"limit": 1, "offset": 0})
+    second_page = client.get(base, params={"limit": 1, "offset": 1})
+    invalid_page = client.get(base, params={"limit": 101})
+
+    assert first_page.status_code == 200
+    assert first_page.json()["total"] == 2
+    assert first_page.json()["limit"] == 1
+    assert first_page.json()["offset"] == 0
+    assert len(first_page.json()["campaigns"]) == 1
+    assert second_page.status_code == 200
+    assert second_page.json()["total"] == 2
+    assert second_page.json()["offset"] == 1
+    assert len(second_page.json()["campaigns"]) == 1
+    assert invalid_page.status_code == 422
 
 
 def test_campaign_team_membership_changes_publish_activity_events(
@@ -712,6 +744,18 @@ def test_campaign_api_returns_clear_errors_for_scope_capability_and_state(
         f"{base}/{seeded.campaign_id}/members",
         json={"workspace_membership_id": str(seeded.outside_workspace_membership_id)},
     )
+    invalid_member_campaign = client.put(
+        f"{base}/{seeded.outside_campaign_id}/members",
+        json={"workspace_membership_id": str(seeded.member_workspace_membership_id)},
+    )
+    invalid_artist_campaign = client.put(
+        f"{base}/{seeded.outside_campaign_id}/artists",
+        json={"artist_id": str(seeded.artist_id)},
+    )
+    invalid_release_campaign = client.put(
+        f"{base}/{seeded.outside_campaign_id}/releases",
+        json={"release_id": str(seeded.release_id)},
+    )
     invalid_goal_scope = client.get(
         f"{base}/{seeded.outside_campaign_id}/goals",
     )
@@ -731,6 +775,9 @@ def test_campaign_api_returns_clear_errors_for_scope_capability_and_state(
     assert "release must belong" in invalid_release.json()["detail"]
     assert invalid_member.status_code == 400
     assert "workspace membership must belong" in invalid_member.json()["detail"]
+    assert invalid_member_campaign.status_code == 404
+    assert invalid_artist_campaign.status_code == 404
+    assert invalid_release_campaign.status_code == 404
     assert invalid_goal_scope.status_code == 404
     assert invalid_milestone_scope.status_code == 404
     assert invalid_transition.status_code == 409

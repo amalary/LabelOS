@@ -38,10 +38,12 @@ const initialForm: CampaignFormState = {
 const campaignTypeOptions = [
   { value: "marketing", label: "Marketing" },
   { value: "release", label: "Release" },
-  { value: "tour", label: "Tour" },
-  { value: "brand", label: "Brand" },
+  { value: "artist_development", label: "Artist development" },
+  { value: "catalog", label: "Catalog" },
   { value: "other", label: "Other" },
 ];
+
+const campaignPageSize = 50;
 
 const statusOptions = [
   { value: "draft", label: "Draft" },
@@ -270,7 +272,7 @@ function CampaignListItem({ campaign }: { campaign: Campaign }) {
             <Badge variant={statusVariant(campaign.status)}>{humanize(campaign.status)}</Badge>
           </div>
           <p className="mt-1 text-sm text-slate-500">
-            {humanize(campaign.campaign_type)} ·{" "}
+            {humanize(campaign.campaign_type)} -{" "}
             {campaign.primary_artist?.name ?? "No primary artist"}
           </p>
         </div>
@@ -310,7 +312,11 @@ export function CampaignsWorkspace() {
   const router = useRouter();
   const { activeWorkspace } = useActiveWorkspace();
   const workspaceProfile = useActiveWorkspaceProfile();
-  const campaigns = useCampaigns(activeWorkspace?.id ?? null);
+  const [campaignLimit, setCampaignLimit] = useState(campaignPageSize);
+  const campaigns = useCampaigns(activeWorkspace?.id ?? null, {
+    limit: campaignLimit,
+    offset: 0,
+  });
   const [showCreate, setShowCreate] = useState(false);
   const canView = workspaceProfile.subject
     ? can(workspaceProfile.subject, null, capabilities.marketingCampaignView)
@@ -319,6 +325,8 @@ export function CampaignsWorkspace() {
     ? can(workspaceProfile.subject, null, capabilities.marketingCampaignCreate)
     : false;
   const visibleCampaigns = useMemo(() => campaigns.data?.campaigns ?? [], [campaigns.data]);
+  const totalCampaigns = campaigns.data?.total ?? visibleCampaigns.length;
+  const canLoadMore = visibleCampaigns.length < totalCampaigns;
 
   if (!activeWorkspace) {
     return (
@@ -388,9 +396,21 @@ export function CampaignsWorkspace() {
         />
       ) : (
         <Card className={cn("overflow-hidden p-0", campaigns.isLoading ? "opacity-80" : "")}>
-          <div className="border-b border-slate-200 bg-slate-50 px-4 py-3 text-sm font-medium text-slate-700">
-            {campaigns.data?.total ?? visibleCampaigns.length} campaign
-            {(campaigns.data?.total ?? visibleCampaigns.length) === 1 ? "" : "s"}
+          <div className="flex flex-col gap-2 border-b border-slate-200 bg-slate-50 px-4 py-3 text-sm font-medium text-slate-700 sm:flex-row sm:items-center sm:justify-between">
+            <span>
+              Showing {visibleCampaigns.length} of {totalCampaigns} campaign
+              {totalCampaigns === 1 ? "" : "s"}
+            </span>
+            {canLoadMore ? (
+              <Button
+                disabled={campaigns.isLoading}
+                onClick={() => setCampaignLimit((current) => current + campaignPageSize)}
+                size="sm"
+                variant="secondary"
+              >
+                Load more
+              </Button>
+            ) : null}
           </div>
           <div className="divide-y divide-slate-100">
             {visibleCampaigns.map((campaign) => (

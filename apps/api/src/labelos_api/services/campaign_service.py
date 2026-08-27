@@ -93,6 +93,7 @@ ALLOWED_CAMPAIGN_TRANSITIONS: dict[CampaignStatus, frozenset[CampaignStatus]] = 
     CampaignStatus.cancelled: frozenset({CampaignStatus.archived}),
     CampaignStatus.archived: frozenset(),
 }
+MAX_CAMPAIGN_LIST_LIMIT = 100
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -190,6 +191,15 @@ def _assert_valid_transition(
 def _set_if_not_none(values: dict[str, object], key: str, value: object | None) -> None:
     if value is not None:
         values[key] = value
+
+
+def _validate_list_pagination(*, limit: int, offset: int) -> None:
+    if limit < 1 or limit > MAX_CAMPAIGN_LIST_LIMIT:
+        raise CampaignRelationshipError("Campaign list limit must be between 1 and 100")
+    if offset < 0:
+        raise CampaignRelationshipError(
+            "Campaign list offset must be greater than or equal to 0"
+        )
 
 
 def _normalize_optional_label(value: str | None) -> str | None:
@@ -394,6 +404,10 @@ def _relationship_payload(
     }
 
 
+def _is_primary_relationship(value: str | None) -> bool:
+    return value == "primary"
+
+
 async def _validate_profile_relationship(
     session: AsyncSession,
     workspace_id: UUID,
@@ -564,14 +578,22 @@ async def list_workspace_campaigns(
     workspace_id: UUID,
     *,
     actor: AuthorizationActorInput | None = None,
-) -> list[Campaign]:
+    limit: int = 50,
+    offset: int = 0,
+) -> campaigns.CampaignListPage:
+    _validate_list_pagination(limit=limit, offset=offset)
     await _require_capability(
         session,
         actor=actor,
         workspace_id=workspace_id,
         capability=Capability.marketing_campaign_view,
     )
-    return await campaigns.list_campaigns(session, workspace_id)
+    return await campaigns.list_campaigns(
+        session,
+        workspace_id,
+        limit=limit,
+        offset=offset,
+    )
 
 
 async def _ensure_campaign_exists(
@@ -1404,6 +1426,8 @@ async def associate_release(
             "Campaign and release must belong to the same workspace"
         )
     campaign = await _get_campaign_for_event(session, workspace_id, campaign_id)
+    if campaign.release_id is None or _is_primary_relationship(link.relationship_kind):
+        campaign.release_id = release_id
     loaded_links = await campaign_relationships.list_campaign_releases(
         session,
         workspace_id,
@@ -1461,6 +1485,22 @@ async def remove_release_association(
         campaign_id,
         release_id,
     )
+    if removed and campaign.release_id == release_id:
+        remaining_links = await campaign_relationships.list_campaign_releases(
+            session,
+            workspace_id,
+            campaign_id,
+        )
+        next_primary = next(
+            (
+                item
+                for item in remaining_links or []
+                if _is_primary_relationship(item.relationship_kind)
+            ),
+            None,
+        )
+        next_link = next_primary or next(iter(remaining_links or []), None)
+        campaign.release_id = next_link.release_id if next_link is not None else None
     if removed and link is not None:
         await _publish_campaign_event(
             session,

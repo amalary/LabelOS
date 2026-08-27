@@ -55,11 +55,15 @@ describe("campaign data layer", () => {
   });
 
   it("fetches campaigns through the workspace API proxy", async () => {
-    vi.mocked(fetch).mockResolvedValue(Response.json({ campaigns: [campaign], total: 1 }));
+    vi.mocked(fetch).mockResolvedValue(
+      Response.json({ campaigns: [campaign], total: 1, limit: 50, offset: 0 }),
+    );
 
     await expect(getCampaigns("workspace_01")).resolves.toEqual({
       campaigns: [campaign],
       total: 1,
+      limit: 50,
+      offset: 0,
     });
 
     expect(fetch).toHaveBeenCalledWith(
@@ -71,6 +75,27 @@ describe("campaign data layer", () => {
     );
     const headers = vi.mocked(fetch).mock.calls[0]?.[1]?.headers as Headers;
     expect(headers.get("Accept")).toBe("application/json");
+  });
+
+  it("fetches paged campaign lists through the workspace API proxy", async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      Response.json({ campaigns: [campaign], total: 2, limit: 1, offset: 1 }),
+    );
+
+    await expect(getCampaigns("workspace_01", { limit: 1, offset: 1 })).resolves.toEqual({
+      campaigns: [campaign],
+      total: 2,
+      limit: 1,
+      offset: 1,
+    });
+
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/workspaces/workspace_01/campaigns?limit=1&offset=1",
+      expect.objectContaining({
+        cache: "no-store",
+        headers: expect.any(Headers),
+      }),
+    );
   });
 
   it("creates campaigns through the workspace API proxy", async () => {
