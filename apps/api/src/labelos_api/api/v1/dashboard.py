@@ -68,6 +68,14 @@ def _has_capability(context: CurrentUserContext, capability: Capability) -> bool
     return has_capability(context, capability)
 
 
+def _has_permission_or_capability(
+    context: CurrentUserContext,
+    permission: Permission,
+    capability: Capability,
+) -> bool:
+    return _has_permission(context, permission) or _has_capability(context, capability)
+
+
 def _authorization_response(
     context: CurrentUserContext, membership: MembershipContext
 ) -> DashboardAuthorizationResponse:
@@ -136,10 +144,18 @@ async def get_dashboard_summary(
         "authorization": _authorization_response(context, membership),
     }
 
-    if _has_capability(context, Capability.artist_profile_view):
+    if _has_permission_or_capability(
+        context,
+        Permission.artists_view,
+        Capability.artist_profile_view,
+    ):
         available_cards.append("active-artists")
         payload["active_artists"] = summary.active_artists
-    if _has_capability(context, Capability.release_view):
+    if _has_permission_or_capability(
+        context,
+        Permission.releases_view,
+        Capability.release_view,
+    ):
         available_cards.append("upcoming-releases")
         available_sections.append("release-pipeline")
         payload["upcoming_releases"] = summary.upcoming_releases
@@ -150,7 +166,11 @@ async def get_dashboard_summary(
             "scheduled": summary.release_counts.scheduled,
             "released": summary.release_counts.released,
         }
-    if _has_capability(context, Capability.marketing_campaign_view):
+    if _has_permission_or_capability(
+        context,
+        Permission.campaigns_view,
+        Capability.marketing_campaign_view,
+    ):
         available_cards.append("active-campaigns")
         payload["active_campaigns"] = summary.active_campaigns
     if _has_capability(context, Capability.contract_approve):
@@ -174,10 +194,23 @@ async def get_label_performance(
     period: Annotated[LabelPerformancePeriod, Query()],
 ) -> LabelPerformanceResponse:
     organization_id = require_active_organization_id(context)
+    if not _has_permission(context, Permission.analytics_view):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Insufficient permission",
+        )
     if not _has_capability(context, Capability.finance_report_view):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Insufficient capability permission",
+        )
+    if metric == LabelPerformanceMetric.revenue and not _has_permission(
+        context,
+        Permission.royalties_view,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Insufficient permission",
         )
     if metric == LabelPerformanceMetric.revenue and not _has_capability(
         context,

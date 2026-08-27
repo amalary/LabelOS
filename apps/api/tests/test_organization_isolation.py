@@ -151,6 +151,7 @@ def isolated_client(
 
     seeded = asyncio.run(prepare_database())
     app = create_app()
+    app.state.test_user_id = seeded.user_id
 
     async def override_session() -> AsyncIterator[AsyncSession]:
         async with sessionmaker() as session:
@@ -173,9 +174,11 @@ def _set_active_organization(
     user_id: UUID | None = None,
     role: MembershipRole = MembershipRole.admin,
 ) -> None:
+    resolved_user_id = user_id or getattr(client.app.state, "test_user_id", None)
+
     async def override_context() -> CurrentUserContext:
         return CurrentUserContext(
-            user=User(id=user_id, email="person@example.com"),
+            user=User(id=resolved_user_id, email="person@example.com"),
             principal=AuthenticatedPrincipal(
                 provider="workos",
                 subject="user_01TEST",

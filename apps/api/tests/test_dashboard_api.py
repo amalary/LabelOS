@@ -12,8 +12,12 @@ from labelos_database.models import (
     Contract,
     MembershipRole,
     Organization,
+    OrganizationMembership,
     Release,
+    UniversalProfile,
     User,
+    WorkspaceMembership,
+    WorkspacePermission,
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
@@ -53,6 +57,11 @@ def dashboard_client(
 
         async with sessionmaker() as session:
             owner = User(email="owner@example.com", display_name="Owner")
+            owner_profile = UniversalProfile(
+                user=owner,
+                display_name="Owner Profile",
+                slug="dashboard-owner-profile",
+            )
             org_a = Organization(
                 name="Alpha Label",
                 slug="alpha-label",
@@ -64,6 +73,44 @@ def dashboard_client(
                 slug="beta-label",
                 workos_organization_id="org_BETA",
                 owner=owner,
+            )
+            org_a_membership = OrganizationMembership(
+                organization=org_a,
+                user=owner,
+                role=MembershipRole.admin,
+                workspace_permission=WorkspacePermission.admin,
+                department_access=[
+                    "administration",
+                    "analytics",
+                    "finance",
+                    "legal",
+                    "management",
+                ],
+            )
+            org_b_membership = OrganizationMembership(
+                organization=org_b,
+                user=owner,
+                role=MembershipRole.admin,
+                workspace_permission=WorkspacePermission.admin,
+                department_access=[
+                    "administration",
+                    "analytics",
+                    "finance",
+                    "legal",
+                    "management",
+                ],
+            )
+            org_a_workspace_membership = WorkspaceMembership(
+                workspace=org_a,
+                profile=owner_profile,
+                organization_membership=org_a_membership,
+                status="active",
+            )
+            org_b_workspace_membership = WorkspaceMembership(
+                workspace=org_b,
+                profile=owner_profile,
+                organization_membership=org_b_membership,
+                status="active",
             )
             artist_a = Artist(name="Artist A", organization=org_a)
             artist_b = Artist(name="Artist B", organization=org_a)
@@ -86,8 +133,13 @@ def dashboard_client(
             session.add_all(
                 [
                     owner,
+                    owner_profile,
                     org_a,
                     org_b,
+                    org_a_membership,
+                    org_b_membership,
+                    org_a_workspace_membership,
+                    org_b_workspace_membership,
                     artist_a,
                     artist_b,
                     outside_artist,
@@ -153,6 +205,7 @@ def _set_active_organization(
         "contracts",
         "finance",
         "legal",
+        "management",
     ),
 ) -> None:
     async def override_context() -> CurrentUserContext:
