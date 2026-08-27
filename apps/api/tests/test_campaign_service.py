@@ -7,6 +7,8 @@ from labelos_database.base import Base
 from labelos_database.models import (
     Artist,
     Campaign,
+    CampaignGoal,
+    CampaignMilestone,
     CampaignStatus,
     CampaignType,
     Organization,
@@ -20,22 +22,38 @@ from sqlalchemy.pool import StaticPool
 
 from labelos_api.services.campaign_service import (
     CampaignCreate,
+    CampaignGoalCreate,
+    CampaignGoalUpdate,
     CampaignLifecycleError,
+    CampaignMilestoneCreate,
+    CampaignMilestoneUpdate,
     CampaignNotFoundError,
+    CampaignPlanningItemNotFoundError,
     CampaignRelationshipError,
     CampaignUpdate,
     add_campaign_member,
     archive_campaign,
+    archive_campaign_goal,
+    archive_campaign_milestone,
     associate_artist,
     associate_release,
     change_campaign_status,
+    complete_campaign_milestone,
     create_campaign,
+    create_campaign_goal,
+    create_campaign_milestone,
+    delete_campaign_goal,
+    delete_campaign_milestone,
     get_campaign_by_id,
+    list_campaign_goals,
+    list_campaign_milestones,
     list_workspace_campaigns,
     remove_artist_association,
     remove_campaign_member,
     remove_release_association,
     update_campaign,
+    update_campaign_goal,
+    update_campaign_milestone,
 )
 
 
@@ -483,3 +501,192 @@ def test_campaign_service_validates_lifecycle_transitions(
     assert archived_status == CampaignStatus.archived
     assert active_reference_status is True
     assert rejected is True
+
+
+def test_campaign_service_manages_goals_and_milestones(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async def run() -> tuple[str, str, str, bool, bool]:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            creator_profile = data["creator_profile"]
+            assert isinstance(workspace, Organization)
+            assert isinstance(creator_profile, UniversalProfile)
+
+            campaign = await create_campaign(
+                session,
+                workspace.id,
+                CampaignCreate(name="Planning Campaign"),
+            )
+            goal = await create_campaign_goal(
+                session,
+                workspace.id,
+                campaign.id,
+                CampaignGoalCreate(
+                    title="Grow audience",
+                    target_value="10000 pre-saves",
+                ),
+            )
+            updated_goal = await update_campaign_goal(
+                session,
+                workspace.id,
+                campaign.id,
+                goal.id,
+                CampaignGoalUpdate(
+                    title="Grow launch audience",
+                    success_criteria="Hit pre-save target before release week",
+                ),
+            )
+            archived_goal = await archive_campaign_goal(
+                session,
+                workspace.id,
+                campaign.id,
+                goal.id,
+            )
+
+            milestone = await create_campaign_milestone(
+                session,
+                workspace.id,
+                campaign.id,
+                CampaignMilestoneCreate(
+                    title="Finalize creative",
+                    created_by_user_id=creator_profile.user_id,
+                ),
+            )
+            completed = await complete_campaign_milestone(
+                session,
+                workspace.id,
+                campaign.id,
+                milestone.id,
+            )
+            archived_milestone = await archive_campaign_milestone(
+                session,
+                workspace.id,
+                campaign.id,
+                milestone.id,
+            )
+
+            goals = await list_campaign_goals(session, workspace.id, campaign.id)
+            milestones = await list_campaign_milestones(
+                session,
+                workspace.id,
+                campaign.id,
+            )
+
+            return (
+                updated_goal.title,
+                archived_goal.status,
+                archived_milestone.status,
+                completed.completed_at is not None,
+                goals == [goal] and milestones == [milestone],
+            )
+
+    result = asyncio.run(run())
+
+    assert result == (
+        "Grow launch audience",
+        "archived",
+        "archived",
+        True,
+        True,
+    )
+
+
+def test_campaign_service_deletes_planning_items_and_blocks_cross_workspace_access(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async def run() -> tuple[bool, bool, bool, bool]:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            other_workspace = data["other_workspace"]
+            other_campaign = data["other_campaign"]
+            assert isinstance(workspace, Organization)
+            assert isinstance(other_workspace, Organization)
+            assert isinstance(other_campaign, Campaign)
+
+            campaign = await create_campaign(
+                session,
+                workspace.id,
+                CampaignCreate(name="Scoped Planning Campaign"),
+            )
+            goal = await create_campaign_goal(
+                session,
+                workspace.id,
+                campaign.id,
+                CampaignGoalCreate(title="Scoped goal"),
+            )
+            milestone = await create_campaign_milestone(
+                session,
+                workspace.id,
+                campaign.id,
+                CampaignMilestoneCreate(title="Scoped milestone"),
+            )
+            other_goal = CampaignGoal(
+                campaign_id=other_campaign.id,
+                title="Outside goal",
+            )
+            other_milestone = CampaignMilestone(
+                campaign_id=other_campaign.id,
+                title="Outside milestone",
+            )
+            session.add_all([other_goal, other_milestone])
+            await session.commit()
+
+            cross_goal_blocked = False
+            cross_milestone_blocked = False
+            try:
+                await update_campaign_goal(
+                    session,
+                    workspace.id,
+                    other_campaign.id,
+                    other_goal.id,
+                    CampaignGoalUpdate(title="Blocked"),
+                )
+            except CampaignNotFoundError:
+                cross_goal_blocked = True
+            try:
+                await update_campaign_milestone(
+                    session,
+                    workspace.id,
+                    other_campaign.id,
+                    other_milestone.id,
+                    CampaignMilestoneUpdate(title="Blocked"),
+                )
+            except CampaignNotFoundError:
+                cross_milestone_blocked = True
+
+            deleted_goal = await delete_campaign_goal(
+                session,
+                workspace.id,
+                campaign.id,
+                goal.id,
+            )
+            deleted_milestone = await delete_campaign_milestone(
+                session,
+                workspace.id,
+                campaign.id,
+                milestone.id,
+            )
+
+            missing_goal_blocked = False
+            try:
+                await update_campaign_goal(
+                    session,
+                    workspace.id,
+                    campaign.id,
+                    goal.id,
+                    CampaignGoalUpdate(title="Missing"),
+                )
+            except CampaignPlanningItemNotFoundError:
+                missing_goal_blocked = True
+
+            return (
+                deleted_goal,
+                deleted_milestone,
+                cross_goal_blocked and cross_milestone_blocked,
+                missing_goal_blocked,
+            )
+
+    assert asyncio.run(run()) == (True, True, True, True)

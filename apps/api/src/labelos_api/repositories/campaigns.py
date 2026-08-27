@@ -20,6 +20,7 @@ def _campaign_load_options():
     return (
         selectinload(Campaign.primary_artist),
         selectinload(Campaign.release),
+        selectinload(Campaign.owner_profile),
         selectinload(Campaign.artist_links).selectinload(CampaignArtist.artist),
         selectinload(Campaign.release_links).selectinload(CampaignRelease.release),
         selectinload(Campaign.member_links)

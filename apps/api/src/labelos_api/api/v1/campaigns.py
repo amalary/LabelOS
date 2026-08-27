@@ -6,7 +6,9 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 from labelos_database.models import (
     Campaign,
     CampaignArtist,
+    CampaignGoal,
     CampaignMember,
+    CampaignMilestone,
     CampaignRelease,
     CampaignStatus,
     CampaignType,
@@ -27,8 +29,13 @@ from labelos_api.services import campaign_service
 from labelos_api.services.campaign_service import (
     CampaignAuthorizationError,
     CampaignCreate,
+    CampaignGoalCreate,
+    CampaignGoalUpdate,
     CampaignLifecycleError,
+    CampaignMilestoneCreate,
+    CampaignMilestoneUpdate,
     CampaignNotFoundError,
+    CampaignPlanningItemNotFoundError,
     CampaignRelationshipError,
     CampaignUpdate,
 )
@@ -80,6 +87,7 @@ class CampaignMemberUpsertRequest(BaseModel):
 
     workspace_membership_id: UUID
     participation_status: str = Field(default="active", min_length=1, max_length=60)
+    responsibility_label: str | None = Field(default=None, max_length=120)
 
 
 class CampaignArtistUpsertRequest(BaseModel):
@@ -97,6 +105,57 @@ class CampaignReleaseUpsertRequest(BaseModel):
     relationship_kind: str = Field(default="related", min_length=1, max_length=60)
 
 
+class CampaignGoalCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = Field(min_length=1, max_length=240)
+    description: str | None = Field(default=None, max_length=4000)
+    target_value: str | None = Field(default=None, max_length=500)
+    success_criteria: str | None = Field(default=None, max_length=1000)
+    status: str = Field(default="active", min_length=1, max_length=60)
+
+
+class CampaignGoalUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str | None = Field(default=None, min_length=1, max_length=240)
+    description: str | None = Field(default=None, max_length=4000)
+    target_value: str | None = Field(default=None, max_length=500)
+    success_criteria: str | None = Field(default=None, max_length=1000)
+    status: str | None = Field(default=None, min_length=1, max_length=60)
+
+    @model_validator(mode="after")
+    def require_update(self) -> "CampaignGoalUpdateRequest":
+        if not self.model_fields_set:
+            raise ValueError("At least one campaign goal field is required")
+        return self
+
+
+class CampaignMilestoneCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = Field(min_length=1, max_length=240)
+    description: str | None = Field(default=None, max_length=4000)
+    target_date: date | None = None
+    status: str = Field(default="open", min_length=1, max_length=60)
+
+
+class CampaignMilestoneUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str | None = Field(default=None, min_length=1, max_length=240)
+    description: str | None = Field(default=None, max_length=4000)
+    target_date: date | None = None
+    status: str | None = Field(default=None, min_length=1, max_length=60)
+    completed_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def require_update(self) -> "CampaignMilestoneUpdateRequest":
+        if not self.model_fields_set:
+            raise ValueError("At least one campaign milestone field is required")
+        return self
+
+
 class CampaignArtistSummaryResponse(BaseModel):
     id: UUID
     name: str
@@ -108,11 +167,18 @@ class CampaignReleaseSummaryResponse(BaseModel):
     artist_id: UUID | None
 
 
+class CampaignOwnerSummaryResponse(BaseModel):
+    profile_id: UUID
+    display_name: str | None
+
+
 class CampaignMemberSummaryResponse(BaseModel):
     workspace_membership_id: UUID
     profile_id: UUID
     display_name: str | None
     participation_status: str
+    responsibility_label: str | None
+    is_owner: bool
 
 
 class CampaignArtistRelationshipResponse(BaseModel):
@@ -138,6 +204,7 @@ class CampaignResponse(BaseModel):
     created_by_user_id: UUID | None
     created_by_profile_id: UUID | None
     owner_profile_id: UUID | None
+    owner: CampaignOwnerSummaryResponse | None
     primary_artist: CampaignArtistSummaryResponse | None
     release: CampaignReleaseSummaryResponse | None
     members: list[CampaignMemberSummaryResponse] = Field(default_factory=list)
@@ -162,6 +229,39 @@ class CampaignArtistsListResponse(BaseModel):
 
 class CampaignReleasesListResponse(BaseModel):
     releases: list[CampaignReleaseRelationshipResponse]
+
+
+class CampaignGoalResponse(BaseModel):
+    id: UUID
+    campaign_id: UUID
+    title: str
+    description: str | None
+    target_value: str | None
+    success_criteria: str | None
+    status: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class CampaignGoalsListResponse(BaseModel):
+    goals: list[CampaignGoalResponse]
+
+
+class CampaignMilestoneResponse(BaseModel):
+    id: UUID
+    campaign_id: UUID
+    title: str
+    description: str | None
+    target_date: date | None
+    status: str
+    completed_at: datetime | None
+    created_by_user_id: UUID | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class CampaignMilestonesListResponse(BaseModel):
+    milestones: list[CampaignMilestoneResponse]
 
 
 def _not_found() -> HTTPException:
@@ -227,11 +327,16 @@ async def _current_workspace_membership(
 
 
 def _service_error(
-    exc: CampaignNotFoundError | CampaignRelationshipError | CampaignAuthorizationError,
+    exc: (
+        CampaignNotFoundError
+        | CampaignPlanningItemNotFoundError
+        | CampaignRelationshipError
+        | CampaignAuthorizationError
+    ),
 ) -> None:
     if isinstance(exc, CampaignAuthorizationError):
         _raise_capability_denial(exc.reason)
-    if isinstance(exc, CampaignNotFoundError):
+    if isinstance(exc, CampaignNotFoundError | CampaignPlanningItemNotFoundError):
         raise _not_found() from exc
     raise _bad_request(str(exc)) from exc
 
@@ -252,7 +357,20 @@ def _release_summary(release) -> CampaignReleaseSummaryResponse | None:
     )
 
 
-def _member_response(link: CampaignMember) -> CampaignMemberSummaryResponse:
+def _owner_summary(campaign: Campaign) -> CampaignOwnerSummaryResponse | None:
+    if campaign.owner_profile is None:
+        return None
+    return CampaignOwnerSummaryResponse(
+        profile_id=campaign.owner_profile.id,
+        display_name=campaign.owner_profile.display_name,
+    )
+
+
+def _member_response(
+    link: CampaignMember,
+    *,
+    owner_profile_id: UUID | None = None,
+) -> CampaignMemberSummaryResponse:
     membership = link.workspace_membership
     profile = membership.profile
     return CampaignMemberSummaryResponse(
@@ -260,6 +378,8 @@ def _member_response(link: CampaignMember) -> CampaignMemberSummaryResponse:
         profile_id=membership.profile_id,
         display_name=profile.display_name,
         participation_status=link.participation_status,
+        responsibility_label=link.responsibility_label,
+        is_owner=owner_profile_id == membership.profile_id,
     )
 
 
@@ -297,13 +417,46 @@ def _campaign_response(campaign: Campaign) -> CampaignResponse:
         created_by_user_id=campaign.created_by_user_id,
         created_by_profile_id=campaign.created_by_profile_id,
         owner_profile_id=campaign.owner_profile_id,
+        owner=_owner_summary(campaign),
         primary_artist=_artist_summary(campaign.primary_artist),
         release=_release_summary(campaign.release),
-        members=[_member_response(link) for link in campaign.member_links],
+        members=[
+            _member_response(link, owner_profile_id=campaign.owner_profile_id)
+            for link in campaign.member_links
+        ],
         artists=[_artist_link_response(link) for link in campaign.artist_links],
         releases=[_release_link_response(link) for link in campaign.release_links],
         created_at=campaign.created_at,
         updated_at=campaign.updated_at,
+    )
+
+
+def _goal_response(goal: CampaignGoal) -> CampaignGoalResponse:
+    return CampaignGoalResponse(
+        id=goal.id,
+        campaign_id=goal.campaign_id,
+        title=goal.title,
+        description=goal.description,
+        target_value=goal.target_value,
+        success_criteria=goal.success_criteria,
+        status=goal.status,
+        created_at=goal.created_at,
+        updated_at=goal.updated_at,
+    )
+
+
+def _milestone_response(milestone: CampaignMilestone) -> CampaignMilestoneResponse:
+    return CampaignMilestoneResponse(
+        id=milestone.id,
+        campaign_id=milestone.campaign_id,
+        title=milestone.title,
+        description=milestone.description,
+        target_date=milestone.target_date,
+        status=milestone.status,
+        completed_at=milestone.completed_at,
+        created_by_user_id=milestone.created_by_user_id,
+        created_at=milestone.created_at,
+        updated_at=milestone.updated_at,
     )
 
 
@@ -528,6 +681,371 @@ async def archive_campaign(
 
 
 @router.get(
+    "/{workspace_id}/campaigns/{campaign_id}/goals",
+    response_model=CampaignGoalsListResponse,
+)
+async def list_campaign_goals(
+    workspace_id: UUID,
+    campaign_id: UUID,
+    session: SessionDep,
+    context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
+) -> CampaignGoalsListResponse:
+    await _require_campaign_capability(
+        session,
+        context=context,
+        workspace_id=workspace_id,
+        capability=Capability.marketing_campaign_view,
+    )
+    try:
+        goals = await campaign_service.list_campaign_goals(
+            session,
+            workspace_id,
+            campaign_id,
+            actor=context,
+        )
+    except (CampaignNotFoundError, CampaignAuthorizationError) as exc:
+        _service_error(exc)
+    return CampaignGoalsListResponse(goals=[_goal_response(goal) for goal in goals])
+
+
+@router.post(
+    "/{workspace_id}/campaigns/{campaign_id}/goals",
+    response_model=CampaignGoalResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_campaign_goal(
+    workspace_id: UUID,
+    campaign_id: UUID,
+    payload: CampaignGoalCreateRequest,
+    session: SessionDep,
+    context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
+) -> CampaignGoalResponse:
+    await _require_campaign_capability(
+        session,
+        context=context,
+        workspace_id=workspace_id,
+        capability=Capability.marketing_campaign_edit,
+    )
+    try:
+        goal = await campaign_service.create_campaign_goal(
+            session,
+            workspace_id,
+            campaign_id,
+            CampaignGoalCreate(**payload.model_dump()),
+            actor=context,
+        )
+    except (CampaignNotFoundError, CampaignAuthorizationError) as exc:
+        _service_error(exc)
+    return _goal_response(goal)
+
+
+@router.patch(
+    "/{workspace_id}/campaigns/{campaign_id}/goals/{goal_id}",
+    response_model=CampaignGoalResponse,
+)
+async def update_campaign_goal(
+    workspace_id: UUID,
+    campaign_id: UUID,
+    goal_id: UUID,
+    payload: CampaignGoalUpdateRequest,
+    session: SessionDep,
+    context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
+) -> CampaignGoalResponse:
+    await _require_campaign_capability(
+        session,
+        context=context,
+        workspace_id=workspace_id,
+        capability=Capability.marketing_campaign_edit,
+    )
+    try:
+        goal = await campaign_service.update_campaign_goal(
+            session,
+            workspace_id,
+            campaign_id,
+            goal_id,
+            CampaignGoalUpdate(**payload.model_dump(exclude_unset=True)),
+            actor=context,
+        )
+    except (
+        CampaignNotFoundError,
+        CampaignPlanningItemNotFoundError,
+        CampaignAuthorizationError,
+    ) as exc:
+        _service_error(exc)
+    return _goal_response(goal)
+
+
+@router.post(
+    "/{workspace_id}/campaigns/{campaign_id}/goals/{goal_id}/archive",
+    response_model=CampaignGoalResponse,
+)
+async def archive_campaign_goal(
+    workspace_id: UUID,
+    campaign_id: UUID,
+    goal_id: UUID,
+    session: SessionDep,
+    context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
+) -> CampaignGoalResponse:
+    await _require_campaign_capability(
+        session,
+        context=context,
+        workspace_id=workspace_id,
+        capability=Capability.marketing_campaign_edit,
+    )
+    try:
+        goal = await campaign_service.archive_campaign_goal(
+            session,
+            workspace_id,
+            campaign_id,
+            goal_id,
+            actor=context,
+        )
+    except (
+        CampaignNotFoundError,
+        CampaignPlanningItemNotFoundError,
+        CampaignAuthorizationError,
+    ) as exc:
+        _service_error(exc)
+    return _goal_response(goal)
+
+
+@router.delete(
+    "/{workspace_id}/campaigns/{campaign_id}/goals/{goal_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_campaign_goal(
+    workspace_id: UUID,
+    campaign_id: UUID,
+    goal_id: UUID,
+    session: SessionDep,
+    context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
+) -> Response:
+    await _require_campaign_capability(
+        session,
+        context=context,
+        workspace_id=workspace_id,
+        capability=Capability.marketing_campaign_edit,
+    )
+    try:
+        removed = await campaign_service.delete_campaign_goal(
+            session,
+            workspace_id,
+            campaign_id,
+            goal_id,
+            actor=context,
+        )
+    except (CampaignNotFoundError, CampaignAuthorizationError) as exc:
+        _service_error(exc)
+    if not removed:
+        raise _not_found()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get(
+    "/{workspace_id}/campaigns/{campaign_id}/milestones",
+    response_model=CampaignMilestonesListResponse,
+)
+async def list_campaign_milestones(
+    workspace_id: UUID,
+    campaign_id: UUID,
+    session: SessionDep,
+    context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
+) -> CampaignMilestonesListResponse:
+    await _require_campaign_capability(
+        session,
+        context=context,
+        workspace_id=workspace_id,
+        capability=Capability.marketing_campaign_view,
+    )
+    try:
+        milestones = await campaign_service.list_campaign_milestones(
+            session,
+            workspace_id,
+            campaign_id,
+            actor=context,
+        )
+    except (CampaignNotFoundError, CampaignAuthorizationError) as exc:
+        _service_error(exc)
+    return CampaignMilestonesListResponse(
+        milestones=[_milestone_response(milestone) for milestone in milestones]
+    )
+
+
+@router.post(
+    "/{workspace_id}/campaigns/{campaign_id}/milestones",
+    response_model=CampaignMilestoneResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_campaign_milestone(
+    workspace_id: UUID,
+    campaign_id: UUID,
+    payload: CampaignMilestoneCreateRequest,
+    session: SessionDep,
+    context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
+) -> CampaignMilestoneResponse:
+    await _require_campaign_capability(
+        session,
+        context=context,
+        workspace_id=workspace_id,
+        capability=Capability.marketing_campaign_edit,
+    )
+    try:
+        milestone = await campaign_service.create_campaign_milestone(
+            session,
+            workspace_id,
+            campaign_id,
+            CampaignMilestoneCreate(
+                **payload.model_dump(),
+                created_by_user_id=context.user.id,
+            ),
+            actor=context,
+        )
+    except (
+        CampaignNotFoundError,
+        CampaignRelationshipError,
+        CampaignAuthorizationError,
+    ) as exc:
+        _service_error(exc)
+    return _milestone_response(milestone)
+
+
+@router.patch(
+    "/{workspace_id}/campaigns/{campaign_id}/milestones/{milestone_id}",
+    response_model=CampaignMilestoneResponse,
+)
+async def update_campaign_milestone(
+    workspace_id: UUID,
+    campaign_id: UUID,
+    milestone_id: UUID,
+    payload: CampaignMilestoneUpdateRequest,
+    session: SessionDep,
+    context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
+) -> CampaignMilestoneResponse:
+    await _require_campaign_capability(
+        session,
+        context=context,
+        workspace_id=workspace_id,
+        capability=Capability.marketing_campaign_edit,
+    )
+    try:
+        milestone = await campaign_service.update_campaign_milestone(
+            session,
+            workspace_id,
+            campaign_id,
+            milestone_id,
+            CampaignMilestoneUpdate(**payload.model_dump(exclude_unset=True)),
+            actor=context,
+        )
+    except (
+        CampaignNotFoundError,
+        CampaignPlanningItemNotFoundError,
+        CampaignAuthorizationError,
+    ) as exc:
+        _service_error(exc)
+    return _milestone_response(milestone)
+
+
+@router.post(
+    "/{workspace_id}/campaigns/{campaign_id}/milestones/{milestone_id}/complete",
+    response_model=CampaignMilestoneResponse,
+)
+async def complete_campaign_milestone(
+    workspace_id: UUID,
+    campaign_id: UUID,
+    milestone_id: UUID,
+    session: SessionDep,
+    context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
+) -> CampaignMilestoneResponse:
+    await _require_campaign_capability(
+        session,
+        context=context,
+        workspace_id=workspace_id,
+        capability=Capability.marketing_campaign_edit,
+    )
+    try:
+        milestone = await campaign_service.complete_campaign_milestone(
+            session,
+            workspace_id,
+            campaign_id,
+            milestone_id,
+            actor=context,
+        )
+    except (
+        CampaignNotFoundError,
+        CampaignPlanningItemNotFoundError,
+        CampaignAuthorizationError,
+    ) as exc:
+        _service_error(exc)
+    return _milestone_response(milestone)
+
+
+@router.post(
+    "/{workspace_id}/campaigns/{campaign_id}/milestones/{milestone_id}/archive",
+    response_model=CampaignMilestoneResponse,
+)
+async def archive_campaign_milestone(
+    workspace_id: UUID,
+    campaign_id: UUID,
+    milestone_id: UUID,
+    session: SessionDep,
+    context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
+) -> CampaignMilestoneResponse:
+    await _require_campaign_capability(
+        session,
+        context=context,
+        workspace_id=workspace_id,
+        capability=Capability.marketing_campaign_edit,
+    )
+    try:
+        milestone = await campaign_service.archive_campaign_milestone(
+            session,
+            workspace_id,
+            campaign_id,
+            milestone_id,
+            actor=context,
+        )
+    except (
+        CampaignNotFoundError,
+        CampaignPlanningItemNotFoundError,
+        CampaignAuthorizationError,
+    ) as exc:
+        _service_error(exc)
+    return _milestone_response(milestone)
+
+
+@router.delete(
+    "/{workspace_id}/campaigns/{campaign_id}/milestones/{milestone_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_campaign_milestone(
+    workspace_id: UUID,
+    campaign_id: UUID,
+    milestone_id: UUID,
+    session: SessionDep,
+    context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
+) -> Response:
+    await _require_campaign_capability(
+        session,
+        context=context,
+        workspace_id=workspace_id,
+        capability=Capability.marketing_campaign_edit,
+    )
+    try:
+        removed = await campaign_service.delete_campaign_milestone(
+            session,
+            workspace_id,
+            campaign_id,
+            milestone_id,
+            actor=context,
+        )
+    except (CampaignNotFoundError, CampaignAuthorizationError) as exc:
+        _service_error(exc)
+    if not removed:
+        raise _not_found()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get(
     "/{workspace_id}/campaigns/{campaign_id}/members",
     response_model=CampaignMembersListResponse,
 )
@@ -544,6 +1062,12 @@ async def list_campaign_members(
         capability=Capability.marketing_campaign_view,
     )
     try:
+        campaign = await campaign_service.get_campaign_by_id(
+            session,
+            workspace_id,
+            campaign_id,
+            actor=context,
+        )
         links = await campaign_service.list_campaign_members(
             session,
             workspace_id,
@@ -553,7 +1077,10 @@ async def list_campaign_members(
     except (CampaignNotFoundError, CampaignAuthorizationError) as exc:
         _service_error(exc)
     return CampaignMembersListResponse(
-        members=[_member_response(link) for link in links]
+        members=[
+            _member_response(link, owner_profile_id=campaign.owner_profile_id)
+            for link in links
+        ]
     )
 
 
@@ -581,6 +1108,7 @@ async def upsert_campaign_member(
             campaign_id,
             payload.workspace_membership_id,
             participation_status=payload.participation_status,
+            responsibility_label=payload.responsibility_label,
             actor=context,
         )
     except (CampaignRelationshipError, CampaignAuthorizationError) as exc:
@@ -593,7 +1121,16 @@ async def upsert_campaign_member(
     )
     for loaded in links:
         if loaded.workspace_membership_id == link.workspace_membership_id:
-            return _member_response(loaded)
+            campaign = await campaign_service.get_campaign_by_id(
+                session,
+                workspace_id,
+                campaign_id,
+                actor=context,
+            )
+            return _member_response(
+                loaded,
+                owner_profile_id=campaign.owner_profile_id,
+            )
     raise _not_found()
 
 

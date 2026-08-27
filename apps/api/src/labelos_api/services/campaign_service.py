@@ -1,15 +1,18 @@
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime
 from uuid import UUID
 
 from labelos_database.models import (
     Campaign,
     CampaignArtist,
+    CampaignGoal,
     CampaignMember,
+    CampaignMilestone,
     CampaignRelease,
     CampaignStatus,
     CampaignType,
+    User,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,7 +23,12 @@ from labelos_api.authorization import (
     ResourceKind,
     authorization_service,
 )
-from labelos_api.repositories import campaign_relationships, campaigns
+from labelos_api.realtime import RealtimeEventType, RealtimePublisher
+from labelos_api.repositories import (
+    campaign_planning,
+    campaign_relationships,
+    campaigns,
+)
 
 
 class CampaignServiceError(ValueError):
@@ -36,6 +44,10 @@ class CampaignRelationshipError(CampaignServiceError):
 
 
 class CampaignLifecycleError(CampaignServiceError):
+    pass
+
+
+class CampaignPlanningItemNotFoundError(CampaignServiceError):
     pass
 
 
@@ -110,6 +122,42 @@ class CampaignUpdate:
     release_id: UUID | None = None
 
 
+@dataclass(frozen=True, kw_only=True)
+class CampaignGoalCreate:
+    title: str
+    description: str | None = None
+    target_value: str | None = None
+    success_criteria: str | None = None
+    status: str = "active"
+
+
+@dataclass(frozen=True, kw_only=True)
+class CampaignGoalUpdate:
+    title: str | None = None
+    description: str | None = None
+    target_value: str | None = None
+    success_criteria: str | None = None
+    status: str | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class CampaignMilestoneCreate:
+    title: str
+    description: str | None = None
+    target_date: date | None = None
+    status: str = "open"
+    created_by_user_id: UUID | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class CampaignMilestoneUpdate:
+    title: str | None = None
+    description: str | None = None
+    target_date: date | None = None
+    status: str | None = None
+    completed_at: datetime | None = None
+
+
 def _coerce_campaign_type(value: CampaignType | str) -> CampaignType:
     try:
         return value if isinstance(value, CampaignType) else CampaignType(value)
@@ -142,6 +190,60 @@ def _assert_valid_transition(
 def _set_if_not_none(values: dict[str, object], key: str, value: object | None) -> None:
     if value is not None:
         values[key] = value
+
+
+def _normalize_optional_label(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def _actor_user(actor: AuthorizationActorInput | None) -> User | None:
+    user = getattr(actor, "user", None)
+    return user if isinstance(user, User) else None
+
+
+def _campaign_member_payload(
+    *,
+    campaign: Campaign,
+    link: CampaignMember,
+) -> dict[str, str | None]:
+    membership = link.workspace_membership
+    profile = membership.profile
+    return {
+        "campaignId": str(campaign.id),
+        "campaignName": campaign.name,
+        "workspaceMembershipId": str(membership.id),
+        "profileId": str(membership.profile_id),
+        "displayName": profile.display_name,
+        "participationStatus": link.participation_status,
+        "responsibilityLabel": link.responsibility_label,
+        "ownerProfileId": (
+            str(campaign.owner_profile_id)
+            if campaign.owner_profile_id is not None
+            else None
+        ),
+    }
+
+
+async def _publish_campaign_member_event(
+    session: AsyncSession,
+    *,
+    workspace_id: UUID,
+    event_type: RealtimeEventType,
+    actor: AuthorizationActorInput | None,
+    campaign: Campaign,
+    link: CampaignMember,
+) -> None:
+    await RealtimePublisher(session).publish(
+        organization_id=workspace_id,
+        event_type=event_type,
+        actor=_actor_user(actor),
+        entity_type="campaign",
+        entity_id=campaign.id,
+        payload=_campaign_member_payload(campaign=campaign, link=link),
+    )
 
 
 async def _validate_profile_relationship(
@@ -267,6 +369,48 @@ def _update_values(payload: CampaignUpdate) -> dict[str, object]:
     return values
 
 
+def _goal_create_values(payload: CampaignGoalCreate) -> dict[str, object]:
+    values: dict[str, object] = {
+        "title": payload.title,
+        "status": payload.status,
+    }
+    _set_if_not_none(values, "description", payload.description)
+    _set_if_not_none(values, "target_value", payload.target_value)
+    _set_if_not_none(values, "success_criteria", payload.success_criteria)
+    return values
+
+
+def _goal_update_values(payload: CampaignGoalUpdate) -> dict[str, object]:
+    values: dict[str, object] = {}
+    _set_if_not_none(values, "title", payload.title)
+    _set_if_not_none(values, "description", payload.description)
+    _set_if_not_none(values, "target_value", payload.target_value)
+    _set_if_not_none(values, "success_criteria", payload.success_criteria)
+    _set_if_not_none(values, "status", payload.status)
+    return values
+
+
+def _milestone_create_values(payload: CampaignMilestoneCreate) -> dict[str, object]:
+    values: dict[str, object] = {
+        "title": payload.title,
+        "status": payload.status,
+    }
+    _set_if_not_none(values, "description", payload.description)
+    _set_if_not_none(values, "target_date", payload.target_date)
+    _set_if_not_none(values, "created_by_user_id", payload.created_by_user_id)
+    return values
+
+
+def _milestone_update_values(payload: CampaignMilestoneUpdate) -> dict[str, object]:
+    values: dict[str, object] = {}
+    _set_if_not_none(values, "title", payload.title)
+    _set_if_not_none(values, "description", payload.description)
+    _set_if_not_none(values, "target_date", payload.target_date)
+    _set_if_not_none(values, "status", payload.status)
+    _set_if_not_none(values, "completed_at", payload.completed_at)
+    return values
+
+
 async def list_workspace_campaigns(
     session: AsyncSession,
     workspace_id: UUID,
@@ -280,6 +424,295 @@ async def list_workspace_campaigns(
         capability=Capability.marketing_campaign_view,
     )
     return await campaigns.list_campaigns(session, workspace_id)
+
+
+async def _ensure_campaign_exists(
+    session: AsyncSession,
+    workspace_id: UUID,
+    campaign_id: UUID,
+) -> None:
+    if not await campaign_planning.campaign_exists(session, workspace_id, campaign_id):
+        raise CampaignNotFoundError("Campaign not found")
+
+
+async def list_campaign_goals(
+    session: AsyncSession,
+    workspace_id: UUID,
+    campaign_id: UUID,
+    *,
+    actor: AuthorizationActorInput | None = None,
+) -> list[CampaignGoal]:
+    await _require_capability(
+        session,
+        actor=actor,
+        workspace_id=workspace_id,
+        capability=Capability.marketing_campaign_view,
+        campaign_id=campaign_id,
+    )
+    goals = await campaign_planning.list_goals(session, workspace_id, campaign_id)
+    if goals is None:
+        raise CampaignNotFoundError("Campaign not found")
+    return goals
+
+
+async def create_campaign_goal(
+    session: AsyncSession,
+    workspace_id: UUID,
+    campaign_id: UUID,
+    payload: CampaignGoalCreate,
+    *,
+    actor: AuthorizationActorInput | None = None,
+) -> CampaignGoal:
+    await _require_capability(
+        session,
+        actor=actor,
+        workspace_id=workspace_id,
+        capability=Capability.marketing_campaign_edit,
+        campaign_id=campaign_id,
+    )
+    goal = await campaign_planning.create_goal(
+        session,
+        workspace_id,
+        campaign_id,
+        _goal_create_values(payload),
+    )
+    if goal is None:
+        raise CampaignNotFoundError("Campaign not found")
+    await session.commit()
+    return goal
+
+
+async def update_campaign_goal(
+    session: AsyncSession,
+    workspace_id: UUID,
+    campaign_id: UUID,
+    goal_id: UUID,
+    payload: CampaignGoalUpdate,
+    *,
+    actor: AuthorizationActorInput | None = None,
+) -> CampaignGoal:
+    await _require_capability(
+        session,
+        actor=actor,
+        workspace_id=workspace_id,
+        capability=Capability.marketing_campaign_edit,
+        campaign_id=campaign_id,
+    )
+    await _ensure_campaign_exists(session, workspace_id, campaign_id)
+    goal = await campaign_planning.update_goal(
+        session,
+        workspace_id,
+        campaign_id,
+        goal_id,
+        _goal_update_values(payload),
+    )
+    if goal is None:
+        raise CampaignPlanningItemNotFoundError("Campaign goal not found")
+    await session.commit()
+    return goal
+
+
+async def archive_campaign_goal(
+    session: AsyncSession,
+    workspace_id: UUID,
+    campaign_id: UUID,
+    goal_id: UUID,
+    *,
+    actor: AuthorizationActorInput | None = None,
+) -> CampaignGoal:
+    return await update_campaign_goal(
+        session,
+        workspace_id,
+        campaign_id,
+        goal_id,
+        CampaignGoalUpdate(status="archived"),
+        actor=actor,
+    )
+
+
+async def delete_campaign_goal(
+    session: AsyncSession,
+    workspace_id: UUID,
+    campaign_id: UUID,
+    goal_id: UUID,
+    *,
+    actor: AuthorizationActorInput | None = None,
+) -> bool:
+    await _require_capability(
+        session,
+        actor=actor,
+        workspace_id=workspace_id,
+        capability=Capability.marketing_campaign_edit,
+        campaign_id=campaign_id,
+    )
+    await _ensure_campaign_exists(session, workspace_id, campaign_id)
+    removed = await campaign_planning.delete_goal(
+        session,
+        workspace_id,
+        campaign_id,
+        goal_id,
+    )
+    await session.commit()
+    return removed
+
+
+async def list_campaign_milestones(
+    session: AsyncSession,
+    workspace_id: UUID,
+    campaign_id: UUID,
+    *,
+    actor: AuthorizationActorInput | None = None,
+) -> list[CampaignMilestone]:
+    await _require_capability(
+        session,
+        actor=actor,
+        workspace_id=workspace_id,
+        capability=Capability.marketing_campaign_view,
+        campaign_id=campaign_id,
+    )
+    milestones = await campaign_planning.list_milestones(
+        session,
+        workspace_id,
+        campaign_id,
+    )
+    if milestones is None:
+        raise CampaignNotFoundError("Campaign not found")
+    return milestones
+
+
+async def create_campaign_milestone(
+    session: AsyncSession,
+    workspace_id: UUID,
+    campaign_id: UUID,
+    payload: CampaignMilestoneCreate,
+    *,
+    actor: AuthorizationActorInput | None = None,
+) -> CampaignMilestone:
+    await _require_capability(
+        session,
+        actor=actor,
+        workspace_id=workspace_id,
+        capability=Capability.marketing_campaign_edit,
+        campaign_id=campaign_id,
+    )
+    values = _milestone_create_values(payload)
+    created_by_user_id = values.get("created_by_user_id")
+    if isinstance(
+        created_by_user_id,
+        UUID,
+    ) and not await campaigns.user_is_active_workspace_member(
+        session,
+        workspace_id,
+        created_by_user_id,
+    ):
+        raise CampaignRelationshipError(
+            "created_by_user_id must belong to an active workspace member"
+        )
+    milestone = await campaign_planning.create_milestone(
+        session,
+        workspace_id,
+        campaign_id,
+        values,
+    )
+    if milestone is None:
+        raise CampaignNotFoundError("Campaign not found")
+    await session.commit()
+    return milestone
+
+
+async def update_campaign_milestone(
+    session: AsyncSession,
+    workspace_id: UUID,
+    campaign_id: UUID,
+    milestone_id: UUID,
+    payload: CampaignMilestoneUpdate,
+    *,
+    actor: AuthorizationActorInput | None = None,
+) -> CampaignMilestone:
+    await _require_capability(
+        session,
+        actor=actor,
+        workspace_id=workspace_id,
+        capability=Capability.marketing_campaign_edit,
+        campaign_id=campaign_id,
+    )
+    await _ensure_campaign_exists(session, workspace_id, campaign_id)
+    milestone = await campaign_planning.update_milestone(
+        session,
+        workspace_id,
+        campaign_id,
+        milestone_id,
+        _milestone_update_values(payload),
+    )
+    if milestone is None:
+        raise CampaignPlanningItemNotFoundError("Campaign milestone not found")
+    await session.commit()
+    return milestone
+
+
+async def complete_campaign_milestone(
+    session: AsyncSession,
+    workspace_id: UUID,
+    campaign_id: UUID,
+    milestone_id: UUID,
+    *,
+    actor: AuthorizationActorInput | None = None,
+) -> CampaignMilestone:
+    return await update_campaign_milestone(
+        session,
+        workspace_id,
+        campaign_id,
+        milestone_id,
+        CampaignMilestoneUpdate(
+            status="completed",
+            completed_at=datetime.now(UTC),
+        ),
+        actor=actor,
+    )
+
+
+async def archive_campaign_milestone(
+    session: AsyncSession,
+    workspace_id: UUID,
+    campaign_id: UUID,
+    milestone_id: UUID,
+    *,
+    actor: AuthorizationActorInput | None = None,
+) -> CampaignMilestone:
+    return await update_campaign_milestone(
+        session,
+        workspace_id,
+        campaign_id,
+        milestone_id,
+        CampaignMilestoneUpdate(status="archived"),
+        actor=actor,
+    )
+
+
+async def delete_campaign_milestone(
+    session: AsyncSession,
+    workspace_id: UUID,
+    campaign_id: UUID,
+    milestone_id: UUID,
+    *,
+    actor: AuthorizationActorInput | None = None,
+) -> bool:
+    await _require_capability(
+        session,
+        actor=actor,
+        workspace_id=workspace_id,
+        capability=Capability.marketing_campaign_edit,
+        campaign_id=campaign_id,
+    )
+    await _ensure_campaign_exists(session, workspace_id, campaign_id)
+    removed = await campaign_planning.delete_milestone(
+        session,
+        workspace_id,
+        campaign_id,
+        milestone_id,
+    )
+    await session.commit()
+    return removed
 
 
 async def get_campaign_by_id(
@@ -401,6 +834,7 @@ async def add_campaign_member(
     workspace_membership_id: UUID,
     *,
     participation_status: str = "active",
+    responsibility_label: str | None = None,
     actor: AuthorizationActorInput | None = None,
 ) -> CampaignMember:
     await _require_capability(
@@ -410,17 +844,45 @@ async def add_campaign_member(
         capability=Capability.marketing_campaign_edit,
         campaign_id=campaign_id,
     )
+    campaign = await get_campaign_by_id(session, workspace_id, campaign_id)
+    existing = await campaign_relationships.get_campaign_member(
+        session,
+        workspace_id,
+        campaign_id,
+        workspace_membership_id,
+    )
     link = await campaign_relationships.add_campaign_member(
         session,
         workspace_id,
         campaign_id,
         workspace_membership_id,
         participation_status=participation_status,
+        responsibility_label=_normalize_optional_label(responsibility_label),
     )
     if link is None:
         raise CampaignRelationshipError(
             "Campaign and workspace membership must belong to the same workspace"
         )
+    loaded_link = await campaign_relationships.get_campaign_member(
+        session,
+        workspace_id,
+        campaign_id,
+        workspace_membership_id,
+    )
+    if loaded_link is None:
+        raise CampaignRelationshipError("Campaign member could not be loaded")
+    await _publish_campaign_member_event(
+        session,
+        workspace_id=workspace_id,
+        event_type=(
+            RealtimeEventType.campaign_member_updated
+            if existing is not None
+            else RealtimeEventType.campaign_member_added
+        ),
+        actor=actor,
+        campaign=campaign,
+        link=loaded_link,
+    )
     await session.commit()
     return link
 
@@ -464,13 +926,28 @@ async def remove_campaign_member(
         capability=Capability.marketing_campaign_edit,
         campaign_id=campaign_id,
     )
-    await get_campaign_by_id(session, workspace_id, campaign_id)
+    campaign = await get_campaign_by_id(session, workspace_id, campaign_id)
+    link = await campaign_relationships.get_campaign_member(
+        session,
+        workspace_id,
+        campaign_id,
+        workspace_membership_id,
+    )
     removed = await campaign_relationships.remove_campaign_member(
         session,
         workspace_id,
         campaign_id,
         workspace_membership_id,
     )
+    if removed and link is not None:
+        await _publish_campaign_member_event(
+            session,
+            workspace_id=workspace_id,
+            event_type=RealtimeEventType.campaign_member_removed,
+            actor=actor,
+            campaign=campaign,
+            link=link,
+        )
     await session.commit()
     return removed
 

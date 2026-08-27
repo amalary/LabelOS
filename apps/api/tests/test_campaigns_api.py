@@ -17,6 +17,7 @@ from labelos_database.models import (
     MembershipRole,
     Organization,
     OrganizationMembership,
+    RealtimeEvent,
     Release,
     UniversalProfile,
     User,
@@ -366,6 +367,7 @@ def test_campaign_api_supports_core_workflow_and_normalized_relationships(
         json={
             "workspace_membership_id": str(seeded.member_workspace_membership_id),
             "participation_status": "confirmed",
+            "responsibility_label": "campaign lead",
         },
     )
     artist = client.put(
@@ -385,6 +387,8 @@ def test_campaign_api_supports_core_workflow_and_normalized_relationships(
     )
     assert member.status_code == 200
     assert member.json()["display_name"] == "Campaign Member"
+    assert member.json()["responsibility_label"] == "campaign lead"
+    assert member.json()["is_owner"] is True
     assert artist.status_code == 200
     assert artist.json()["artist"]["name"] == "Alpha Artist"
     assert release.status_code == 200
@@ -406,12 +410,157 @@ def test_campaign_api_supports_core_workflow_and_normalized_relationships(
         item for item in body["campaigns"] if item["id"] == campaign_id
     )
     assert created_record["members"][0]["participation_status"] == "confirmed"
+    assert created_record["members"][0]["responsibility_label"] == "campaign lead"
+    assert created_record["members"][0]["is_owner"] is True
+    assert created_record["owner"] == {
+        "profile_id": str(seeded.member_profile_id),
+        "display_name": "Campaign Member",
+    }
     assert created_record["artists"][0]["relationship_kind"] == "primary"
     assert created_record["releases"][0]["relationship_kind"] == "focus"
 
     archived = client.post(f"{base}/{campaign_id}/archive")
     assert archived.status_code == 200
     assert archived.json()["status"] == "archived"
+
+
+def test_campaign_team_membership_changes_publish_activity_events(
+    campaigns_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededCampaignApi,
+    ],
+) -> None:
+    client, sessionmaker, seeded = campaigns_client
+    _set_context(client, seeded)
+    base = f"/api/v1/workspaces/{seeded.workspace_id}/campaigns/{seeded.campaign_id}"
+
+    added = client.put(
+        f"{base}/members",
+        json={
+            "workspace_membership_id": str(seeded.member_workspace_membership_id),
+            "participation_status": "active",
+            "responsibility_label": "marketing lead",
+        },
+    )
+    updated = client.put(
+        f"{base}/members",
+        json={
+            "workspace_membership_id": str(seeded.member_workspace_membership_id),
+            "participation_status": "active",
+            "responsibility_label": "creative lead",
+        },
+    )
+    removed = client.delete(
+        f"{base}/members/{seeded.member_workspace_membership_id}",
+    )
+
+    assert added.status_code == 200
+    assert updated.status_code == 200
+    assert removed.status_code == 204
+
+    async def events() -> list[RealtimeEvent]:
+        async with sessionmaker() as session:
+            rows = await session.scalars(
+                select(RealtimeEvent)
+                .where(RealtimeEvent.organization_id == seeded.workspace_id)
+                .order_by(RealtimeEvent.created_at.asc())
+            )
+            return list(rows.all())
+
+    records = asyncio.run(events())
+    assert [record.event_type for record in records] == [
+        "campaign.member_added",
+        "campaign.member_updated",
+        "campaign.member_removed",
+    ]
+    assert records[0].entity_type == "campaign"
+    assert records[0].entity_id == str(seeded.campaign_id)
+    assert records[0].actor_user_id == seeded.owner_user_id
+    assert records[0].payload["displayName"] == "Campaign Member"
+    assert records[1].payload["responsibilityLabel"] == "creative lead"
+
+
+def test_campaign_api_manages_goals_and_milestones(
+    campaigns_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededCampaignApi,
+    ],
+) -> None:
+    client, _sessionmaker, seeded = campaigns_client
+    _set_context(client, seeded)
+    base = f"/api/v1/workspaces/{seeded.workspace_id}/campaigns/{seeded.campaign_id}"
+
+    created_goal = client.post(
+        f"{base}/goals",
+        json={
+            "title": "Reach launch audience",
+            "description": "Topline launch target",
+            "target_value": "25000 streams",
+            "success_criteria": "Hit target within first week",
+        },
+    )
+    assert created_goal.status_code == 201
+    goal = created_goal.json()
+    assert goal["campaign_id"] == str(seeded.campaign_id)
+    assert goal["status"] == "active"
+
+    updated_goal = client.patch(
+        f"{base}/goals/{goal['id']}",
+        json={
+            "title": "Reach first-week audience",
+            "status": "at_risk",
+        },
+    )
+    archived_goal = client.post(f"{base}/goals/{goal['id']}/archive")
+    listed_goals = client.get(f"{base}/goals")
+
+    assert updated_goal.status_code == 200
+    assert updated_goal.json()["title"] == "Reach first-week audience"
+    assert archived_goal.status_code == 200
+    assert archived_goal.json()["status"] == "archived"
+    assert listed_goals.status_code == 200
+    assert listed_goals.json()["goals"][0]["id"] == goal["id"]
+
+    created_milestone = client.post(
+        f"{base}/milestones",
+        json={
+            "title": "Creative locked",
+            "description": "Assets approved for rollout",
+            "target_date": "2026-09-15",
+        },
+    )
+    assert created_milestone.status_code == 201
+    milestone = created_milestone.json()
+    assert milestone["campaign_id"] == str(seeded.campaign_id)
+    assert milestone["created_by_user_id"] == str(seeded.owner_user_id)
+
+    updated_milestone = client.patch(
+        f"{base}/milestones/{milestone['id']}",
+        json={"target_date": "2026-09-20"},
+    )
+    completed_milestone = client.post(f"{base}/milestones/{milestone['id']}/complete")
+    archived_milestone = client.post(f"{base}/milestones/{milestone['id']}/archive")
+    listed_milestones = client.get(f"{base}/milestones")
+
+    assert updated_milestone.status_code == 200
+    assert updated_milestone.json()["target_date"] == "2026-09-20"
+    assert completed_milestone.status_code == 200
+    assert completed_milestone.json()["status"] == "completed"
+    assert completed_milestone.json()["completed_at"] is not None
+    assert archived_milestone.status_code == 200
+    assert archived_milestone.json()["status"] == "archived"
+    assert listed_milestones.status_code == 200
+    assert listed_milestones.json()["milestones"][0]["id"] == milestone["id"]
+
+    deleted_goal = client.delete(f"{base}/goals/{goal['id']}")
+    deleted_milestone = client.delete(f"{base}/milestones/{milestone['id']}")
+
+    assert deleted_goal.status_code == 204
+    assert deleted_milestone.status_code == 204
+    assert client.delete(f"{base}/goals/{goal['id']}").status_code == 404
+    assert client.delete(f"{base}/milestones/{milestone['id']}").status_code == 404
 
 
 def test_campaign_api_returns_clear_errors_for_scope_capability_and_state(
@@ -438,6 +587,13 @@ def test_campaign_api_returns_clear_errors_for_scope_capability_and_state(
         f"{base}/{seeded.campaign_id}/members",
         json={"workspace_membership_id": str(seeded.outside_workspace_membership_id)},
     )
+    invalid_goal_scope = client.get(
+        f"{base}/{seeded.outside_campaign_id}/goals",
+    )
+    invalid_milestone_scope = client.post(
+        f"{base}/{seeded.outside_campaign_id}/milestones",
+        json={"title": "Blocked milestone"},
+    )
     invalid_transition = client.patch(
         f"{base}/{seeded.campaign_id}/status",
         json={"status": "active"},
@@ -450,6 +606,8 @@ def test_campaign_api_returns_clear_errors_for_scope_capability_and_state(
     assert "release must belong" in invalid_release.json()["detail"]
     assert invalid_member.status_code == 400
     assert "workspace membership must belong" in invalid_member.json()["detail"]
+    assert invalid_goal_scope.status_code == 404
+    assert invalid_milestone_scope.status_code == 404
     assert invalid_transition.status_code == 409
     assert "Cannot transition" in invalid_transition.json()["detail"]
 
@@ -566,9 +724,24 @@ def test_campaign_api_denies_actions_without_required_campaign_capability(
         f"{base}/{seeded.campaign_id}/members",
         json={"workspace_membership_id": str(seeded.member_workspace_membership_id)},
     )
+    goal_create = client.post(
+        f"{base}/{seeded.campaign_id}/goals",
+        json={"title": "Denied goal"},
+    )
+    milestone_create = client.post(
+        f"{base}/{seeded.campaign_id}/milestones",
+        json={"title": "Denied milestone"},
+    )
 
     assert listed.status_code == 200
-    for response in (created, updated, status_update, member_update):
+    for response in (
+        created,
+        updated,
+        status_update,
+        member_update,
+        goal_create,
+        milestone_create,
+    ):
         assert response.status_code == 403
         assert response.json() == {"detail": "Insufficient capability permission"}
 
@@ -645,6 +818,12 @@ def test_campaign_openapi_contract_exposes_stable_fields(
     schema = client.get("/openapi.json").json()
     campaign_schema = schema["components"]["schemas"]["CampaignResponse"]
     create_schema = schema["components"]["schemas"]["CampaignCreateRequest"]
+    goal_create_schema = schema["components"]["schemas"]["CampaignGoalCreateRequest"]
+    goal_schema = schema["components"]["schemas"]["CampaignGoalResponse"]
+    milestone_create_schema = schema["components"]["schemas"][
+        "CampaignMilestoneCreateRequest"
+    ]
+    milestone_schema = schema["components"]["schemas"]["CampaignMilestoneResponse"]
 
     assert set(create_schema["properties"]) == {
         "name",
@@ -669,11 +848,48 @@ def test_campaign_openapi_contract_exposes_stable_fields(
         "created_by_user_id",
         "created_by_profile_id",
         "owner_profile_id",
+        "owner",
         "primary_artist",
         "release",
         "members",
         "artists",
         "releases",
+        "created_at",
+        "updated_at",
+    }
+    assert set(goal_create_schema["properties"]) == {
+        "title",
+        "description",
+        "target_value",
+        "success_criteria",
+        "status",
+    }
+    assert set(goal_schema["properties"]) == {
+        "id",
+        "campaign_id",
+        "title",
+        "description",
+        "target_value",
+        "success_criteria",
+        "status",
+        "created_at",
+        "updated_at",
+    }
+    assert set(milestone_create_schema["properties"]) == {
+        "title",
+        "description",
+        "target_date",
+        "status",
+    }
+    assert set(milestone_schema["properties"]) == {
+        "id",
+        "campaign_id",
+        "title",
+        "description",
+        "target_date",
+        "status",
+        "completed_at",
+        "created_by_user_id",
         "created_at",
         "updated_at",
     }

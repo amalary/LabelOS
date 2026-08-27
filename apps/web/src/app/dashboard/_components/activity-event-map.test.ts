@@ -63,6 +63,29 @@ describe("activity event mapping", () => {
     });
   });
 
+  it("maps campaign team activity events", () => {
+    expect(
+      mapActivityEvent(
+        {
+          id: "activity-campaign-member",
+          type: "campaign.member_added",
+          payload: {
+            campaignName: "Launch Campaign",
+            displayName: "Mira Stone",
+            responsibilityLabel: "campaign lead",
+          },
+          createdAt: "2026-08-12T17:59:00.000Z",
+        },
+        now,
+      ),
+    ).toMatchObject({
+      title: "Campaign member added",
+      description: "Mira Stone joined Launch Campaign",
+      tone: "campaign",
+      rawType: "campaign.member_added",
+    });
+  });
+
   it("formats unavailable timestamps without throwing", () => {
     expect(formatActivityTimestamp("not-a-date", now)).toBe("Time unavailable");
   });

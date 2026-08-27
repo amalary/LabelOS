@@ -210,6 +210,21 @@ const activityEventMappers: Partial<Record<ActivityEventType, ActivityEventMappe
     description: `${entityName(event, "A campaign")} was updated`,
     tone: "campaign",
   }),
+  "campaign.member_added": (event) => ({
+    title: "Campaign member added",
+    description: `${textValue(event.payload, ["displayName"], "A teammate")} joined ${textValue(event.payload, ["campaignName", "name"], "a campaign")}`,
+    tone: "campaign",
+  }),
+  "campaign.member_updated": (event) => ({
+    title: "Campaign member updated",
+    description: `${textValue(event.payload, ["displayName"], "A teammate")} was updated on ${textValue(event.payload, ["campaignName", "name"], "a campaign")}`,
+    tone: "campaign",
+  }),
+  "campaign.member_removed": (event) => ({
+    title: "Campaign member removed",
+    description: `${textValue(event.payload, ["displayName"], "A teammate")} left ${textValue(event.payload, ["campaignName", "name"], "a campaign")}`,
+    tone: "campaign",
+  }),
   "approval.updated": (event) => ({
     title: "Approval updated",
     description: `${entityName(event, "An approval")} was updated`,

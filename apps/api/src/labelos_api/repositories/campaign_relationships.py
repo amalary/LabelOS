@@ -33,12 +33,14 @@ async def add_campaign_member(
     workspace_membership_id: UUID,
     *,
     participation_status: str = "active",
+    responsibility_label: str | None = None,
 ) -> CampaignMember | None:
     campaign = await _campaign_in_organization(session, organization_id, campaign_id)
     workspace_membership = await session.scalar(
         select(WorkspaceMembership)
         .where(WorkspaceMembership.workspace_id == organization_id)
         .where(WorkspaceMembership.id == workspace_membership_id)
+        .where(WorkspaceMembership.status == "active")
     )
     if campaign is None or workspace_membership is None:
         return None
@@ -52,6 +54,7 @@ async def add_campaign_member(
     )
     if existing is not None:
         existing.participation_status = participation_status
+        existing.responsibility_label = responsibility_label
         await session.flush()
         return existing
 
@@ -59,10 +62,35 @@ async def add_campaign_member(
         campaign_id=campaign_id,
         workspace_membership_id=workspace_membership_id,
         participation_status=participation_status,
+        responsibility_label=responsibility_label,
     )
     session.add(link)
     await session.flush()
     return link
+
+
+async def get_campaign_member(
+    session: AsyncSession,
+    organization_id: UUID,
+    campaign_id: UUID,
+    workspace_membership_id: UUID,
+) -> CampaignMember | None:
+    campaign = await _campaign_in_organization(session, organization_id, campaign_id)
+    if campaign is None:
+        return None
+
+    return await session.scalar(
+        select(CampaignMember)
+        .options(
+            selectinload(CampaignMember.workspace_membership).selectinload(
+                WorkspaceMembership.profile
+            )
+        )
+        .join(WorkspaceMembership)
+        .where(CampaignMember.campaign_id == campaign_id)
+        .where(CampaignMember.workspace_membership_id == workspace_membership_id)
+        .where(WorkspaceMembership.workspace_id == organization_id)
+    )
 
 
 async def list_campaign_members(

@@ -132,7 +132,7 @@ async def _seed_campaign_graph(session: AsyncSession) -> dict[str, object]:
 def test_campaign_member_helpers_manage_workspace_participants(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    async def run() -> tuple[int, list[str], bool, int]:
+    async def run() -> tuple[int, list[tuple[str, str | None]], bool, int]:
         async with sessionmaker() as session:
             data = await _seed_campaign_graph(session)
             organization = data["organization"]
@@ -157,6 +157,7 @@ def test_campaign_member_helpers_manage_workspace_participants(
                 campaign.id,
                 workspace_membership.id,
                 participation_status="confirmed",
+                responsibility_label="campaign lead",
             )
             outside = await add_campaign_member(
                 session,
@@ -182,15 +183,18 @@ def test_campaign_member_helpers_manage_workspace_participants(
             assert members is not None
             return (
                 len(members),
-                [member.participation_status for member in members],
+                [
+                    (member.participation_status, member.responsibility_label)
+                    for member in members
+                ],
                 removed,
                 remaining or 0,
             )
 
-    count, statuses, removed, remaining = asyncio.run(run())
+    count, statuses_and_labels, removed, remaining = asyncio.run(run())
 
     assert count == 1
-    assert statuses == ["confirmed"]
+    assert statuses_and_labels == [("confirmed", "campaign lead")]
     assert removed is True
     assert remaining == 0
 

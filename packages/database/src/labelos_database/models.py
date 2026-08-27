@@ -1657,6 +1657,7 @@ class CampaignMember(Base, TimestampMixin):
         default="active",
         server_default="active",
     )
+    responsibility_label: Mapped[str | None] = mapped_column(String(120))
 
     campaign: Mapped["Campaign"] = relationship(back_populates="member_links")
     workspace_membership: Mapped[WorkspaceMembership] = relationship(
@@ -1667,6 +1668,7 @@ class CampaignMember(Base, TimestampMixin):
         Index("ix_campaign_members_campaign_id", "campaign_id"),
         Index("ix_campaign_members_workspace_membership_id", "workspace_membership_id"),
         Index("ix_campaign_members_participation_status", "participation_status"),
+        Index("ix_campaign_members_responsibility_label", "responsibility_label"),
     )
 
 
@@ -1724,6 +1726,20 @@ class Campaign(Base, TimestampMixin, OrganizationOwnedMixin):
     member_links: Mapped[list[CampaignMember]] = relationship(
         back_populates="campaign",
         cascade="all, delete-orphan",
+    )
+    goals: Mapped[list["CampaignGoal"]] = relationship(
+        back_populates="campaign",
+        cascade="all, delete-orphan",
+        order_by=lambda: (CampaignGoal.created_at.asc(), CampaignGoal.id.asc()),
+    )
+    milestones: Mapped[list["CampaignMilestone"]] = relationship(
+        back_populates="campaign",
+        cascade="all, delete-orphan",
+        order_by=lambda: (
+            CampaignMilestone.target_date.asc().nulls_last(),
+            CampaignMilestone.created_at.asc(),
+            CampaignMilestone.id.asc(),
+        ),
     )
     created_by_user: Mapped[User | None] = relationship(
         foreign_keys=[created_by_user_id]
@@ -1786,6 +1802,94 @@ class Campaign(Base, TimestampMixin, OrganizationOwnedMixin):
             "ix_campaigns_organization_id_target_end_date",
             "organization_id",
             "target_end_date",
+        ),
+    )
+
+
+class CampaignGoal(Base, TimestampMixin):
+    __tablename__ = "campaign_goals"
+
+    id: Mapped[UUIDPrimaryKey]
+    campaign_id: Mapped[UUID] = mapped_column(
+        ForeignKey("campaigns.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    title: Mapped[str] = mapped_column(String(240), nullable=False)
+    description: Mapped[str | None] = mapped_column(String(4000))
+    target_value: Mapped[str | None] = mapped_column(String(500))
+    success_criteria: Mapped[str | None] = mapped_column(String(1000))
+    status: Mapped[str] = mapped_column(
+        String(60),
+        nullable=False,
+        default="active",
+        server_default="active",
+    )
+
+    campaign: Mapped[Campaign] = relationship(back_populates="goals")
+
+    @validates("title", "status")
+    def _validate_required_text(self, key: str, value: str | None) -> str:
+        return _required_text(value, key)
+
+    @validates("description", "target_value", "success_criteria")
+    def _validate_optional_text(self, _key: str, value: str | None) -> str | None:
+        return _optional_text(value)
+
+    __table_args__ = (
+        Index("ix_campaign_goals_campaign_id", "campaign_id"),
+        Index("ix_campaign_goals_campaign_id_status", "campaign_id", "status"),
+    )
+
+
+class CampaignMilestone(Base, TimestampMixin):
+    __tablename__ = "campaign_milestones"
+
+    id: Mapped[UUIDPrimaryKey]
+    campaign_id: Mapped[UUID] = mapped_column(
+        ForeignKey("campaigns.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    title: Mapped[str] = mapped_column(String(240), nullable=False)
+    description: Mapped[str | None] = mapped_column(String(4000))
+    target_date: Mapped[date | None] = mapped_column(Date)
+    status: Mapped[str] = mapped_column(
+        String(60),
+        nullable=False,
+        default="open",
+        server_default="open",
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    campaign: Mapped[Campaign] = relationship(back_populates="milestones")
+    created_by_user: Mapped[User | None] = relationship()
+
+    @validates("title", "status")
+    def _validate_required_text(self, key: str, value: str | None) -> str:
+        return _required_text(value, key)
+
+    @validates("description")
+    def _validate_description(self, _key: str, value: str | None) -> str | None:
+        return _optional_text(value)
+
+    __table_args__ = (
+        Index("ix_campaign_milestones_campaign_id", "campaign_id"),
+        Index(
+            "ix_campaign_milestones_campaign_id_status",
+            "campaign_id",
+            "status",
+        ),
+        Index(
+            "ix_campaign_milestones_campaign_id_target_date",
+            "campaign_id",
+            "target_date",
+        ),
+        Index(
+            "ix_campaign_milestones_created_by_user_id",
+            "created_by_user_id",
         ),
     )
 
