@@ -24,7 +24,7 @@ from labelos_database.models import (
 from labelos_database.models import (
     Capability as DBCapability,
 )
-from sqlalchemy import select
+from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -414,6 +414,108 @@ def test_database_authorization_removed_role_immediately_affects_access(
             return before, after
 
     assert asyncio.run(remove_role_and_authorize()) == (True, False)
+
+
+def test_database_authorization_reuses_loaded_state_within_session(
+    authorization_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    seeded = asyncio.run(_seed_authorization_data(authorization_sessionmaker))
+
+    async def authorize_twice() -> tuple[bool, bool, int, int]:
+        statement_count = 0
+
+        def count_statement(*_args: object) -> None:
+            nonlocal statement_count
+            statement_count += 1
+
+        async with authorization_sessionmaker() as session:
+            bind = session.get_bind()
+            event.listen(bind, "before_cursor_execute", count_statement)
+            try:
+                first = await authorization_service.has_capability(
+                    session,
+                    seeded.user_id,
+                    seeded.workspace_id,
+                    "release.edit",
+                    AuthorizationResource(
+                        workspace_id=seeded.workspace_id,
+                        department="management",
+                    ),
+                )
+                first_count = statement_count
+                second = await authorization_service.has_capability(
+                    session,
+                    seeded.user_id,
+                    seeded.workspace_id,
+                    "artist.profile.create",
+                    AuthorizationResource(
+                        workspace_id=seeded.workspace_id,
+                        department="a&r",
+                    ),
+                )
+                second_count = statement_count
+            finally:
+                event.remove(bind, "before_cursor_execute", count_statement)
+        return first, second, first_count, second_count
+
+    first, second, first_count, second_count = asyncio.run(authorize_twice())
+
+    assert first is True
+    assert second is True
+    assert first_count > 0
+    assert second_count == first_count
+
+
+def test_database_authorization_role_capability_change_invalidates_cached_state(
+    authorization_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    seeded = asyncio.run(_seed_authorization_data(authorization_sessionmaker))
+
+    async def update_role_capability_and_authorize() -> tuple[bool, bool]:
+        async with authorization_sessionmaker() as session:
+            manager_assignment = await session.scalar(
+                select(WorkspaceMembershipRole)
+                .join(WorkspaceMembershipRole.workspace_membership)
+                .where(WorkspaceMembership.workspace_id == seeded.workspace_id)
+                .where(WorkspaceMembershipRole.role_id == seeded.manager_role_id)
+            )
+            assert manager_assignment is not None
+            await session.delete(manager_assignment)
+            await session.flush()
+
+            before = await authorization_service.has_capability(
+                session,
+                seeded.user_id,
+                seeded.workspace_id,
+                "release.edit",
+                AuthorizationResource(
+                    workspace_id=seeded.workspace_id,
+                    department="management",
+                ),
+            )
+
+            release_edit = await session.scalar(
+                select(DBCapability).where(DBCapability.key == "release.edit")
+            )
+            assert release_edit is not None
+            session.add(
+                RoleCapability(role_id=seeded.ar_role_id, capability_id=release_edit.id)
+            )
+            await session.flush()
+
+            after = await authorization_service.has_capability(
+                session,
+                seeded.user_id,
+                seeded.workspace_id,
+                "release.edit",
+                AuthorizationResource(
+                    workspace_id=seeded.workspace_id,
+                    department="management",
+                ),
+            )
+            return before, after
+
+    assert asyncio.run(update_role_capability_and_authorize()) == (False, True)
 
 
 def test_database_authorization_denies_deleted_or_invalid_resource(

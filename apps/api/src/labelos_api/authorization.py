@@ -14,7 +14,6 @@ from labelos_database.models import (
     ArtistProfile,
     MembershipDepartmentAccess,
     MembershipRole,
-    Organization,
     OrganizationMembership,
     Role,
     RoleCapability,
@@ -23,8 +22,9 @@ from labelos_database.models import (
     WorkspaceMembershipRole,
     WorkspacePermission,
 )
-from sqlalchemy import select
+from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session as SyncSession
 from sqlalchemy.orm import selectinload
 
 from labelos_api.auth import (
@@ -273,6 +273,11 @@ AuthorizationWorkspace = MembershipContext | UUID | None
 AuthorizationActorInput = (
     WorkspaceAuthorizationContext | CurrentUserContext | User | UUID
 )
+type AuthorizationState = tuple[
+    OrganizationMembership | LegacyWorkspaceAuthorizationMembership,
+    WorkspaceMembership,
+]
+type AuthorizationStateCache = dict[tuple[UUID, UUID], AuthorizationState | None]
 WorkspaceContextResolver = Callable[
     [Request, CurrentUserContext],
     AuthorizationWorkspace,
@@ -336,6 +341,16 @@ def _valid_capabilities(
     )
 
 
+AUTHORIZATION_STATE_CACHE_KEY = "labelos_authorization_state_cache"
+AUTHORIZATION_CACHE_MUTATION_MODELS = (
+    OrganizationMembership,
+    WorkspaceMembership,
+    WorkspaceMembershipRole,
+    Role,
+    RoleCapability,
+)
+
+
 def actor_from_current_user(context: CurrentUserContext) -> AuthorizationActor:
     return AuthorizationActor(
         kind=ActorKind.user,
@@ -346,6 +361,27 @@ def actor_from_current_user(context: CurrentUserContext) -> AuthorizationActor:
 
 
 class AuthorizationService:
+    def invalidate_authorization_cache(
+        self,
+        session: AsyncSession,
+        *,
+        actor_user_id: UUID | None = None,
+        workspace_id: UUID | None = None,
+    ) -> None:
+        """Clear request-local authorization state after grant mutations."""
+
+        cache = self._authorization_state_cache(session)
+        if actor_user_id is None and workspace_id is None:
+            cache.clear()
+            return
+        for key in tuple(cache):
+            cached_actor_user_id, cached_workspace_id = key
+            if actor_user_id is not None and cached_actor_user_id != actor_user_id:
+                continue
+            if workspace_id is not None and cached_workspace_id != workspace_id:
+                continue
+            cache.pop(key, None)
+
     async def has_capability(
         self,
         session: AsyncSession,
@@ -489,6 +525,21 @@ class AuthorizationService:
             )
 
         allowed = required in effective
+        if allowed and not await self._resource_action_is_authorized(
+            session,
+            membership=membership,
+            workspace_membership=workspace_membership,
+            capability=required,
+            resource=normalized_resource,
+        ):
+            return AuthorizationDecision(
+                actor=actor_ref,
+                action=required,
+                workspace_id=workspace_id,
+                resource=normalized_resource,
+                allowed=False,
+                reason="resource_owner_mismatch",
+            )
         return AuthorizationDecision(
             actor=actor_ref,
             action=required,
@@ -654,21 +705,18 @@ class AuthorizationService:
         *,
         actor: AuthorizationActorInput,
         workspace_id: UUID,
-    ) -> (
-        tuple[
-            OrganizationMembership | LegacyWorkspaceAuthorizationMembership,
-            WorkspaceMembership,
-        ]
-        | None
-    ):
+    ) -> AuthorizationState | None:
         actor_user_id = self._actor_user_id(actor)
         if actor_user_id is None:
             return None
-        workspace_exists = await session.scalar(
-            select(Organization.id).where(Organization.id == workspace_id)
-        )
-        if workspace_exists is None:
-            return None
+
+        cache = self._authorization_state_cache(session)
+        cache_key = (actor_user_id, workspace_id)
+        if self._session_has_pending_authorization_changes(session):
+            cache.clear()
+        elif cache_key in cache:
+            return cache[cache_key]
+
         membership = await session.scalar(
             select(OrganizationMembership)
             .options(
@@ -684,6 +732,7 @@ class AuthorizationService:
             .where(OrganizationMembership.organization_id == workspace_id)
             .where(OrganizationMembership.user_id == actor_user_id)
             .where(OrganizationMembership.status == "active")
+            .execution_options(populate_existing=True)
         )
         if (
             membership is None
@@ -703,14 +752,42 @@ class AuthorizationService:
                 .where(WorkspaceMembership.status == "active")
                 .where(WorkspaceMembership.organization_membership_id.is_(None))
                 .where(WorkspaceMembership.profile.has(user_id=actor_user_id))
+                .execution_options(populate_existing=True)
             )
             if legacy_workspace_membership is None:
+                cache[cache_key] = None
                 return None
-            return (
+            result: AuthorizationState = (
                 LegacyWorkspaceAuthorizationMembership(),
                 legacy_workspace_membership,
             )
-        return membership, membership.workspace_membership
+            cache[cache_key] = result
+            return result
+        result = (membership, membership.workspace_membership)
+        cache[cache_key] = result
+        return result
+
+    def _authorization_state_cache(
+        self,
+        session: AsyncSession,
+    ) -> AuthorizationStateCache:
+        cache = session.info.setdefault(AUTHORIZATION_STATE_CACHE_KEY, {})
+        return cache
+
+    def _session_has_pending_authorization_changes(
+        self,
+        session: AsyncSession,
+    ) -> bool:
+        sync_session = session.sync_session
+        return any(
+            isinstance(instance, AUTHORIZATION_CACHE_MUTATION_MODELS)
+            for collection in (
+                sync_session.new,
+                sync_session.dirty,
+                sync_session.deleted,
+            )
+            for instance in collection
+        )
 
     def _effective_capabilities_for_membership(
         self,
@@ -751,6 +828,47 @@ class AuthorizationService:
             return True
         department_access = set(membership.approved_department_access)
         return any(slug in department_access for slug in required_departments)
+
+    async def _resource_action_is_authorized(
+        self,
+        session: AsyncSession,
+        *,
+        membership: OrganizationMembership | LegacyWorkspaceAuthorizationMembership,
+        workspace_membership: WorkspaceMembership,
+        capability: Capability,
+        resource: AuthorizationResource | None,
+    ) -> bool:
+        if (
+            capability != Capability.artist_profile_edit
+            or resource is None
+            or resource.kind != ResourceKind.artist_profile
+            or not isinstance(resource.id, UUID)
+        ):
+            return True
+
+        if membership.workspace_permission == WorkspacePermission.admin:
+            return True
+
+        target_profile_id = await session.scalar(
+            select(ArtistProfile.universal_profile_id)
+            .join(ArtistProfile.artist)
+            .where(ArtistProfile.id == resource.id)
+            .where(Artist.organization_id == workspace_membership.workspace_id)
+        )
+        if target_profile_id is None:
+            return False
+        if target_profile_id == workspace_membership.profile_id:
+            return True
+
+        editing_roles = [
+            role
+            for role in workspace_membership.roles
+            if any(
+                capability_row.key == Capability.artist_profile_edit.value
+                for capability_row in role.capabilities
+            )
+        ]
+        return any(role.key != "artist" for role in editing_roles)
 
     def _actor_user_id(self, actor: AuthorizationActorInput) -> UUID | None:
         if isinstance(actor, UUID):
@@ -977,6 +1095,35 @@ class AuthorizationService:
         if permission in Permission._value2member_map_:
             return Permission(permission)
         return None
+
+
+def _clear_sync_session_authorization_cache(sync_session: SyncSession) -> None:
+    sync_session.info.pop(AUTHORIZATION_STATE_CACHE_KEY, None)
+
+
+@event.listens_for(SyncSession, "after_flush")
+def _clear_authorization_cache_after_flush(
+    sync_session: SyncSession,
+    _flush_context: object,
+) -> None:
+    if any(
+        isinstance(instance, AUTHORIZATION_CACHE_MUTATION_MODELS)
+        for collection in (sync_session.new, sync_session.dirty, sync_session.deleted)
+        for instance in collection
+    ):
+        _clear_sync_session_authorization_cache(sync_session)
+
+
+@event.listens_for(SyncSession, "do_orm_execute")
+def _clear_authorization_cache_before_bulk_write(execute_state: Any) -> None:
+    if execute_state.is_update or execute_state.is_delete:
+        _clear_sync_session_authorization_cache(execute_state.session)
+
+
+@event.listens_for(SyncSession, "after_commit")
+@event.listens_for(SyncSession, "after_rollback")
+def _clear_authorization_cache_after_transaction(sync_session: SyncSession) -> None:
+    _clear_sync_session_authorization_cache(sync_session)
 
 
 authorization_service = AuthorizationService()

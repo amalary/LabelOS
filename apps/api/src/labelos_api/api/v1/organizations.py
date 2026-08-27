@@ -1968,6 +1968,11 @@ async def replace_member_workspace_roles(
                 )
             )
         await session.flush()
+        authorization_service.invalidate_authorization_cache(
+            session,
+            actor_user_id=membership.user_id,
+            workspace_id=organization_id,
+        )
 
         for assignment in assignments_to_remove:
             role = assignment.role
@@ -2164,6 +2169,11 @@ async def assign_member_workspace_role(
     session.add(assignment)
     try:
         await session.flush()
+        authorization_service.invalidate_authorization_cache(
+            session,
+            actor_user_id=membership.user_id,
+            workspace_id=organization_id,
+        )
         await RealtimePublisher(session).publish(
             organization_id=organization_id,
             event_type=RealtimeEventType.member_role_changed,
@@ -2288,6 +2298,12 @@ async def remove_member_workspace_role(
     role = assignment.role
     _require_role_capabilities_administerable(context, organization_id, role)
     await session.delete(assignment)
+    await session.flush()
+    authorization_service.invalidate_authorization_cache(
+        session,
+        actor_user_id=membership.user_id,
+        workspace_id=organization_id,
+    )
     await RealtimePublisher(session).publish(
         organization_id=organization_id,
         event_type=RealtimeEventType.member_role_changed,
@@ -2390,6 +2406,12 @@ async def remove_organization_member(
 
     membership.status = "removed"
     workspace_membership.status = "removed"
+    await session.flush()
+    authorization_service.invalidate_authorization_cache(
+        session,
+        actor_user_id=membership.user_id,
+        workspace_id=organization_id,
+    )
     await RealtimePublisher(session).publish(
         organization_id=organization_id,
         event_type=RealtimeEventType.member_removed,

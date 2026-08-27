@@ -391,3 +391,28 @@ Do not cache resolved capabilities unless the invalidation path is obvious for
 membership status changes, role assignment changes, role capability changes,
 and explicit membership grant changes. The current request-scoped context is
 safe because it is rebuilt from the database for each authenticated request.
+
+## Performance Strategy
+
+Context-only capability checks use request-local data from `CurrentUserContext`;
+those memberships already include explicit capability grants and role-derived
+capabilities loaded during authentication context resolution. DB-backed
+capability decisions, including `require_capability(...)`, use a
+SQLAlchemy-session-local cache in `AuthorizationService._load_authorization_state`, keyed by
+`(actor_user_id, workspace_id)`.
+
+This cache is intentionally short-lived:
+
+- It lives only in `session.info` for the current request/session.
+- It is cleared on relevant ORM flushes involving memberships, workspace role
+  assignments, roles, or role capability mappings.
+- It is cleared before bulk ORM updates/deletes and after commit or rollback.
+- Organization member role assignment, role removal, role replacement, and
+  membership removal endpoints explicitly invalidate the affected
+  actor/workspace entry after flushing the mutation.
+
+The resolver does not use distributed or cross-request caching. Workspace
+switches naturally miss the cache because the key includes `workspace_id`, and
+new requests rebuild `CurrentUserContext` from the database. Security
+correctness takes priority over hit rate; cache clears are intentionally broad
+when a mutation could affect effective capabilities.
