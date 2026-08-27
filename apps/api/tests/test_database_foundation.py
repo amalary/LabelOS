@@ -23,6 +23,8 @@ from labelos_database.models import (
     ArtistProfile,
     AuthIdentity,
     Campaign,
+    CampaignArtist,
+    CampaignMember,
     CampaignRelease,
     CampaignStatus,
     CampaignType,
@@ -87,6 +89,8 @@ def test_foundational_models_are_registered() -> None:
         ArtistProfile.__tablename__,
         Release.__tablename__,
         Campaign.__tablename__,
+        CampaignArtist.__tablename__,
+        CampaignMember.__tablename__,
         CampaignRelease.__tablename__,
         Contract.__tablename__,
         Royalty.__tablename__,
@@ -119,6 +123,8 @@ def test_foundational_models_are_registered() -> None:
         "artist_profiles",
         "releases",
         "campaigns",
+        "campaign_artists",
+        "campaign_members",
         "campaign_releases",
         "contracts",
         "royalties",
@@ -152,6 +158,20 @@ def test_campaign_domain_contract_is_extensible_beyond_single_release() -> None:
     campaign_release_foreign_key_deletions = {
         foreign_key.parent.name: foreign_key.ondelete
         for foreign_key in CampaignRelease.__table__.foreign_keys
+    }
+    campaign_artist_index_names = {
+        index.name for index in CampaignArtist.__table__.indexes
+    }
+    campaign_artist_foreign_key_deletions = {
+        foreign_key.parent.name: foreign_key.ondelete
+        for foreign_key in CampaignArtist.__table__.foreign_keys
+    }
+    campaign_member_index_names = {
+        index.name for index in CampaignMember.__table__.indexes
+    }
+    campaign_member_foreign_key_deletions = {
+        foreign_key.parent.name: foreign_key.ondelete
+        for foreign_key in CampaignMember.__table__.foreign_keys
     }
 
     assert campaign_columns["organization_id"].nullable is False
@@ -205,6 +225,34 @@ def test_campaign_domain_contract_is_extensible_beyond_single_release() -> None:
         "campaign_id": "CASCADE",
         "release_id": "CASCADE",
     }
+    assert CampaignArtist.__table__.primary_key.columns.keys() == [
+        "campaign_id",
+        "artist_id",
+    ]
+    assert {
+        "ix_campaign_artists_campaign_id",
+        "ix_campaign_artists_artist_id",
+        "ix_campaign_artists_relationship_kind",
+    } <= campaign_artist_index_names
+    assert campaign_artist_foreign_key_deletions == {
+        "campaign_id": "CASCADE",
+        "artist_id": "CASCADE",
+    }
+    assert CampaignMember.__table__.primary_key.columns.keys() == [
+        "campaign_id",
+        "workspace_membership_id",
+    ]
+    assert {
+        "ix_campaign_members_campaign_id",
+        "ix_campaign_members_workspace_membership_id",
+        "ix_campaign_members_participation_status",
+    } <= campaign_member_index_names
+    assert campaign_member_foreign_key_deletions == {
+        "campaign_id": "CASCADE",
+        "workspace_membership_id": "CASCADE",
+    }
+    assert "role" not in CampaignMember.__table__.columns
+    assert "permission" not in CampaignMember.__table__.columns
 
 
 def test_campaign_domain_relationships_preserve_legacy_release_pointer() -> None:
@@ -249,6 +297,16 @@ def test_campaign_domain_relationships_preserve_legacy_release_pointer() -> None
         campaign.release_links.append(
             CampaignRelease(release=release, relationship_kind="primary")
         )
+        campaign.artist_links.append(
+            CampaignArtist(artist=artist, relationship_kind="primary")
+        )
+        workspace_member = WorkspaceMembership(
+            workspace=organization,
+            profile=accountable_profile,
+        )
+        campaign.member_links.append(
+            CampaignMember(workspace_membership=workspace_member)
+        )
 
         session.add(campaign)
         session.commit()
@@ -263,6 +321,12 @@ def test_campaign_domain_relationships_preserve_legacy_release_pointer() -> None
         assert campaign.created_by_profile == creator_profile
         assert campaign.owner_profile == accountable_profile
         assert campaign.primary_artist == artist
+        assert campaign.artist_links[0].artist == artist
+        assert campaign.artist_links[0].relationship_kind == "primary"
+        assert campaign.member_links[0].workspace_membership.profile == (
+            accountable_profile
+        )
+        assert campaign.member_links[0].participation_status == "active"
         assert campaign.organization == organization
         assert campaign.created_at is not None
         assert campaign.updated_at is not None
@@ -430,6 +494,24 @@ def test_campaign_domain_migration_preserves_release_id_and_backfills_links() ->
     assert "ix_campaigns_organization_id_created_by_profile_id" in campaign_migration
     assert "ix_campaigns_organization_id_start_date" in campaign_migration
     assert "ix_campaigns_organization_id_target_end_date" in campaign_migration
+
+
+def test_campaign_relationship_migration_backfills_primary_artist_links() -> None:
+    relationship_migration = (
+        REPO_ROOT
+        / "packages/database/alembic/versions/202608271100_campaign_relationships.py"
+    ).read_text()
+
+    assert "campaign_artists" in relationship_migration
+    assert "campaign_members" in relationship_migration
+    assert "workspace_membership_id" in relationship_migration
+    assert "INSERT INTO campaign_artists" in relationship_migration
+    assert "SELECT id, primary_artist_id, 'primary', 0" in relationship_migration
+    assert "WHERE primary_artist_id IS NOT NULL" in relationship_migration
+    assert 'op.drop_column("campaigns", "primary_artist_id")' not in (
+        relationship_migration
+    )
+    assert "role ==" not in relationship_migration
 
 
 def test_profile_attributes_define_extensible_profile_metadata() -> None:

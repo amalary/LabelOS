@@ -741,6 +741,10 @@ class WorkspaceMembership(Base, TimestampMixin):
             WorkspaceMembershipRole.role_id.asc(),
         ),
     )
+    campaign_links: Mapped[list["CampaignMember"]] = relationship(
+        back_populates="workspace_membership",
+        cascade="all, delete-orphan",
+    )
 
     @property
     def professional_roles(self) -> tuple[str, ...]:
@@ -1428,6 +1432,10 @@ class Artist(Base, TimestampMixin, OrganizationOwnedMixin):
         cascade="all, delete-orphan",
         uselist=False,
     )
+    campaign_links: Mapped[list["CampaignArtist"]] = relationship(
+        back_populates="artist",
+        cascade="all, delete-orphan",
+    )
 
     __table_args__ = (
         UniqueConstraint(
@@ -1598,6 +1606,70 @@ class CampaignRelease(Base, TimestampMixin):
     )
 
 
+class CampaignArtist(Base, TimestampMixin):
+    __tablename__ = "campaign_artists"
+
+    campaign_id: Mapped[UUID] = mapped_column(
+        ForeignKey("campaigns.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    artist_id: Mapped[UUID] = mapped_column(
+        ForeignKey("artists.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    relationship_kind: Mapped[str] = mapped_column(
+        String(60),
+        nullable=False,
+        default="collaborator",
+        server_default="collaborator",
+    )
+    sort_order: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+
+    campaign: Mapped["Campaign"] = relationship(back_populates="artist_links")
+    artist: Mapped[Artist] = relationship(back_populates="campaign_links")
+
+    __table_args__ = (
+        Index("ix_campaign_artists_campaign_id", "campaign_id"),
+        Index("ix_campaign_artists_artist_id", "artist_id"),
+        Index("ix_campaign_artists_relationship_kind", "relationship_kind"),
+    )
+
+
+class CampaignMember(Base, TimestampMixin):
+    __tablename__ = "campaign_members"
+
+    campaign_id: Mapped[UUID] = mapped_column(
+        ForeignKey("campaigns.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    workspace_membership_id: Mapped[UUID] = mapped_column(
+        ForeignKey("workspace_memberships.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    participation_status: Mapped[str] = mapped_column(
+        String(60),
+        nullable=False,
+        default="active",
+        server_default="active",
+    )
+
+    campaign: Mapped["Campaign"] = relationship(back_populates="member_links")
+    workspace_membership: Mapped[WorkspaceMembership] = relationship(
+        back_populates="campaign_links"
+    )
+
+    __table_args__ = (
+        Index("ix_campaign_members_campaign_id", "campaign_id"),
+        Index("ix_campaign_members_workspace_membership_id", "workspace_membership_id"),
+        Index("ix_campaign_members_participation_status", "participation_status"),
+    )
+
+
 class Campaign(Base, TimestampMixin, OrganizationOwnedMixin):
     __tablename__ = "campaigns"
 
@@ -1642,6 +1714,14 @@ class Campaign(Base, TimestampMixin, OrganizationOwnedMixin):
     organization: Mapped[Organization] = relationship(back_populates="campaigns")
     release: Mapped[Release | None] = relationship()
     release_links: Mapped[list[CampaignRelease]] = relationship(
+        back_populates="campaign",
+        cascade="all, delete-orphan",
+    )
+    artist_links: Mapped[list[CampaignArtist]] = relationship(
+        back_populates="campaign",
+        cascade="all, delete-orphan",
+    )
+    member_links: Mapped[list[CampaignMember]] = relationship(
         back_populates="campaign",
         cascade="all, delete-orphan",
     )
