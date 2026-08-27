@@ -13,7 +13,7 @@ from labelos_api.auth import (
     SessionDep,
     require_active_organization_id,
 )
-from labelos_api.authorization import Permission, require_permission
+from labelos_api.authorization import Capability, require_capability
 from labelos_api.realtime import RealtimeEventType, RealtimePublisher
 from labelos_api.repositories import label_resources
 
@@ -179,7 +179,7 @@ async def list_artists(
     session: SessionDep,
     context: Annotated[
         CurrentUserContext,
-        Depends(require_permission(Permission.artists_view)),
+        Depends(require_capability(Capability.artist_profile_view)),
     ],
     search: str | None = None,
 ) -> ArtistsListResponse:
@@ -204,7 +204,7 @@ async def create_artist(
     session: SessionDep,
     context: Annotated[
         CurrentUserContext,
-        Depends(require_permission(Permission.artists_manage)),
+        Depends(require_capability(Capability.artist_profile_create, department="a&r")),
     ],
 ) -> ArtistResponse:
     organization_id = require_active_organization_id(context)
@@ -268,7 +268,7 @@ async def get_artist(
     session: SessionDep,
     context: Annotated[
         CurrentUserContext,
-        Depends(require_permission(Permission.artists_view)),
+        Depends(require_capability(Capability.artist_profile_view)),
     ],
 ) -> ArtistResponse:
     organization_id = require_active_organization_id(context)
@@ -286,7 +286,7 @@ async def update_artist(
     session: SessionDep,
     context: Annotated[
         CurrentUserContext,
-        Depends(require_permission(Permission.artists_manage)),
+        Depends(require_capability(Capability.artist_profile_edit, department="a&r")),
     ],
 ) -> ArtistResponse:
     organization_id = require_active_organization_id(context)
@@ -359,7 +359,7 @@ async def list_artist_releases(
     session: SessionDep,
     context: Annotated[
         CurrentUserContext,
-        Depends(require_permission(Permission.releases_view)),
+        Depends(require_capability(Capability.release_view)),
     ],
 ) -> ArtistReleasesListResponse:
     organization_id = require_active_organization_id(context)
@@ -381,7 +381,7 @@ async def delete_artist(
     session: SessionDep,
     context: Annotated[
         CurrentUserContext,
-        Depends(require_permission(Permission.artists_manage)),
+        Depends(require_capability(Capability.artist_profile_delete, department="a&r")),
     ],
 ) -> Response:
     organization_id = require_active_organization_id(context)

@@ -1,5 +1,6 @@
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from uuid import uuid4
 
 import jwt
@@ -406,6 +407,30 @@ def test_capability_registry_imports_and_validates_identifiers() -> None:
     assert not is_valid_capability_identifier("Workspace.View")
     with pytest.raises(ValueError, match="dot-separated lowercase"):
         validate_capability_identifier("workspace:view")
+
+
+def test_generated_frontend_capability_registry_matches_backend_source() -> None:
+    def camel_case(identifier: str) -> str:
+        parts = identifier.replace(".", "_").split("_")
+        return parts[0] + "".join(part.capitalize() for part in parts[1:])
+
+    def quote(value: str) -> str:
+        return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+    generated = (
+        Path(__file__).resolve().parents[3]
+        / "apps"
+        / "web"
+        / "src"
+        / "lib"
+        / "generated"
+        / "capability-registry.ts"
+    ).read_text(encoding="utf-8")
+
+    for definition in CAPABILITY_REGISTRY:
+        assert f"{camel_case(definition.key)}: {quote(definition.key)}" in generated
+        assert f"displayName: {quote(definition.display_name)}" in generated
+        assert f"description: {quote(definition.description)}" in generated
 
 
 def test_capability_authorization_combines_workspace_department_and_capability() -> (
@@ -870,22 +895,23 @@ def _override_current_user_context(
     app.dependency_overrides[get_current_user_context] = fake_current_user_context
 
 
-def test_protected_route_allows_owner_with_permission(
+def test_protected_route_allows_artist_edit_capability(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("APP_ENV", "test")
     app = create_app()
     _override_current_user_context(
         app,
-        role="owner",
-        permissions=("artists:view", "artists:manage", "settings:manage"),
+        role="member",
+        department_access=("a&r",),
+        capability_permissions=("artist.profile.edit",),
     )
 
     with TestClient(app) as test_client:
         response = test_client.get("/api/v1/authorization/examples/artists-manage")
 
     assert response.status_code == 200
-    assert response.json() == {"ok": True, "guard": "artists:manage"}
+    assert response.json() == {"ok": True, "guard": "artist.profile.edit"}
 
 
 def test_protected_route_allows_workspace_update_capability(
@@ -941,18 +967,18 @@ def test_protected_route_rejects_missing_workspace_context_for_capability(
     assert response.json() == {"detail": "Organization context required"}
 
 
-def test_protected_route_rejects_missing_permission(
+def test_protected_route_rejects_missing_artist_edit_capability(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("APP_ENV", "test")
     app = create_app()
-    _override_current_user_context(app, role="admin", permissions=("artists:view",))
+    _override_current_user_context(app, role="admin")
 
     with TestClient(app) as test_client:
         response = test_client.get("/api/v1/authorization/examples/artists-manage")
 
     assert response.status_code == 403
-    assert response.json() == {"detail": "Insufficient permission"}
+    assert response.json() == {"detail": "Insufficient capability permission"}
 
 
 def test_capability_route_allows_department_and_capability(
