@@ -1,5 +1,5 @@
 import re
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from enum import StrEnum
 from typing import ClassVar
 from urllib.parse import urlparse
@@ -8,6 +8,7 @@ from uuid import UUID
 from sqlalchemy import (
     JSON,
     Boolean,
+    Date,
     DateTime,
     Enum,
     ForeignKey,
@@ -81,6 +82,24 @@ class MembershipRole(StrEnum):
     artist = "artist"
     guest = "guest"
     viewer = "viewer"
+
+
+class CampaignType(StrEnum):
+    release = "release"
+    marketing = "marketing"
+    artist_development = "artist_development"
+    catalog = "catalog"
+    other = "other"
+
+
+class CampaignStatus(StrEnum):
+    draft = "draft"
+    planning = "planning"
+    active = "active"
+    paused = "paused"
+    completed = "completed"
+    cancelled = "cancelled"
+    archived = "archived"
 
 
 def workspace_permission_from_role(role: MembershipRole) -> WorkspacePermission:
@@ -721,6 +740,10 @@ class WorkspaceMembership(Base, TimestampMixin):
             WorkspaceMembershipRole.assigned_at.asc(),
             WorkspaceMembershipRole.role_id.asc(),
         ),
+    )
+    campaign_links: Mapped[list["CampaignMember"]] = relationship(
+        back_populates="workspace_membership",
+        cascade="all, delete-orphan",
     )
 
     @property
@@ -1409,6 +1432,10 @@ class Artist(Base, TimestampMixin, OrganizationOwnedMixin):
         cascade="all, delete-orphan",
         uselist=False,
     )
+    campaign_links: Mapped[list["CampaignArtist"]] = relationship(
+        back_populates="artist",
+        cascade="all, delete-orphan",
+    )
 
     __table_args__ = (
         UniqueConstraint(
@@ -1540,10 +1567,108 @@ class Release(Base, TimestampMixin, OrganizationOwnedMixin):
 
     organization: Mapped[Organization] = relationship(back_populates="releases")
     artist: Mapped[Artist | None] = relationship()
+    campaign_links: Mapped[list["CampaignRelease"]] = relationship(
+        back_populates="release",
+        cascade="all, delete-orphan",
+    )
 
     __table_args__ = (
         Index("ix_releases_organization_id", "organization_id"),
         Index("ix_releases_organization_id_artist_id", "organization_id", "artist_id"),
+    )
+
+
+class CampaignRelease(Base, TimestampMixin):
+    __tablename__ = "campaign_releases"
+
+    campaign_id: Mapped[UUID] = mapped_column(
+        ForeignKey("campaigns.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    release_id: Mapped[UUID] = mapped_column(
+        ForeignKey("releases.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    relationship_kind: Mapped[str] = mapped_column(
+        String(60),
+        nullable=False,
+        default="related",
+        server_default="related",
+    )
+
+    campaign: Mapped["Campaign"] = relationship(back_populates="release_links")
+    release: Mapped[Release] = relationship(back_populates="campaign_links")
+
+    __table_args__ = (
+        Index("ix_campaign_releases_campaign_id", "campaign_id"),
+        Index("ix_campaign_releases_release_id", "release_id"),
+        Index("ix_campaign_releases_relationship_kind", "relationship_kind"),
+    )
+
+
+class CampaignArtist(Base, TimestampMixin):
+    __tablename__ = "campaign_artists"
+
+    campaign_id: Mapped[UUID] = mapped_column(
+        ForeignKey("campaigns.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    artist_id: Mapped[UUID] = mapped_column(
+        ForeignKey("artists.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    relationship_kind: Mapped[str] = mapped_column(
+        String(60),
+        nullable=False,
+        default="collaborator",
+        server_default="collaborator",
+    )
+    sort_order: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+
+    campaign: Mapped["Campaign"] = relationship(back_populates="artist_links")
+    artist: Mapped[Artist] = relationship(back_populates="campaign_links")
+
+    __table_args__ = (
+        Index("ix_campaign_artists_campaign_id", "campaign_id"),
+        Index("ix_campaign_artists_artist_id", "artist_id"),
+        Index("ix_campaign_artists_relationship_kind", "relationship_kind"),
+    )
+
+
+class CampaignMember(Base, TimestampMixin):
+    __tablename__ = "campaign_members"
+
+    campaign_id: Mapped[UUID] = mapped_column(
+        ForeignKey("campaigns.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    workspace_membership_id: Mapped[UUID] = mapped_column(
+        ForeignKey("workspace_memberships.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    participation_status: Mapped[str] = mapped_column(
+        String(60),
+        nullable=False,
+        default="active",
+        server_default="active",
+    )
+    responsibility_label: Mapped[str | None] = mapped_column(String(120))
+
+    campaign: Mapped["Campaign"] = relationship(back_populates="member_links")
+    workspace_membership: Mapped[WorkspaceMembership] = relationship(
+        back_populates="campaign_links"
+    )
+
+    __table_args__ = (
+        Index("ix_campaign_members_campaign_id", "campaign_id"),
+        Index("ix_campaign_members_workspace_membership_id", "workspace_membership_id"),
+        Index("ix_campaign_members_participation_status", "participation_status"),
+        Index("ix_campaign_members_responsibility_label", "responsibility_label"),
     )
 
 
@@ -1552,6 +1677,37 @@ class Campaign(Base, TimestampMixin, OrganizationOwnedMixin):
 
     id: Mapped[UUIDPrimaryKey]
     name: Mapped[str] = mapped_column(String(200), nullable=False)
+    description: Mapped[str | None] = mapped_column(String(4000))
+    campaign_type: Mapped[CampaignType] = mapped_column(
+        Enum(CampaignType, name="campaign_type"),
+        nullable=False,
+        default=CampaignType.other,
+        server_default=CampaignType.other.value,
+    )
+    status: Mapped[CampaignStatus] = mapped_column(
+        Enum(CampaignStatus, name="campaign_status"),
+        nullable=False,
+        default=CampaignStatus.draft,
+        server_default=CampaignStatus.draft.value,
+    )
+    start_date: Mapped[date | None] = mapped_column(Date)
+    target_end_date: Mapped[date | None] = mapped_column(Date)
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_by_profile_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("universal_profiles.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    owner_profile_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("universal_profiles.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    primary_artist_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("artists.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     release_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("releases.id", ondelete="SET NULL"),
         nullable=True,
@@ -1559,11 +1715,181 @@ class Campaign(Base, TimestampMixin, OrganizationOwnedMixin):
 
     organization: Mapped[Organization] = relationship(back_populates="campaigns")
     release: Mapped[Release | None] = relationship()
+    release_links: Mapped[list[CampaignRelease]] = relationship(
+        back_populates="campaign",
+        cascade="all, delete-orphan",
+    )
+    artist_links: Mapped[list[CampaignArtist]] = relationship(
+        back_populates="campaign",
+        cascade="all, delete-orphan",
+    )
+    member_links: Mapped[list[CampaignMember]] = relationship(
+        back_populates="campaign",
+        cascade="all, delete-orphan",
+    )
+    goals: Mapped[list["CampaignGoal"]] = relationship(
+        back_populates="campaign",
+        cascade="all, delete-orphan",
+        order_by=lambda: (CampaignGoal.created_at.asc(), CampaignGoal.id.asc()),
+    )
+    milestones: Mapped[list["CampaignMilestone"]] = relationship(
+        back_populates="campaign",
+        cascade="all, delete-orphan",
+        order_by=lambda: (
+            CampaignMilestone.target_date.asc().nulls_last(),
+            CampaignMilestone.created_at.asc(),
+            CampaignMilestone.id.asc(),
+        ),
+    )
+    created_by_user: Mapped[User | None] = relationship(
+        foreign_keys=[created_by_user_id]
+    )
+    created_by_profile: Mapped[UniversalProfile | None] = relationship(
+        foreign_keys=[created_by_profile_id]
+    )
+    owner_profile: Mapped[UniversalProfile | None] = relationship(
+        foreign_keys=[owner_profile_id]
+    )
+    primary_artist: Mapped[Artist | None] = relationship(
+        foreign_keys=[primary_artist_id]
+    )
+
+    @validates("name")
+    def _validate_name(self, _key: str, value: str | None) -> str:
+        return _required_text(value, "name")
+
+    @validates("description")
+    def _validate_description(self, _key: str, value: str | None) -> str | None:
+        return _optional_text(value)
 
     __table_args__ = (
         Index("ix_campaigns_organization_id", "organization_id"),
         Index(
+            "ix_campaigns_organization_id_campaign_type",
+            "organization_id",
+            "campaign_type",
+        ),
+        Index("ix_campaigns_organization_id_status", "organization_id", "status"),
+        Index(
+            "ix_campaigns_organization_id_owner_profile_id",
+            "organization_id",
+            "owner_profile_id",
+        ),
+        Index(
+            "ix_campaigns_organization_id_created_by_user_id",
+            "organization_id",
+            "created_by_user_id",
+        ),
+        Index(
+            "ix_campaigns_organization_id_created_by_profile_id",
+            "organization_id",
+            "created_by_profile_id",
+        ),
+        Index(
+            "ix_campaigns_organization_id_primary_artist_id",
+            "organization_id",
+            "primary_artist_id",
+        ),
+        Index(
             "ix_campaigns_organization_id_release_id", "organization_id", "release_id"
+        ),
+        Index(
+            "ix_campaigns_organization_id_start_date",
+            "organization_id",
+            "start_date",
+        ),
+        Index(
+            "ix_campaigns_organization_id_target_end_date",
+            "organization_id",
+            "target_end_date",
+        ),
+    )
+
+
+class CampaignGoal(Base, TimestampMixin):
+    __tablename__ = "campaign_goals"
+
+    id: Mapped[UUIDPrimaryKey]
+    campaign_id: Mapped[UUID] = mapped_column(
+        ForeignKey("campaigns.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    title: Mapped[str] = mapped_column(String(240), nullable=False)
+    description: Mapped[str | None] = mapped_column(String(4000))
+    target_value: Mapped[str | None] = mapped_column(String(500))
+    success_criteria: Mapped[str | None] = mapped_column(String(1000))
+    status: Mapped[str] = mapped_column(
+        String(60),
+        nullable=False,
+        default="active",
+        server_default="active",
+    )
+
+    campaign: Mapped[Campaign] = relationship(back_populates="goals")
+
+    @validates("title", "status")
+    def _validate_required_text(self, key: str, value: str | None) -> str:
+        return _required_text(value, key)
+
+    @validates("description", "target_value", "success_criteria")
+    def _validate_optional_text(self, _key: str, value: str | None) -> str | None:
+        return _optional_text(value)
+
+    __table_args__ = (
+        Index("ix_campaign_goals_campaign_id", "campaign_id"),
+        Index("ix_campaign_goals_campaign_id_status", "campaign_id", "status"),
+    )
+
+
+class CampaignMilestone(Base, TimestampMixin):
+    __tablename__ = "campaign_milestones"
+
+    id: Mapped[UUIDPrimaryKey]
+    campaign_id: Mapped[UUID] = mapped_column(
+        ForeignKey("campaigns.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    title: Mapped[str] = mapped_column(String(240), nullable=False)
+    description: Mapped[str | None] = mapped_column(String(4000))
+    target_date: Mapped[date | None] = mapped_column(Date)
+    status: Mapped[str] = mapped_column(
+        String(60),
+        nullable=False,
+        default="open",
+        server_default="open",
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    campaign: Mapped[Campaign] = relationship(back_populates="milestones")
+    created_by_user: Mapped[User | None] = relationship()
+
+    @validates("title", "status")
+    def _validate_required_text(self, key: str, value: str | None) -> str:
+        return _required_text(value, key)
+
+    @validates("description")
+    def _validate_description(self, _key: str, value: str | None) -> str | None:
+        return _optional_text(value)
+
+    __table_args__ = (
+        Index("ix_campaign_milestones_campaign_id", "campaign_id"),
+        Index(
+            "ix_campaign_milestones_campaign_id_status",
+            "campaign_id",
+            "status",
+        ),
+        Index(
+            "ix_campaign_milestones_campaign_id_target_date",
+            "campaign_id",
+            "target_date",
+        ),
+        Index(
+            "ix_campaign_milestones_created_by_user_id",
+            "created_by_user_id",
         ),
     )
 

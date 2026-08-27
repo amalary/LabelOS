@@ -146,6 +146,38 @@ describe("useOrganizationRealtime", () => {
     expect(window.sessionStorage.getItem("labelos:artists")).toBe("cached");
   });
 
+  it("handles campaign realtime activity on campaign pages without a route refresh", async () => {
+    routeState.pathname = "/campaigns";
+    window.sessionStorage.setItem("labelos:artists", "cached");
+    render(<RealtimeProbe />);
+    const source = FakeEventSource.instances[0]!;
+
+    act(() => {
+      source.emit("message", {
+        id: "event_campaign_01",
+        type: "campaign.goal_completed",
+        version: 1,
+        channel: "organization:org_01",
+        organization_id: "org_01",
+        entity_type: "campaign",
+        entity_id: "campaign_01",
+        operation_id: "operation_campaign_01",
+        actor: { user_id: "user_01", display_name: "Mara Chen" },
+        payload: {
+          campaignId: "campaign_01",
+          campaignName: "Single Launch",
+          goalId: "goal_01",
+          goalTitle: "Reach fans",
+        },
+        created_at: new Date().toISOString(),
+      });
+    });
+
+    expect(await screen.findByText("campaign.goal_completed")).toBeInTheDocument();
+    expect(navigation.refresh).not.toHaveBeenCalled();
+    expect(window.sessionStorage.getItem("labelos:artists")).toBe("cached");
+  });
+
   it("ignores events for a different organization", () => {
     render(<RealtimeProbe />);
     const source = FakeEventSource.instances[0]!;

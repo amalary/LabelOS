@@ -111,6 +111,7 @@ DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS: dict[str, tuple[str, ...]] = {
         Capability.marketing_campaign_view.value,
         Capability.marketing_campaign_create.value,
         Capability.marketing_campaign_edit.value,
+        Capability.marketing_campaign_approve.value,
         Capability.contract_view.value,
         Capability.royalty_view.value,
         Capability.finance_view.value,

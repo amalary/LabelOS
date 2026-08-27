@@ -6,11 +6,9 @@ from pydantic import BaseModel
 from labelos_api.auth import CurrentUserContext
 from labelos_api.authorization import (
     Capability,
-    Permission,
     has_capability,
     require_capability,
     require_organization,
-    require_permission,
 )
 
 router = APIRouter(prefix="/authorization/examples", tags=["authorization"])
@@ -38,15 +36,15 @@ def require_example_capability(required_capability: Capability):
 @router.get(
     "/artists-manage",
     response_model=ProtectedRouteResponse,
-    summary="Example permission-protected route",
+    summary="Example capability-protected route",
 )
 async def manage_artists_example(
     _context: Annotated[
         CurrentUserContext,
-        Depends(require_permission(Permission.artists_manage)),
+        require_example_capability(Capability.artist_profile_edit),
     ],
 ) -> ProtectedRouteResponse:
-    return ProtectedRouteResponse(ok=True, guard=Permission.artists_manage.value)
+    return ProtectedRouteResponse(ok=True, guard=Capability.artist_profile_edit.value)
 
 
 @router.get(

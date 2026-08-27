@@ -15,8 +15,8 @@ from labelos_api.authorization import (
     Capability,
     Permission,
     has_capability,
+    require_capability,
     require_organization,
-    require_permission,
 )
 from labelos_api.services.dashboard_service import get_dashboard_summary as get_summary
 from labelos_api.services.performance_service import (
@@ -66,6 +66,14 @@ def _has_permission(context: CurrentUserContext, permission: Permission) -> bool
 
 def _has_capability(context: CurrentUserContext, capability: Capability) -> bool:
     return has_capability(context, capability)
+
+
+def _has_permission_or_capability(
+    context: CurrentUserContext,
+    permission: Permission,
+    capability: Capability,
+) -> bool:
+    return _has_permission(context, permission) or _has_capability(context, capability)
 
 
 def _authorization_response(
@@ -136,10 +144,18 @@ async def get_dashboard_summary(
         "authorization": _authorization_response(context, membership),
     }
 
-    if _has_permission(context, Permission.artists_view):
+    if _has_permission_or_capability(
+        context,
+        Permission.artists_view,
+        Capability.artist_profile_view,
+    ):
         available_cards.append("active-artists")
         payload["active_artists"] = summary.active_artists
-    if _has_permission(context, Permission.releases_view):
+    if _has_permission_or_capability(
+        context,
+        Permission.releases_view,
+        Capability.release_view,
+    ):
         available_cards.append("upcoming-releases")
         available_sections.append("release-pipeline")
         payload["upcoming_releases"] = summary.upcoming_releases
@@ -150,7 +166,11 @@ async def get_dashboard_summary(
             "scheduled": summary.release_counts.scheduled,
             "released": summary.release_counts.released,
         }
-    if _has_permission(context, Permission.campaigns_view):
+    if _has_permission_or_capability(
+        context,
+        Permission.campaigns_view,
+        Capability.marketing_campaign_view,
+    ):
         available_cards.append("active-campaigns")
         payload["active_campaigns"] = summary.active_campaigns
     if _has_capability(context, Capability.contract_approve):
@@ -168,12 +188,17 @@ async def get_dashboard_summary(
 async def get_label_performance(
     context: Annotated[
         CurrentUserContext,
-        Depends(require_permission(Permission.analytics_view)),
+        Depends(require_capability(Capability.analytics_view)),
     ],
     metric: Annotated[LabelPerformanceMetric, Query()],
     period: Annotated[LabelPerformancePeriod, Query()],
 ) -> LabelPerformanceResponse:
     organization_id = require_active_organization_id(context)
+    if not _has_permission(context, Permission.analytics_view):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Insufficient permission",
+        )
     if not _has_capability(context, Capability.finance_report_view):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -186,6 +211,14 @@ async def get_label_performance(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Insufficient permission",
+        )
+    if metric == LabelPerformanceMetric.revenue and not _has_capability(
+        context,
+        Capability.royalty_view,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Insufficient capability permission",
         )
     performance = await get_label_performance_series(organization_id, metric, period)
     return LabelPerformanceResponse(

@@ -63,6 +63,70 @@ describe("activity event mapping", () => {
     });
   });
 
+  it("maps campaign team activity events", () => {
+    expect(
+      mapActivityEvent(
+        {
+          id: "activity-campaign-member",
+          type: "campaign.member_added",
+          payload: {
+            campaignName: "Launch Campaign",
+            displayName: "Mira Stone",
+            responsibilityLabel: "campaign lead",
+          },
+          createdAt: "2026-08-12T17:59:00.000Z",
+        },
+        now,
+      ),
+    ).toMatchObject({
+      title: "Campaign member added",
+      description: "Mira Stone joined Launch Campaign",
+      tone: "campaign",
+      rawType: "campaign.member_added",
+    });
+  });
+
+  it("maps campaign planning and relationship activity events", () => {
+    expect(
+      mapActivityEvent(
+        {
+          id: "activity-campaign-goal",
+          type: "campaign.goal_completed",
+          payload: {
+            campaignName: "Launch Campaign",
+            goalTitle: "Reach fans",
+            status: "completed",
+          },
+          createdAt: "2026-08-12T17:59:00.000Z",
+        },
+        now,
+      ),
+    ).toMatchObject({
+      title: "Campaign goal completed",
+      description: "Reach fans was completed",
+      tone: "campaign",
+    });
+
+    expect(
+      mapActivityEvent(
+        {
+          id: "activity-campaign-release",
+          type: "campaign.release_associated",
+          payload: {
+            campaignName: "Launch Campaign",
+            releaseTitle: "Alpha Single",
+          },
+          createdAt: "2026-08-12T17:59:00.000Z",
+        },
+        now,
+      ),
+    ).toMatchObject({
+      title: "Campaign release associated",
+      description: "Alpha Single was linked to Launch Campaign",
+      tone: "campaign",
+    });
+  });
+
   it("formats unavailable timestamps without throwing", () => {
     expect(formatActivityTimestamp("not-a-date", now)).toBe("Time unavailable");
   });
