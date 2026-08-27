@@ -323,6 +323,21 @@ async def add_campaign_member(
     return link
 
 
+async def list_campaign_members(
+    session: AsyncSession,
+    workspace_id: UUID,
+    campaign_id: UUID,
+) -> list[CampaignMember]:
+    links = await campaign_relationships.list_campaign_members(
+        session,
+        workspace_id,
+        campaign_id,
+    )
+    if links is None:
+        raise CampaignNotFoundError("Campaign not found")
+    return links
+
+
 async def remove_campaign_member(
     session: AsyncSession,
     workspace_id: UUID,
@@ -338,6 +353,21 @@ async def remove_campaign_member(
     )
     await session.commit()
     return removed
+
+
+async def list_campaign_artists(
+    session: AsyncSession,
+    workspace_id: UUID,
+    campaign_id: UUID,
+) -> list[CampaignArtist]:
+    links = await campaign_relationships.list_campaign_artists(
+        session,
+        workspace_id,
+        campaign_id,
+    )
+    if links is None:
+        raise CampaignNotFoundError("Campaign not found")
+    return links
 
 
 async def associate_artist(
@@ -363,6 +393,21 @@ async def associate_artist(
         )
     await session.commit()
     return link
+
+
+async def list_campaign_releases(
+    session: AsyncSession,
+    workspace_id: UUID,
+    campaign_id: UUID,
+) -> list[CampaignRelease]:
+    links = await campaign_relationships.list_campaign_releases(
+        session,
+        workspace_id,
+        campaign_id,
+    )
+    if links is None:
+        raise CampaignNotFoundError("Campaign not found")
+    return links
 
 
 async def remove_artist_association(

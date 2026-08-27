@@ -4,6 +4,9 @@ from uuid import UUID
 from labelos_database.models import (
     Artist,
     Campaign,
+    CampaignArtist,
+    CampaignMember,
+    CampaignRelease,
     Release,
     UniversalProfile,
     WorkspaceMembership,
@@ -17,9 +20,11 @@ def _campaign_load_options():
     return (
         selectinload(Campaign.primary_artist),
         selectinload(Campaign.release),
-        selectinload(Campaign.artist_links),
-        selectinload(Campaign.release_links),
-        selectinload(Campaign.member_links),
+        selectinload(Campaign.artist_links).selectinload(CampaignArtist.artist),
+        selectinload(Campaign.release_links).selectinload(CampaignRelease.release),
+        selectinload(Campaign.member_links)
+        .selectinload(CampaignMember.workspace_membership)
+        .selectinload(WorkspaceMembership.profile),
     )
 
 
