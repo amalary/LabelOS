@@ -1,5 +1,7 @@
 "use client";
 
+import { useCallback, useEffect, useSyncExternalStore } from "react";
+
 export type CampaignApiErrorCode =
   "unauthorized" | "forbidden" | "not_found" | "conflict" | "network_failure";
 
@@ -29,6 +31,28 @@ export type CampaignOwner = {
   display_name: string | null;
 };
 
+export type CampaignArtistSummary = {
+  id: string;
+  name: string;
+};
+
+export type CampaignReleaseSummary = {
+  id: string;
+  title: string;
+  artist_id: string | null;
+};
+
+export type CampaignArtistRelationship = {
+  artist: CampaignArtistSummary;
+  relationship_kind: string;
+  sort_order: number;
+};
+
+export type CampaignReleaseRelationship = {
+  release: CampaignReleaseSummary;
+  relationship_kind: string;
+};
+
 export type Campaign = {
   id: string;
   workspace_id: string;
@@ -42,7 +66,11 @@ export type Campaign = {
   created_by_profile_id: string | null;
   owner_profile_id: string | null;
   owner: CampaignOwner | null;
+  primary_artist: CampaignArtistSummary | null;
+  release: CampaignReleaseSummary | null;
   members: CampaignTeamMember[];
+  artists: CampaignArtistRelationship[];
+  releases: CampaignReleaseRelationship[];
   created_at: string;
   updated_at: string;
 };
@@ -61,6 +89,124 @@ export type CampaignMemberUpsert = {
   participation_status?: string;
   responsibility_label?: string | null;
 };
+
+export type CampaignCreate = {
+  name: string;
+  description?: string | null;
+  campaign_type?: string;
+  status?: string;
+  start_date?: string | null;
+  target_end_date?: string | null;
+  owner_profile_id?: string | null;
+  primary_artist_id?: string | null;
+  release_id?: string | null;
+};
+
+export type CampaignGoal = {
+  id: string;
+  campaign_id: string;
+  title: string;
+  description: string | null;
+  target_value: string | null;
+  success_criteria: string | null;
+  status: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CampaignGoalsList = {
+  goals: CampaignGoal[];
+};
+
+export type CampaignMilestone = {
+  id: string;
+  campaign_id: string;
+  title: string;
+  description: string | null;
+  target_date: string | null;
+  status: string;
+  completed_at: string | null;
+  created_by_user_id: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CampaignMilestonesList = {
+  milestones: CampaignMilestone[];
+};
+
+export type CampaignResourceState<T> = {
+  data: T | null;
+  error: CampaignApiError | null;
+  isLoading: boolean;
+  isMutating: boolean;
+  reload: () => Promise<T>;
+};
+
+export type CampaignMutationState<TData, TVariables> = {
+  data: TData | null;
+  error: CampaignApiError | null;
+  isMutating: boolean;
+  mutate: (variables: TVariables) => Promise<TData>;
+  reset: () => void;
+};
+
+type CacheEntry<T> = {
+  data: T | null;
+  error: CampaignApiError | null;
+  fetcher: (() => Promise<T>) | null;
+  isLoading: boolean;
+  listeners: Set<() => void>;
+  promise: Promise<T> | null;
+  version: number;
+};
+
+const cache = new Map<string, CacheEntry<unknown>>();
+const mutationListeners = new Set<() => void>();
+let mutationVersion = 0;
+let activeMutationCount = 0;
+
+export const campaignQueryKeys = {
+  all: "campaigns",
+  workspaceList: (workspaceId: string) => `campaigns:workspace-list:${workspaceId}`,
+  detail: (workspaceId: string, campaignId: string) =>
+    `campaigns:detail:${workspaceId}:${campaignId}`,
+  goals: (workspaceId: string, campaignId: string) =>
+    `campaigns:goals:${workspaceId}:${campaignId}`,
+  milestones: (workspaceId: string, campaignId: string) =>
+    `campaigns:milestones:${workspaceId}:${campaignId}`,
+};
+
+function entryFor<T>(key: string): CacheEntry<T> {
+  let entry = cache.get(key) as CacheEntry<T> | undefined;
+  if (!entry) {
+    entry = {
+      data: null,
+      error: null,
+      fetcher: null,
+      isLoading: false,
+      listeners: new Set(),
+      promise: null,
+      version: 0,
+    };
+    cache.set(key, entry as CacheEntry<unknown>);
+  }
+  return entry;
+}
+
+function emit(entry: CacheEntry<unknown>) {
+  entry.version += 1;
+  for (const listener of entry.listeners) {
+    listener();
+  }
+}
+
+function emitMutationChange() {
+  mutationVersion += 1;
+  for (const listener of mutationListeners) {
+    listener();
+  }
+}
 
 function toCampaignApiError(status: number): CampaignApiError {
   if (status === 401) {
@@ -109,12 +255,154 @@ async function campaignJson<T>(path: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T;
 }
 
+async function loadResource<T>(key: string, fetcher: () => Promise<T>): Promise<T> {
+  const entry = entryFor<T>(key);
+  entry.fetcher = fetcher;
+  if (entry.promise) {
+    return entry.promise;
+  }
+
+  entry.error = null;
+  entry.isLoading = true;
+  emit(entry);
+
+  entry.promise = fetcher()
+    .then((data) => {
+      entry.data = data;
+      entry.error = null;
+      return data;
+    })
+    .catch((error) => {
+      entry.error =
+        error instanceof CampaignApiError
+          ? error
+          : new CampaignApiError(
+              "network_failure",
+              "Campaign data could not be loaded.",
+              undefined,
+              {
+                cause: error,
+              },
+            );
+      throw entry.error;
+    })
+    .finally(() => {
+      entry.isLoading = false;
+      entry.promise = null;
+      emit(entry);
+    });
+
+  emit(entry);
+  return entry.promise;
+}
+
+function useCampaignResource<T>(
+  key: string | null,
+  fetcher: (() => Promise<T>) | null,
+): CampaignResourceState<T> {
+  const subscribe = useCallback(
+    (listener: () => void) => {
+      if (!key) {
+        return () => undefined;
+      }
+      const entry = entryFor<T>(key);
+      entry.listeners.add(listener);
+      return () => {
+        entry.listeners.delete(listener);
+      };
+    },
+    [key],
+  );
+
+  const getSnapshot = useCallback(() => {
+    if (!key) {
+      return 0;
+    }
+    return entryFor<T>(key).version;
+  }, [key]);
+
+  useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+
+  useEffect(() => {
+    if (!key || !fetcher) {
+      return;
+    }
+    const entry = entryFor<T>(key);
+    entry.fetcher = fetcher;
+    if (entry.data === null && !entry.isLoading) {
+      void loadResource(key, fetcher).catch(() => undefined);
+    }
+  }, [fetcher, key]);
+
+  const reload = useCallback(async () => {
+    if (!key || !fetcher) {
+      throw new CampaignApiError("not_found", "A campaign resource key is required.");
+    }
+    return loadResource(key, fetcher);
+  }, [fetcher, key]);
+
+  const entry = key ? entryFor<T>(key) : null;
+  return {
+    data: entry?.data ?? null,
+    error: entry?.error ?? null,
+    isLoading: entry?.isLoading ?? false,
+    isMutating: activeMutationCount > 0,
+    reload,
+  };
+}
+
+export function invalidateCampaignCache(predicate?: (key: string) => boolean) {
+  for (const [key, entry] of cache.entries()) {
+    if (predicate && !predicate(key)) {
+      continue;
+    }
+    entry.data = null;
+    entry.error = null;
+    if (entry.fetcher) {
+      void loadResource(key, entry.fetcher).catch(() => undefined);
+    } else {
+      emit(entry);
+    }
+  }
+}
+
+export function clearCampaignCache() {
+  cache.clear();
+  activeMutationCount = 0;
+  mutationVersion = 0;
+}
+
 export function getCampaigns(workspaceId: string): Promise<CampaignsList> {
   return campaignJson<CampaignsList>(`/api/workspaces/${workspaceId}/campaigns`);
 }
 
+export function createCampaign(workspaceId: string, payload: CampaignCreate): Promise<Campaign> {
+  return campaignJson<Campaign>(`/api/workspaces/${workspaceId}/campaigns`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
 export function getCampaign(workspaceId: string, campaignId: string): Promise<Campaign> {
   return campaignJson<Campaign>(`/api/workspaces/${workspaceId}/campaigns/${campaignId}`);
+}
+
+export function getCampaignGoals(
+  workspaceId: string,
+  campaignId: string,
+): Promise<CampaignGoalsList> {
+  return campaignJson<CampaignGoalsList>(
+    `/api/workspaces/${workspaceId}/campaigns/${campaignId}/goals`,
+  );
+}
+
+export function getCampaignMilestones(
+  workspaceId: string,
+  campaignId: string,
+): Promise<CampaignMilestonesList> {
+  return campaignJson<CampaignMilestonesList>(
+    `/api/workspaces/${workspaceId}/campaigns/${campaignId}/milestones`,
+  );
 }
 
 export function getCampaignMembers(
@@ -151,4 +439,112 @@ export function removeCampaignMember(
       method: "DELETE",
     },
   );
+}
+
+export function useCampaigns(workspaceId: string | null): CampaignResourceState<CampaignsList> {
+  const key = workspaceId ? campaignQueryKeys.workspaceList(workspaceId) : null;
+  const fetcher = useCallback(() => getCampaigns(workspaceId ?? ""), [workspaceId]);
+  return useCampaignResource(key, workspaceId ? fetcher : null);
+}
+
+export function useCampaign(
+  workspaceId: string | null,
+  campaignId: string | null,
+): CampaignResourceState<Campaign> {
+  const key = workspaceId && campaignId ? campaignQueryKeys.detail(workspaceId, campaignId) : null;
+  const fetcher = useCallback(
+    () => getCampaign(workspaceId ?? "", campaignId ?? ""),
+    [campaignId, workspaceId],
+  );
+  return useCampaignResource(key, workspaceId && campaignId ? fetcher : null);
+}
+
+export function useCampaignGoals(
+  workspaceId: string | null,
+  campaignId: string | null,
+): CampaignResourceState<CampaignGoalsList> {
+  const key = workspaceId && campaignId ? campaignQueryKeys.goals(workspaceId, campaignId) : null;
+  const fetcher = useCallback(
+    () => getCampaignGoals(workspaceId ?? "", campaignId ?? ""),
+    [campaignId, workspaceId],
+  );
+  return useCampaignResource(key, workspaceId && campaignId ? fetcher : null);
+}
+
+export function useCampaignMilestones(
+  workspaceId: string | null,
+  campaignId: string | null,
+): CampaignResourceState<CampaignMilestonesList> {
+  const key =
+    workspaceId && campaignId ? campaignQueryKeys.milestones(workspaceId, campaignId) : null;
+  const fetcher = useCallback(
+    () => getCampaignMilestones(workspaceId ?? "", campaignId ?? ""),
+    [campaignId, workspaceId],
+  );
+  return useCampaignResource(key, workspaceId && campaignId ? fetcher : null);
+}
+
+export function useCreateCampaign(
+  workspaceId: string | null,
+): CampaignMutationState<Campaign, CampaignCreate> {
+  const getVersion = useCallback(() => mutationVersion, []);
+  const subscribe = useCallback((listener: () => void) => {
+    mutationListeners.add(listener);
+    return () => {
+      mutationListeners.delete(listener);
+    };
+  }, []);
+  useSyncExternalStore(subscribe, getVersion, getVersion);
+
+  const entry = entryFor<Campaign>(`campaigns:mutation:create:${workspaceId ?? "none"}`);
+  const mutate = useCallback(
+    async (payload: CampaignCreate) => {
+      if (!workspaceId) {
+        throw new CampaignApiError("not_found", "A workspace resource key is required.");
+      }
+      activeMutationCount += 1;
+      entry.isLoading = true;
+      entry.error = null;
+      emitMutationChange();
+      try {
+        const campaign = await createCampaign(workspaceId, payload);
+        entry.data = campaign;
+        entry.error = null;
+        const detailEntry = entryFor<Campaign>(campaignQueryKeys.detail(workspaceId, campaign.id));
+        detailEntry.data = campaign;
+        detailEntry.error = null;
+        emit(detailEntry);
+        invalidateCampaignCache((key) => key === campaignQueryKeys.workspaceList(workspaceId));
+        return campaign;
+      } catch (error) {
+        entry.error =
+          error instanceof CampaignApiError
+            ? error
+            : new CampaignApiError("network_failure", "Campaign creation failed.", undefined, {
+                cause: error,
+              });
+        throw entry.error;
+      } finally {
+        activeMutationCount = Math.max(0, activeMutationCount - 1);
+        entry.isLoading = false;
+        emitMutationChange();
+      }
+    },
+    [entry, workspaceId],
+  );
+
+  const reset = useCallback(() => {
+    entry.data = null;
+    entry.error = null;
+    entry.isLoading = false;
+    emitMutationChange();
+  }, [entry]);
+
+  return {
+    data: entry.data,
+    error: entry.error,
+    isMutating: entry.isLoading,
+    mutate,
+    reset,
+  };
 }

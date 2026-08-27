@@ -21,12 +21,15 @@ export async function PUT(
   context: { params: Promise<{ workspaceId: string; campaignId: string }> },
 ) {
   const { workspaceId, campaignId } = await context.params;
-  return proxyWorkspaceRequest(`/api/v1/workspaces/${workspaceId}/campaigns/${campaignId}/members`, {
-    method: "PUT",
-    body: await request.text(),
-    headers: {
-      Accept: "application/json",
-      "Content-Type": request.headers.get("content-type") ?? "application/json",
+  return proxyWorkspaceRequest(
+    `/api/v1/workspaces/${workspaceId}/campaigns/${campaignId}/members`,
+    {
+      method: "PUT",
+      body: await request.text(),
+      headers: {
+        Accept: "application/json",
+        "Content-Type": request.headers.get("content-type") ?? "application/json",
+      },
     },
-  });
+  );
 }

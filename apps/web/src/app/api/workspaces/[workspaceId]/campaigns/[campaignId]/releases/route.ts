@@ -1,4 +1,4 @@
-import { proxyWorkspaceRequest } from "../../../proxy";
+import { proxyWorkspaceRequest } from "../../../../proxy";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -8,7 +8,7 @@ export function GET(
   context: { params: Promise<{ workspaceId: string; campaignId: string }> },
 ) {
   return context.params.then(({ workspaceId, campaignId }) =>
-    proxyWorkspaceRequest(`/api/v1/workspaces/${workspaceId}/campaigns/${campaignId}`, {
+    proxyWorkspaceRequest(`/api/v1/workspaces/${workspaceId}/campaigns/${campaignId}/releases`, {
       headers: {
         Accept: "application/json",
       },
@@ -16,17 +16,20 @@ export function GET(
   );
 }
 
-export async function PATCH(
+export async function PUT(
   request: Request,
   context: { params: Promise<{ workspaceId: string; campaignId: string }> },
 ) {
   const { workspaceId, campaignId } = await context.params;
-  return proxyWorkspaceRequest(`/api/v1/workspaces/${workspaceId}/campaigns/${campaignId}`, {
-    method: "PATCH",
-    body: await request.text(),
-    headers: {
-      Accept: "application/json",
-      "Content-Type": request.headers.get("content-type") ?? "application/json",
+  return proxyWorkspaceRequest(
+    `/api/v1/workspaces/${workspaceId}/campaigns/${campaignId}/releases`,
+    {
+      method: "PUT",
+      body: await request.text(),
+      headers: {
+        Accept: "application/json",
+        "Content-Type": request.headers.get("content-type") ?? "application/json",
+      },
     },
-  });
+  );
 }

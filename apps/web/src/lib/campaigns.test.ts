@@ -2,7 +2,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   CampaignApiError,
+  createCampaign,
   getCampaignMembers,
+  getCampaignGoals,
+  getCampaignMilestones,
   getCampaigns,
   removeCampaignMember,
   upsertCampaignMember,
@@ -33,7 +36,14 @@ const campaign = {
     profile_id: "profile_01",
     display_name: "Mira Stone",
   },
+  primary_artist: {
+    id: "artist_01",
+    name: "The North Lines",
+  },
+  release: null,
   members: [member],
+  artists: [],
+  releases: [],
   created_at: "2026-08-27T12:00:00Z",
   updated_at: "2026-08-27T12:00:00Z",
 };
@@ -60,6 +70,58 @@ describe("campaign data layer", () => {
     );
     const headers = vi.mocked(fetch).mock.calls[0]?.[1]?.headers as Headers;
     expect(headers.get("Accept")).toBe("application/json");
+  });
+
+  it("creates campaigns through the workspace API proxy", async () => {
+    vi.mocked(fetch).mockResolvedValue(Response.json(campaign, { status: 201 }));
+
+    await expect(
+      createCampaign("workspace_01", {
+        name: "Launch Campaign",
+        campaign_type: "release",
+        status: "planning",
+        owner_profile_id: "profile_01",
+      }),
+    ).resolves.toEqual(campaign);
+
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/workspaces/workspace_01/campaigns",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          name: "Launch Campaign",
+          campaign_type: "release",
+          status: "planning",
+          owner_profile_id: "profile_01",
+        }),
+      }),
+    );
+  });
+
+  it("fetches campaign goals and milestones through planning proxies", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(Response.json({ goals: [{ id: "goal_01", title: "Press" }] }))
+      .mockResolvedValueOnce(
+        Response.json({ milestones: [{ id: "milestone_01", title: "Announce" }] }),
+      );
+
+    await expect(getCampaignGoals("workspace_01", "campaign_01")).resolves.toEqual({
+      goals: [{ id: "goal_01", title: "Press" }],
+    });
+    await expect(getCampaignMilestones("workspace_01", "campaign_01")).resolves.toEqual({
+      milestones: [{ id: "milestone_01", title: "Announce" }],
+    });
+
+    expect(fetch).toHaveBeenNthCalledWith(
+      1,
+      "/api/workspaces/workspace_01/campaigns/campaign_01/goals",
+      expect.any(Object),
+    );
+    expect(fetch).toHaveBeenNthCalledWith(
+      2,
+      "/api/workspaces/workspace_01/campaigns/campaign_01/milestones",
+      expect.any(Object),
+    );
   });
 
   it("fetches campaign members with owner and responsibility metadata", async () => {

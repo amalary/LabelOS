@@ -1,4 +1,4 @@
-import { proxyWorkspaceRequest } from "../../../proxy";
+import { proxyWorkspaceRequest } from "../../../../proxy";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -8,7 +8,7 @@ export function GET(
   context: { params: Promise<{ workspaceId: string; campaignId: string }> },
 ) {
   return context.params.then(({ workspaceId, campaignId }) =>
-    proxyWorkspaceRequest(`/api/v1/workspaces/${workspaceId}/campaigns/${campaignId}`, {
+    proxyWorkspaceRequest(`/api/v1/workspaces/${workspaceId}/campaigns/${campaignId}/goals`, {
       headers: {
         Accept: "application/json",
       },
@@ -16,13 +16,13 @@ export function GET(
   );
 }
 
-export async function PATCH(
+export async function POST(
   request: Request,
   context: { params: Promise<{ workspaceId: string; campaignId: string }> },
 ) {
   const { workspaceId, campaignId } = await context.params;
-  return proxyWorkspaceRequest(`/api/v1/workspaces/${workspaceId}/campaigns/${campaignId}`, {
-    method: "PATCH",
+  return proxyWorkspaceRequest(`/api/v1/workspaces/${workspaceId}/campaigns/${campaignId}/goals`, {
+    method: "POST",
     body: await request.text(),
     headers: {
       Accept: "application/json",
