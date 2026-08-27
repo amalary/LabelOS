@@ -1,3 +1,4 @@
+from datetime import date
 from pathlib import Path
 from uuid import UUID
 
@@ -22,6 +23,9 @@ from labelos_database.models import (
     ArtistProfile,
     AuthIdentity,
     Campaign,
+    CampaignRelease,
+    CampaignStatus,
+    CampaignType,
     Contract,
     Department,
     MembershipDepartmentAccess,
@@ -83,6 +87,7 @@ def test_foundational_models_are_registered() -> None:
         ArtistProfile.__tablename__,
         Release.__tablename__,
         Campaign.__tablename__,
+        CampaignRelease.__tablename__,
         Contract.__tablename__,
         Royalty.__tablename__,
         AnalyticsEvent.__tablename__,
@@ -114,6 +119,7 @@ def test_foundational_models_are_registered() -> None:
         "artist_profiles",
         "releases",
         "campaigns",
+        "campaign_releases",
         "contracts",
         "royalties",
         "analytics_events",
@@ -131,6 +137,145 @@ def test_foundational_models_are_registered() -> None:
         "role_departments",
         "workspace_membership_roles",
     }
+
+
+def test_campaign_domain_contract_is_extensible_beyond_single_release() -> None:
+    campaign_columns = Campaign.__table__.columns
+    campaign_index_names = {index.name for index in Campaign.__table__.indexes}
+    campaign_foreign_key_deletions = {
+        foreign_key.parent.name: foreign_key.ondelete
+        for foreign_key in Campaign.__table__.foreign_keys
+    }
+    campaign_release_index_names = {
+        index.name for index in CampaignRelease.__table__.indexes
+    }
+    campaign_release_foreign_key_deletions = {
+        foreign_key.parent.name: foreign_key.ondelete
+        for foreign_key in CampaignRelease.__table__.foreign_keys
+    }
+
+    assert campaign_columns["organization_id"].nullable is False
+    assert campaign_columns["name"].nullable is False
+    assert campaign_columns["description"].nullable is True
+    assert campaign_columns["campaign_type"].nullable is False
+    assert campaign_columns["status"].nullable is False
+    assert campaign_columns["start_date"].nullable is True
+    assert campaign_columns["target_end_date"].nullable is True
+    assert campaign_columns["created_by_user_id"].nullable is True
+    assert campaign_columns["created_by_profile_id"].nullable is True
+    assert campaign_columns["owner_profile_id"].nullable is True
+    assert campaign_columns["primary_artist_id"].nullable is True
+    assert campaign_columns["release_id"].nullable is True
+    assert (
+        Campaign(campaign_type=CampaignType.marketing).campaign_type
+        == CampaignType.marketing
+    )
+    assert Campaign(status=CampaignStatus.planning).status == CampaignStatus.planning
+
+    assert CampaignRelease.__table__.primary_key.columns.keys() == [
+        "campaign_id",
+        "release_id",
+    ]
+    assert {
+        "ix_campaigns_organization_id",
+        "ix_campaigns_organization_id_campaign_type",
+        "ix_campaigns_organization_id_status",
+        "ix_campaigns_organization_id_owner_profile_id",
+        "ix_campaigns_organization_id_created_by_user_id",
+        "ix_campaigns_organization_id_created_by_profile_id",
+        "ix_campaigns_organization_id_primary_artist_id",
+        "ix_campaigns_organization_id_release_id",
+        "ix_campaigns_organization_id_start_date",
+        "ix_campaigns_organization_id_target_end_date",
+    } <= campaign_index_names
+    assert campaign_foreign_key_deletions == {
+        "organization_id": "CASCADE",
+        "release_id": "SET NULL",
+        "created_by_user_id": "SET NULL",
+        "created_by_profile_id": "SET NULL",
+        "owner_profile_id": "SET NULL",
+        "primary_artist_id": "SET NULL",
+    }
+    assert {
+        "ix_campaign_releases_campaign_id",
+        "ix_campaign_releases_release_id",
+        "ix_campaign_releases_relationship_kind",
+    } <= campaign_release_index_names
+    assert campaign_release_foreign_key_deletions == {
+        "campaign_id": "CASCADE",
+        "release_id": "CASCADE",
+    }
+
+
+def test_campaign_domain_relationships_preserve_legacy_release_pointer() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Campaign.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        organization = Organization(
+            name="Example Label",
+            slug="example-label-campaigns",
+            owner=User(email="owner@example.com"),
+        )
+        creator = User(email="creator@example.com")
+        creator_profile = UniversalProfile(
+            user=creator,
+            slug="campaign-creator",
+        )
+        accountable_profile = UniversalProfile(
+            user=User(email="accountable@example.com"),
+            slug="campaign-accountable",
+        )
+        artist = Artist(name="Primary Artist", organization=organization)
+        release = Release(
+            title="Debut EP",
+            artist=artist,
+            organization=organization,
+        )
+        campaign = Campaign(
+            organization=organization,
+            name="Debut EP Launch",
+            description="  Audience growth and release launch.  ",
+            campaign_type=CampaignType.release,
+            status=CampaignStatus.planning,
+            start_date=date(2026, 9, 1),
+            target_end_date=date(2026, 11, 15),
+            created_by_user=creator,
+            created_by_profile=creator_profile,
+            owner_profile=accountable_profile,
+            primary_artist=artist,
+            release=release,
+        )
+        campaign.release_links.append(
+            CampaignRelease(release=release, relationship_kind="primary")
+        )
+
+        session.add(campaign)
+        session.commit()
+        session.refresh(campaign)
+
+        assert campaign.description == "Audience growth and release launch."
+        assert campaign.release == release
+        assert campaign.release_id == release.id
+        assert campaign.release_links[0].release == release
+        assert campaign.release_links[0].relationship_kind == "primary"
+        assert campaign.created_by_user == creator
+        assert campaign.created_by_profile == creator_profile
+        assert campaign.owner_profile == accountable_profile
+        assert campaign.primary_artist == artist
+        assert campaign.organization == organization
+        assert campaign.created_at is not None
+        assert campaign.updated_at is not None
+    engine.dispose()
+
+
+def test_campaign_domain_defaults_are_safe_for_existing_rows() -> None:
+    campaign = Campaign(name="Imported Campaign")
+
+    assert campaign.campaign_type is None
+    assert campaign.status is None
+    assert Campaign.__table__.c.campaign_type.server_default is not None
+    assert Campaign.__table__.c.status.server_default is not None
 
 
 def test_memberships_define_organization_boundary_constraints() -> None:
@@ -267,6 +412,24 @@ def test_artist_profile_migrations_do_not_delete_unlinked_catalog_data() -> None
         module_architecture_migration
     )
     assert "SET biography = (" in (module_architecture_migration)
+
+
+def test_campaign_domain_migration_preserves_release_id_and_backfills_links() -> None:
+    campaign_migration = (
+        REPO_ROOT
+        / "packages/database/alembic/versions/202608271000_campaign_domain_contract.py"
+    ).read_text()
+
+    assert 'op.drop_column("campaigns", "release_id")' not in campaign_migration
+    assert "INSERT INTO campaign_releases" in campaign_migration
+    assert "SELECT id, release_id, 'primary'" in campaign_migration
+    assert "WHERE release_id IS NOT NULL" in campaign_migration
+    assert 'server_default="other"' in campaign_migration
+    assert 'server_default="draft"' in campaign_migration
+    assert "ix_campaigns_organization_id_created_by_user_id" in campaign_migration
+    assert "ix_campaigns_organization_id_created_by_profile_id" in campaign_migration
+    assert "ix_campaigns_organization_id_start_date" in campaign_migration
+    assert "ix_campaigns_organization_id_target_end_date" in campaign_migration
 
 
 def test_profile_attributes_define_extensible_profile_metadata() -> None:

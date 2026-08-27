@@ -10,7 +10,7 @@ This repository is in foundation setup. It contains the planned monorepo structu
 
 ## Prerequisites
 
-- Node.js 24
+- Node.js 22.23.1
 - Corepack enabled for pnpm
 - Python 3.12 or newer
 - Docker Desktop or Docker Engine with Docker Compose for local PostgreSQL
