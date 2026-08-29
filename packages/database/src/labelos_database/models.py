@@ -1,5 +1,6 @@
 import re
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from enum import StrEnum
 from typing import ClassVar
 from urllib.parse import urlparse
@@ -14,6 +15,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    Numeric,
     String,
     UniqueConstraint,
     false,
@@ -100,6 +102,14 @@ class CampaignStatus(StrEnum):
     completed = "completed"
     cancelled = "cancelled"
     archived = "archived"
+
+
+class AnalyticsMetricValueType(StrEnum):
+    integer = "integer"
+    decimal = "decimal"
+    string = "string"
+    boolean = "boolean"
+    json = "json"
 
 
 def workspace_permission_from_role(role: MembershipRole) -> WorkspacePermission:
@@ -533,6 +543,20 @@ class Organization(Base, TimestampMixin):
         cascade="all, delete-orphan",
     )
     analytics_events: Mapped[list["AnalyticsEvent"]] = relationship(
+        back_populates="organization",
+        cascade="all, delete-orphan",
+    )
+    analytics_providers: Mapped[list["AnalyticsProvider"]] = relationship(
+        back_populates="organization",
+        cascade="all, delete-orphan",
+    )
+    analytics_metric_definitions: Mapped[list["AnalyticsMetricDefinition"]] = (
+        relationship(
+            back_populates="organization",
+            cascade="all, delete-orphan",
+        )
+    )
+    analytics_observations: Mapped[list["AnalyticsObservation"]] = relationship(
         back_populates="organization",
         cascade="all, delete-orphan",
     )
@@ -1527,6 +1551,9 @@ class ArtistProfile(Base, TimestampMixin, ProfileModuleMixin):
     )
 
     artist: Mapped[Artist] = relationship(back_populates="profile")
+    analytics_observations: Mapped[list["AnalyticsObservation"]] = relationship(
+        back_populates="artist_profile",
+    )
 
     @validates("stage_name", "career_stage")
     def _validate_optional_text(self, _key: str, value: str | None) -> str | None:
@@ -1753,6 +1780,9 @@ class Campaign(Base, TimestampMixin, OrganizationOwnedMixin):
     primary_artist: Mapped[Artist | None] = relationship(
         foreign_keys=[primary_artist_id]
     )
+    analytics_observations: Mapped[list["AnalyticsObservation"]] = relationship(
+        back_populates="campaign",
+    )
 
     @validates("name")
     def _validate_name(self, _key: str, value: str | None) -> str:
@@ -1944,6 +1974,268 @@ class AnalyticsEvent(Base, TimestampMixin, OrganizationOwnedMixin):
     organization: Mapped[Organization] = relationship(back_populates="analytics_events")
 
     __table_args__ = (Index("ix_analytics_events_organization_id", "organization_id"),)
+
+
+class AnalyticsProvider(Base, TimestampMixin, OrganizationOwnedMixin):
+    __tablename__ = "analytics_providers"
+
+    id: Mapped[UUIDPrimaryKey]
+    key: Mapped[str] = mapped_column(String(120), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    provider_type: Mapped[str] = mapped_column(
+        String(80),
+        nullable=False,
+        default="internal",
+        server_default="internal",
+    )
+    external_account_id: Mapped[str | None] = mapped_column(String(255))
+    metadata_json: Mapped[dict] = mapped_column(
+        "metadata",
+        JSON,
+        nullable=False,
+        default=dict,
+        server_default="{}",
+    )
+
+    organization: Mapped[Organization] = relationship(
+        back_populates="analytics_providers"
+    )
+    metric_definitions: Mapped[list["AnalyticsMetricDefinition"]] = relationship(
+        back_populates="provider",
+        cascade="all, delete-orphan",
+    )
+    observations: Mapped[list["AnalyticsObservation"]] = relationship(
+        back_populates="provider",
+    )
+
+    @validates("key", "display_name", "provider_type")
+    def _validate_required_text(self, key: str, value: str | None) -> str:
+        return _required_text(value, key)
+
+    @validates("external_account_id")
+    def _validate_optional_text(self, _key: str, value: str | None) -> str | None:
+        return _optional_text(value)
+
+    @validates("metadata_json")
+    def _validate_metadata(self, key: str, value: dict | None) -> dict:
+        return _json_object(value, key)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id",
+            "key",
+            name="uq_analytics_providers_organization_id_key",
+        ),
+        Index("ix_analytics_providers_organization_id", "organization_id"),
+        Index(
+            "ix_analytics_providers_organization_id_provider_type",
+            "organization_id",
+            "provider_type",
+        ),
+    )
+
+
+class AnalyticsMetricDefinition(Base, TimestampMixin, OrganizationOwnedMixin):
+    __tablename__ = "analytics_metric_definitions"
+
+    id: Mapped[UUIDPrimaryKey]
+    provider_id: Mapped[UUID] = mapped_column(
+        ForeignKey("analytics_providers.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    key: Mapped[str] = mapped_column(String(160), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    description: Mapped[str | None] = mapped_column(String(1000))
+    value_type: Mapped[AnalyticsMetricValueType] = mapped_column(
+        Enum(AnalyticsMetricValueType, name="analytics_metric_value_type"),
+        nullable=False,
+        default=AnalyticsMetricValueType.decimal,
+        server_default=AnalyticsMetricValueType.decimal.value,
+    )
+    default_unit: Mapped[str | None] = mapped_column(String(80))
+    aggregation: Mapped[str | None] = mapped_column(String(80))
+    metadata_json: Mapped[dict] = mapped_column(
+        "metadata",
+        JSON,
+        nullable=False,
+        default=dict,
+        server_default="{}",
+    )
+
+    organization: Mapped[Organization] = relationship(
+        back_populates="analytics_metric_definitions"
+    )
+    provider: Mapped[AnalyticsProvider] = relationship(
+        back_populates="metric_definitions"
+    )
+    observations: Mapped[list["AnalyticsObservation"]] = relationship(
+        back_populates="metric_definition",
+        cascade="all, delete-orphan",
+    )
+
+    @validates("key", "display_name")
+    def _validate_required_text(self, key: str, value: str | None) -> str:
+        return _required_text(value, key)
+
+    @validates("description", "default_unit", "aggregation")
+    def _validate_optional_text(self, _key: str, value: str | None) -> str | None:
+        return _optional_text(value)
+
+    @validates("metadata_json")
+    def _validate_metadata(self, key: str, value: dict | None) -> dict:
+        return _json_object(value, key)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id",
+            "provider_id",
+            "key",
+            name="uq_analytics_metric_definitions_workspace_provider_key",
+        ),
+        Index("ix_analytics_metric_definitions_organization_id", "organization_id"),
+        Index("ix_analytics_metric_definitions_provider_id", "provider_id"),
+        Index(
+            "ix_analytics_metric_definitions_workspace_key",
+            "organization_id",
+            "key",
+        ),
+        Index(
+            "ix_analytics_metric_definitions_workspace_value_type",
+            "organization_id",
+            "value_type",
+        ),
+    )
+
+
+class AnalyticsObservation(Base, TimestampMixin, OrganizationOwnedMixin):
+    __tablename__ = "analytics_observations"
+
+    id: Mapped[UUIDPrimaryKey]
+    metric_definition_id: Mapped[UUID] = mapped_column(
+        ForeignKey("analytics_metric_definitions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    provider_id: Mapped[UUID] = mapped_column(
+        ForeignKey("analytics_providers.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    target_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    target_id: Mapped[UUID | None] = mapped_column(nullable=True)
+    artist_profile_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("artist_profiles.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    campaign_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("campaigns.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    campaign_object_type: Mapped[str | None] = mapped_column(String(120))
+    campaign_object_id: Mapped[UUID | None] = mapped_column(nullable=True)
+    value_numeric: Mapped[Decimal | None] = mapped_column(Numeric(24, 6))
+    value_text: Mapped[str | None] = mapped_column(String(1000))
+    value_boolean: Mapped[bool | None] = mapped_column(Boolean)
+    value_json: Mapped[dict | None] = mapped_column(JSON)
+    unit: Mapped[str | None] = mapped_column(String(80))
+    observed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    source_record_id: Mapped[str | None] = mapped_column(String(255))
+    idempotency_key: Mapped[str | None] = mapped_column(String(255))
+    dimensions: Mapped[dict] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+        server_default="{}",
+    )
+    metadata_json: Mapped[dict] = mapped_column(
+        "metadata",
+        JSON,
+        nullable=False,
+        default=dict,
+        server_default="{}",
+    )
+
+    organization: Mapped[Organization] = relationship(
+        back_populates="analytics_observations"
+    )
+    metric_definition: Mapped[AnalyticsMetricDefinition] = relationship(
+        back_populates="observations"
+    )
+    provider: Mapped[AnalyticsProvider] = relationship(back_populates="observations")
+    artist_profile: Mapped[ArtistProfile | None] = relationship(
+        back_populates="analytics_observations"
+    )
+    campaign: Mapped[Campaign | None] = relationship(
+        back_populates="analytics_observations"
+    )
+
+    @validates("target_type")
+    def _validate_target_type(self, key: str, value: str | None) -> str:
+        return _required_text(value, key)
+
+    @validates(
+        "campaign_object_type",
+        "value_text",
+        "unit",
+        "source_record_id",
+        "idempotency_key",
+    )
+    def _validate_optional_text(self, _key: str, value: str | None) -> str | None:
+        return _optional_text(value)
+
+    @validates("dimensions", "metadata_json")
+    def _validate_json_objects(self, key: str, value: dict | None) -> dict:
+        return _json_object(value, key)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id",
+            "provider_id",
+            "idempotency_key",
+            name="uq_analytics_observations_workspace_provider_idempotency",
+        ),
+        Index("ix_analytics_observations_organization_id", "organization_id"),
+        Index("ix_analytics_observations_metric_definition_id", "metric_definition_id"),
+        Index("ix_analytics_observations_provider_id", "provider_id"),
+        Index(
+            "ix_analytics_observations_workspace_metric_observed",
+            "organization_id",
+            "metric_definition_id",
+            "observed_at",
+        ),
+        Index(
+            "ix_analytics_observations_workspace_target_observed",
+            "organization_id",
+            "target_type",
+            "target_id",
+            "observed_at",
+        ),
+        Index(
+            "ix_analytics_observations_workspace_artist_observed",
+            "organization_id",
+            "artist_profile_id",
+            "observed_at",
+        ),
+        Index(
+            "ix_analytics_observations_workspace_campaign_observed",
+            "organization_id",
+            "campaign_id",
+            "observed_at",
+        ),
+        Index(
+            "ix_analytics_observations_workspace_campaign_object_observed",
+            "organization_id",
+            "campaign_object_type",
+            "campaign_object_id",
+            "observed_at",
+        ),
+        Index(
+            "ix_analytics_observations_workspace_source_record",
+            "organization_id",
+            "provider_id",
+            "source_record_id",
+        ),
+    )
 
 
 class AIAgent(Base, TimestampMixin, OrganizationOwnedMixin):

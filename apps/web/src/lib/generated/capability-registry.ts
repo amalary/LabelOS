@@ -49,6 +49,7 @@ export const capabilities = {
   financePaymentView: "finance.payment.view",
   financePaymentApprove: "finance.payment.approve",
   analyticsView: "analytics.view",
+  analyticsCreate: "analytics.create",
 } as const;
 
 export type Capability = (typeof capabilities)[keyof typeof capabilities];
@@ -329,6 +330,12 @@ export const capabilityRegistry: readonly CapabilityDefinition[] = [
     key: capabilities.analyticsView,
     displayName: "View analytics",
     description: "View analytics data and reports.",
+    systemCapability: true,
+  },
+  {
+    key: capabilities.analyticsCreate,
+    displayName: "Create analytics",
+    description: "Create analytics metric definitions and observations.",
     systemCapability: true,
   },
 ] as const;

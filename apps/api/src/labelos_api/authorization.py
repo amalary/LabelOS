@@ -10,6 +10,8 @@ from uuid import UUID
 from fastapi import Depends, HTTPException, Request, status
 from labelos_database.capabilities import Capability
 from labelos_database.models import (
+    AnalyticsMetricDefinition,
+    AnalyticsObservation,
     Artist,
     ArtistProfile,
     Campaign,
@@ -73,6 +75,8 @@ class ResourceKind(StrEnum):
     contract = "contract"
     royalty = "royalty"
     analytics = "analytics"
+    analytics_metric_definition = "analytics_metric_definition"
+    analytics_observation = "analytics_observation"
     profile = "profile"
     universal_profile = "universal_profile"
 
@@ -153,6 +157,7 @@ INITIAL_ROLE_CAPABILITIES: dict[MembershipRole, frozenset[Capability]] = {
             Capability.finance_view,
             Capability.finance_report_view,
             Capability.analytics_view,
+            Capability.analytics_create,
             Capability.profile_view,
             Capability.profile_edit,
         }
@@ -215,6 +220,7 @@ CAPABILITY_DEPARTMENTS: dict[Capability, frozenset[str]] = {
     Capability.finance_payment_view: frozenset({"finance"}),
     Capability.finance_payment_approve: frozenset({"finance"}),
     Capability.analytics_view: frozenset({"analytics", "management"}),
+    Capability.analytics_create: frozenset({"analytics", "management"}),
 }
 
 
@@ -866,6 +872,8 @@ class AuthorizationService:
 
         if kind == ResourceKind.workspace:
             return resource_id == workspace_id
+        if kind == ResourceKind.analytics:
+            return resource_id == workspace_id
         if kind in {ResourceKind.profile, ResourceKind.universal_profile}:
             return (
                 await session.scalar(
@@ -907,6 +915,22 @@ class AuthorizationService:
                     select(Campaign.id)
                     .where(Campaign.id == resource_id)
                     .where(Campaign.organization_id == workspace_id)
+                )
+            ) is not None
+        if kind == ResourceKind.analytics_metric_definition:
+            return (
+                await session.scalar(
+                    select(AnalyticsMetricDefinition.id)
+                    .where(AnalyticsMetricDefinition.id == resource_id)
+                    .where(AnalyticsMetricDefinition.organization_id == workspace_id)
+                )
+            ) is not None
+        if kind == ResourceKind.analytics_observation:
+            return (
+                await session.scalar(
+                    select(AnalyticsObservation.id)
+                    .where(AnalyticsObservation.id == resource_id)
+                    .where(AnalyticsObservation.organization_id == workspace_id)
                 )
             ) is not None
 
