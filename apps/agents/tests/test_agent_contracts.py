@@ -10,6 +10,12 @@ from labelos_agents.contracts import (
     EvidenceSource,
     HumanApprovalRequirement,
 )
+from labelos_agents.tools.analytics import (
+    AnalyticsObjectRef,
+    AnalyticsObjectType,
+    AnalyticsOperationName,
+    AnalyticsOperationRequest,
+)
 
 
 def test_base_agent_is_abstract() -> None:
@@ -44,3 +50,19 @@ def test_contract_types_validate_expected_fields() -> None:
 def test_confidence_score_rejects_out_of_range_values() -> None:
     with pytest.raises(ValueError):
         ConfidenceScore(value=1.5, rationale="Invalid.")
+
+
+def test_agent_analytics_tool_contract_is_structured_and_deterministic() -> None:
+    request = AnalyticsOperationRequest(
+        operation=AnalyticsOperationName.summarize_campaign_metrics,
+        workspace_id="workspace_123",
+        target=AnalyticsObjectRef(
+            object_type=AnalyticsObjectType.campaign,
+            object_id="campaign_123",
+        ),
+    )
+
+    assert request.operation.value == "summarize_campaign_metrics"
+    assert request.target is not None
+    assert request.target.object_type == AnalyticsObjectType.campaign
+    assert request.metric_selectors == []

@@ -19,6 +19,21 @@ from labelos_database.models import (
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
+from labelos_api.services.analytics_operations_service import (
+    AnalyticsDateRange,
+    AnalyticsMetricSelector,
+    AnalyticsObjectRef,
+    AnalyticsObjectType,
+    compare_campaign_goals,
+    compare_campaign_milestones,
+    compare_campaigns,
+    retrieve_analytics_date_range,
+    retrieve_artist_metric_trends,
+    retrieve_latest_metric_values,
+    retrieve_previous_period_changes,
+    retrieve_provider_analytics,
+    summarize_campaign_metrics,
+)
 from labelos_api.services.analytics_service import (
     AnalyticsAggregation,
     AnalyticsBulkIngestionError,
@@ -1097,3 +1112,407 @@ def test_analytics_service_previous_period_handles_edge_cases(
         "zero_previous_value",
         None,
     )
+
+
+def test_analytics_operations_summarize_campaign_metrics(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async def run() -> tuple[str, bool, Decimal | str | bool | dict | None, int]:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            campaign = data["campaign"]
+            assert isinstance(workspace, Organization)
+            assert isinstance(campaign, Campaign)
+            metric = await _create_streams_metric(session, workspace.id)
+            start = datetime(2026, 8, 1, 0, 0, tzinfo=UTC)
+            for days, value in ((0, 10), (1, 15), (10, 100)):
+                await create_observation(
+                    session,
+                    workspace.id,
+                    AnalyticsObservationCreate(
+                        metric_definition_id=metric.id,
+                        target_type="campaign",
+                        campaign_id=campaign.id,
+                        observed_at=start + timedelta(days=days),
+                        value_numeric=value,
+                    ),
+                )
+
+            summary = await summarize_campaign_metrics(
+                session,
+                workspace.id,
+                campaign.id,
+                metric_selectors=(AnalyticsMetricSelector(metric_key="streams"),),
+                date_range=AnalyticsDateRange(
+                    observed_start=start,
+                    observed_end=start + timedelta(days=2),
+                ),
+                aggregation=AnalyticsAggregation.sum,
+            )
+            metric_value = summary.metrics[0]
+            return (
+                summary.operation.value,
+                summary.campaign_id == campaign.id,
+                metric_value.value,
+                metric_value.observation_count,
+            )
+
+    assert asyncio.run(run()) == (
+        "summarize_campaign_metrics",
+        True,
+        Decimal("25.000000"),
+        2,
+    )
+
+
+def test_analytics_operations_retrieve_artist_trends_and_latest_values(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async def run() -> tuple[tuple[date, Decimal | str | bool | dict | None], ...]:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            artist_profile = data["artist_profile"]
+            assert isinstance(workspace, Organization)
+            assert isinstance(artist_profile, ArtistProfile)
+            metric = await _create_streams_metric(session, workspace.id)
+            base = datetime(2026, 8, 3, 0, 0, tzinfo=UTC)
+            for days, value in ((0, 4), (1, 7)):
+                await create_observation(
+                    session,
+                    workspace.id,
+                    AnalyticsObservationCreate(
+                        metric_definition_id=metric.id,
+                        target_type="artist_profile",
+                        artist_profile_id=artist_profile.id,
+                        observed_at=base + timedelta(days=days),
+                        value_numeric=value,
+                    ),
+                )
+
+            trends = await retrieve_artist_metric_trends(
+                session,
+                workspace.id,
+                artist_profile.id,
+                AnalyticsMetricSelector(
+                    provider_key="internal",
+                    metric_key="streams",
+                ),
+                aggregation=AnalyticsAggregation.sum,
+            )
+            latest = await retrieve_latest_metric_values(
+                session,
+                workspace.id,
+                target=AnalyticsObjectRef(
+                    object_type=AnalyticsObjectType.artist_profile,
+                    object_id=artist_profile.id,
+                ),
+                metric_selectors=(AnalyticsMetricSelector(metric_key="streams"),),
+            )
+            assert latest.values[0].value == Decimal("7.000000")
+            return tuple(
+                (point.bucket_date, point.value) for point in trends.series.points
+            )
+
+    assert asyncio.run(run()) == (
+        (date(2026, 8, 3), Decimal("4.000000")),
+        (date(2026, 8, 4), Decimal("7.000000")),
+    )
+
+
+def test_analytics_operations_compare_campaigns_and_child_targets(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async def run() -> tuple[
+        tuple[Decimal | str | bool | dict | None, ...],
+        tuple[str, bool, Decimal | str | bool | dict | None],
+        tuple[str, bool, Decimal | str | bool | dict | None],
+    ]:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            campaign = data["campaign"]
+            goal = data["campaign_goal"]
+            milestone = data["campaign_milestone"]
+            assert isinstance(workspace, Organization)
+            assert isinstance(campaign, Campaign)
+            assert isinstance(goal, CampaignGoal)
+            assert isinstance(milestone, CampaignMilestone)
+            second_campaign = Campaign(
+                name="Second Alpha Campaign",
+                organization=workspace,
+            )
+            second_goal = CampaignGoal(campaign=campaign, title="Playlist Goal")
+            second_milestone = CampaignMilestone(
+                campaign=campaign,
+                title="Launch Complete",
+            )
+            session.add_all([second_campaign, second_goal, second_milestone])
+            await session.flush()
+            metric = await _create_streams_metric(session, workspace.id)
+
+            await create_observation(
+                session,
+                workspace.id,
+                AnalyticsObservationCreate(
+                    metric_definition_id=metric.id,
+                    target_type="campaign",
+                    campaign_id=campaign.id,
+                    observed_at=datetime(2026, 8, 1, 12, 0, tzinfo=UTC),
+                    value_numeric=11,
+                ),
+            )
+            await create_observation(
+                session,
+                workspace.id,
+                AnalyticsObservationCreate(
+                    metric_definition_id=metric.id,
+                    target_type="campaign",
+                    campaign_id=second_campaign.id,
+                    observed_at=datetime(2026, 8, 1, 12, 30, tzinfo=UTC),
+                    value_numeric=13,
+                ),
+            )
+            await create_observation(
+                session,
+                workspace.id,
+                AnalyticsObservationCreate(
+                    metric_definition_id=metric.id,
+                    target_type="campaign_object",
+                    campaign_id=campaign.id,
+                    campaign_object_type="goal",
+                    campaign_object_id=goal.id,
+                    observed_at=datetime(2026, 8, 1, 13, 0, tzinfo=UTC),
+                    value_numeric=3,
+                ),
+            )
+            await create_observation(
+                session,
+                workspace.id,
+                AnalyticsObservationCreate(
+                    metric_definition_id=metric.id,
+                    target_type="campaign_object",
+                    campaign_id=campaign.id,
+                    campaign_object_type="goal",
+                    campaign_object_id=second_goal.id,
+                    observed_at=datetime(2026, 8, 1, 14, 0, tzinfo=UTC),
+                    value_numeric=5,
+                ),
+            )
+            await create_observation(
+                session,
+                workspace.id,
+                AnalyticsObservationCreate(
+                    metric_definition_id=metric.id,
+                    target_type="campaign_object",
+                    campaign_id=campaign.id,
+                    campaign_object_type="milestone",
+                    campaign_object_id=milestone.id,
+                    observed_at=datetime(2026, 8, 1, 15, 0, tzinfo=UTC),
+                    value_numeric=7,
+                ),
+            )
+            await create_observation(
+                session,
+                workspace.id,
+                AnalyticsObservationCreate(
+                    metric_definition_id=metric.id,
+                    target_type="campaign_object",
+                    campaign_id=campaign.id,
+                    campaign_object_type="milestone",
+                    campaign_object_id=second_milestone.id,
+                    observed_at=datetime(2026, 8, 1, 16, 0, tzinfo=UTC),
+                    value_numeric=9,
+                ),
+            )
+
+            campaign_comparison = await compare_campaigns(
+                session,
+                workspace.id,
+                (campaign.id, second_campaign.id),
+                metric_selectors=(AnalyticsMetricSelector(metric_key="streams"),),
+                aggregation=AnalyticsAggregation.sum,
+            )
+            goal_comparison = await compare_campaign_goals(
+                session,
+                workspace.id,
+                campaign.id,
+                (goal.id, second_goal.id),
+                metric_selectors=(AnalyticsMetricSelector(metric_key="streams"),),
+                aggregation=AnalyticsAggregation.sum,
+            )
+            milestone_comparison = await compare_campaign_milestones(
+                session,
+                workspace.id,
+                campaign.id,
+                (milestone.id, second_milestone.id),
+                metric_selectors=(AnalyticsMetricSelector(metric_key="streams"),),
+                aggregation=AnalyticsAggregation.sum,
+            )
+            return (
+                tuple(
+                    target.metrics[0].value
+                    for target in campaign_comparison.targets
+                    if target.metrics
+                ),
+                (
+                    goal_comparison.targets[0].target.object_type,
+                    goal_comparison.targets[0].target.campaign_id == campaign.id,
+                    goal_comparison.targets[0].metrics[0].value,
+                ),
+                (
+                    milestone_comparison.targets[1].target.object_type,
+                    milestone_comparison.targets[1].target.campaign_id == campaign.id,
+                    milestone_comparison.targets[1].metrics[0].value,
+                ),
+            )
+
+    assert asyncio.run(run()) == (
+        (Decimal("35.000000"), Decimal("13.000000")),
+        ("goal", True, Decimal("3.000000")),
+        ("milestone", True, Decimal("9.000000")),
+    )
+
+
+def test_analytics_operations_provider_date_range_and_previous_changes(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async def run() -> tuple[
+        tuple[str, Decimal | str | bool | dict | None],
+        tuple[str, Decimal | str | bool | dict | None, int],
+        tuple[Decimal | str | bool | dict | None, Decimal | str | bool | dict | None],
+    ]:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            campaign = data["campaign"]
+            assert isinstance(workspace, Organization)
+            assert isinstance(campaign, Campaign)
+            streams = await _create_streams_metric(session, workspace.id)
+            saves = await create_metric_definition(
+                session,
+                workspace.id,
+                AnalyticsMetricDefinitionCreate(
+                    key="saves",
+                    display_name="Saves",
+                    value_type="integer",
+                    default_unit="count",
+                    aggregation="sum",
+                    provider=AnalyticsProviderRef(
+                        key="spotify",
+                        display_name="Spotify",
+                    ),
+                ),
+            )
+            current_start = datetime(2026, 8, 8, 0, 0, tzinfo=UTC)
+            for metric, days, value in (
+                (streams, -1, 8),
+                (streams, 1, 10),
+                (streams, 2, 15),
+                (saves, 1, 4),
+                (saves, 3, 6),
+            ):
+                await create_observation(
+                    session,
+                    workspace.id,
+                    AnalyticsObservationCreate(
+                        metric_definition_id=metric.id,
+                        target_type="campaign",
+                        campaign_id=campaign.id,
+                        observed_at=current_start + timedelta(days=days),
+                        value_numeric=value,
+                    ),
+                )
+
+            provider_result = await retrieve_provider_analytics(
+                session,
+                workspace.id,
+                AnalyticsMetricSelector(provider_key="spotify"),
+                target=AnalyticsObjectRef(
+                    object_type=AnalyticsObjectType.campaign,
+                    object_id=campaign.id,
+                ),
+                aggregation=AnalyticsAggregation.sum,
+            )
+            date_result = await retrieve_analytics_date_range(
+                session,
+                workspace.id,
+                AnalyticsDateRange(
+                    observed_start=current_start,
+                    observed_end=current_start + timedelta(days=2),
+                ),
+                target=AnalyticsObjectRef(
+                    object_type=AnalyticsObjectType.campaign,
+                    object_id=campaign.id,
+                ),
+                metric_selectors=(AnalyticsMetricSelector(metric_key="streams"),),
+                aggregation=AnalyticsAggregation.sum,
+            )
+            previous_result = await retrieve_previous_period_changes(
+                session,
+                workspace.id,
+                current_start=current_start,
+                current_end=current_start + timedelta(days=7),
+                target=AnalyticsObjectRef(
+                    object_type=AnalyticsObjectType.campaign,
+                    object_id=campaign.id,
+                ),
+                metric_selectors=(AnalyticsMetricSelector(metric_key="streams"),),
+                aggregation=AnalyticsAggregation.sum,
+            )
+            return (
+                (
+                    provider_result.metrics[0].metric_key,
+                    provider_result.metrics[0].value,
+                ),
+                (
+                    date_result.operation.value,
+                    date_result.metrics[0].value,
+                    date_result.metrics[0].observation_count,
+                ),
+                (
+                    previous_result.changes[0].current_value,
+                    previous_result.changes[0].previous_value,
+                ),
+            )
+
+    assert asyncio.run(run()) == (
+        ("saves", Decimal("10.000000")),
+        ("retrieve_analytics_date_range", Decimal("25.000000"), 2),
+        (Decimal("25.000000"), Decimal("8.000000")),
+    )
+
+
+def test_analytics_operations_reject_cross_workspace_child_targets(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async def run() -> bool:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            campaign = data["campaign"]
+            other_goal = data["other_campaign_goal"]
+            assert isinstance(workspace, Organization)
+            assert isinstance(campaign, Campaign)
+            assert isinstance(other_goal, CampaignGoal)
+            metric = await _create_streams_metric(session, workspace.id)
+            blocked = False
+            try:
+                await retrieve_latest_metric_values(
+                    session,
+                    workspace.id,
+                    target=AnalyticsObjectRef(
+                        object_type=AnalyticsObjectType.goal,
+                        object_id=other_goal.id,
+                        campaign_id=campaign.id,
+                    ),
+                    metric_selectors=(
+                        AnalyticsMetricSelector(metric_definition_id=metric.id),
+                    ),
+                )
+            except AnalyticsNotFoundError:
+                blocked = True
+            return blocked
+
+    assert asyncio.run(run()) is True
