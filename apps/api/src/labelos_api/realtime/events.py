@@ -58,6 +58,8 @@ class RealtimeEventType(StrEnum):
     campaign_milestone_created = "campaign.milestone_created"
     campaign_milestone_updated = "campaign.milestone_updated"
     campaign_milestone_completed = "campaign.milestone_completed"
+    analytics_observation_created = "analytics.observation.created"
+    analytics_observations_ingested = "analytics.observations.ingested"
     approval_updated = "approval.updated"
     agent_started = "agent.started"
     agent_completed = "agent.completed"

@@ -35,6 +35,8 @@ export type RealtimeEventType =
   | "campaign.milestone_created"
   | "campaign.milestone_updated"
   | "campaign.milestone_completed"
+  | "analytics.observation.created"
+  | "analytics.observations.ingested"
   | "approval.updated"
   | "agent.started"
   | "agent.completed"
@@ -139,6 +141,8 @@ export const refetchEventTypes = new Set<RealtimeEventType>([
   "campaign.milestone_created",
   "campaign.milestone_updated",
   "campaign.milestone_completed",
+  "analytics.observation.created",
+  "analytics.observations.ingested",
   "approval.updated",
   "agent.started",
   "agent.completed",

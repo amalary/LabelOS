@@ -10,6 +10,26 @@ import type {
 import { ActiveWorkspaceProvider } from "../../../lib/workspace-context";
 import { ArtistProfileEditor } from "./artist-profile-editor";
 
+vi.mock("../../../components/analytics/analytics-read-surface", () => ({
+  AnalyticsReadSurface: ({
+    artistProfileId,
+    title,
+    workspaceId,
+  }: {
+    artistProfileId: string;
+    title: string;
+    workspaceId: string;
+  }) => (
+    <section
+      aria-label={title}
+      data-artist-profile-id={artistProfileId}
+      data-workspace-id={workspaceId}
+    >
+      {title}
+    </section>
+  ),
+}));
+
 const profile: UniversalProfile = {
   id: "profile_01",
   user_id: "user_01",
@@ -43,7 +63,7 @@ const profile: UniversalProfile = {
   },
 };
 
-const membership: WorkspaceProfileMembership = {
+const baseMembership: WorkspaceProfileMembership = {
   id: "membership_01",
   workspace_id: "workspace_01",
   profile,
@@ -94,8 +114,11 @@ function renderArtistProfileEditor() {
 }
 
 describe("ArtistProfileEditor", () => {
+  let membership: WorkspaceProfileMembership;
+
   beforeEach(() => {
     clearProfileCache();
+    membership = { ...baseMembership, capability_permissions: [], department_access: [] };
     vi.stubGlobal(
       "fetch",
       vi.fn((url) => {
@@ -124,5 +147,23 @@ describe("ArtistProfileEditor", () => {
       screen.getByPlaceholderText("Reference artists, scenes, or creative influences"),
     ).toBeDisabled();
     expect(screen.getByRole("button", { name: "Save artist profile" })).toBeDisabled();
+    expect(
+      screen.getByText("Analytics are unavailable without analytics view access."),
+    ).toBeInTheDocument();
+  });
+
+  it("mounts artist analytics when the workspace subject has analytics view capability", async () => {
+    membership = {
+      ...baseMembership,
+      capability_permissions: ["analytics.view"],
+      department_access: ["analytics"],
+    };
+
+    renderArtistProfileEditor();
+
+    expect(await screen.findByRole("heading", { name: "Mira Stone" })).toBeInTheDocument();
+    const analyticsSurface = screen.getByRole("region", { name: "Artist analytics" });
+    expect(analyticsSurface).toHaveAttribute("data-artist-profile-id", "artist_profile_01");
+    expect(analyticsSurface).toHaveAttribute("data-workspace-id", "workspace_01");
   });
 });

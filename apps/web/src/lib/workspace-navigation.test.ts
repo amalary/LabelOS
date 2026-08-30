@@ -29,7 +29,9 @@ describe("workspace navigation visibility", () => {
         [capabilities.marketingCampaignView, capabilities.analyticsView],
         ["marketing", "analytics"],
       ),
-    ).toEqual(expect.arrayContaining(["Marketing", "Campaigns", "Analytics"]));
+    ).toEqual(
+      expect.arrayContaining(["Marketing", "Campaigns", "Analytics", "Analytics Settings"]),
+    );
     expect(labelsFor([capabilities.marketingCampaignView], ["marketing"])).not.toContain(
       "Contracts",
     );

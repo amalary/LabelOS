@@ -81,16 +81,16 @@ the complete relationship set.
 
 Future integration attachment points:
 
-| Area               | Boundary                                                                                                                     |
-| ------------------ | ---------------------------------------------------------------------------------------------------------------------------- |
-| Release Operations | Attach release operations records to `campaign_id` and validate linked releases through `campaign_releases`.                 |
-| Marketing          | Use `Campaign.campaign_type = marketing` plus future plans, channels, calendars, and spend rows keyed by `campaign_id`.      |
-| Legal / Contracts  | Link contract reviews, rights checks, and policy gates by `campaign_id`; do not infer legal access from campaign membership. |
-| Assets             | Attach creative, audio, video, artwork, and file references by `campaign_id` after an asset registry exists.                 |
-| Finance / Budgets  | Attach budget, forecast, spend, and approval records by `campaign_id`; keep finance authorization separate.                  |
-| Analytics          | Attribute metrics, reports, and events with `campaign_id` while preserving raw event workspace ownership.                    |
-| Approvals          | Attach approval requests and signoff history by `campaign_id` with immutable audit metadata.                                 |
-| AI agents          | Agent assignments, recommendations, and run history must include `campaign_id`, actor/run metadata, and human review state.  |
+| Area               | Boundary                                                                                                                       |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
+| Release Operations | Attach release operations records to `campaign_id` and validate linked releases through `campaign_releases`.                   |
+| Marketing          | Use `Campaign.campaign_type = marketing` plus future plans, channels, calendars, and spend rows keyed by `campaign_id`.        |
+| Legal / Contracts  | Link contract reviews, rights checks, and policy gates by `campaign_id`; do not infer legal access from campaign membership.   |
+| Assets             | Attach creative, audio, video, artwork, and file references by `campaign_id` after an asset registry exists.                   |
+| Finance / Budgets  | Attach budget, forecast, spend, and approval records by `campaign_id`; keep finance authorization separate.                    |
+| Analytics          | Attribute metrics, reports, and events with `campaign_id`; child metrics use `campaign_object_type` plus `campaign_object_id`. |
+| Approvals          | Attach approval requests and signoff history by `campaign_id` with immutable audit metadata.                                   |
+| AI agents          | Agent assignments, recommendations, and run history must include `campaign_id`, actor/run metadata, and human review state.    |
 
 Do not add empty tables for these areas until a concrete workflow needs a
 foreign key, API contract, or persisted state.
@@ -158,6 +158,21 @@ Payloads include workspace-safe identifiers and display fields such as
 status where useful. Future agent-executed changes must include the initiating
 agent/run identity and human review metadata.
 
+## Campaign Analytics Objects
+
+Campaign analytics observations live in the Analytics Objects model documented
+in [Analytics Objects](analytics-objects.md). Campaign-level observations use
+`target_type = campaign`, `campaign_id`, and `target_id = campaign_id`.
+Goal and milestone observations use `target_type = campaign_object`,
+`campaign_id`, `campaign_object_type`, and `campaign_object_id`.
+
+The current typed child reference is sufficient for the implemented child set
+because goals and milestones already have direct parent campaign ownership and
+service-level validators. Do not add a unified campaign object registry until
+multiple new child types need a shared lifecycle, generic child authorization,
+external object identity, or cross-child APIs that cannot be represented by the
+current explicit validators.
+
 ## Frontend Routes
 
 - `/campaigns` lists workspace campaigns, supports create, handles loading,
@@ -187,7 +202,8 @@ agent/run identity and human review metadata.
 - Legal contract review and rights workflows.
 - Asset registry and campaign asset attachment UI.
 - Finance budgets, forecasts, spend actuals, and finance approvals.
-- Analytics ingestion, attribution reports, and campaign performance dashboards.
+- Department-specific analytics adapters beyond the generic Analytics Objects
+  provider abstraction.
 - Approval queues, signoff policies, and escalation workflows.
 - AI agent assignment, run history, recommendations, and human-in-the-loop review.
 - Cross-workspace campaigns and external collaborator access models.

@@ -5,10 +5,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from uuid import NAMESPACE_URL, uuid5
 
-
-CAPABILITY_IDENTIFIER_PATTERN = re.compile(
-    r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$"
-)
+CAPABILITY_IDENTIFIER_PATTERN = re.compile(r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$")
 
 
 class Capability(StrEnum):
@@ -57,6 +54,7 @@ class Capability(StrEnum):
     finance_payment_view = "finance.payment.view"
     finance_payment_approve = "finance.payment.approve"
     analytics_view = "analytics.view"
+    analytics_create = "analytics.create"
 
 
 @dataclass(frozen=True)
@@ -202,7 +200,9 @@ CAPABILITY_REGISTRY: tuple[CapabilityDefinition, ...] = (
         "Approve A&R signing recommendations.",
     ),
     _definition(Capability.release_view, "View releases", "View release records."),
-    _definition(Capability.release_create, "Create releases", "Create release records."),
+    _definition(
+        Capability.release_create, "Create releases", "Create release records."
+    ),
     _definition(Capability.release_edit, "Edit releases", "Edit release records."),
     _definition(
         Capability.release_approve,
@@ -287,6 +287,11 @@ CAPABILITY_REGISTRY: tuple[CapabilityDefinition, ...] = (
         Capability.analytics_view,
         "View analytics",
         "View analytics data and reports.",
+    ),
+    _definition(
+        Capability.analytics_create,
+        "Create analytics",
+        "Create analytics metric definitions and observations.",
     ),
 )
 

@@ -120,6 +120,7 @@ const capabilityDepartments: Partial<Record<Capability, readonly string[]>> = {
   [capabilities.financePaymentView]: ["finance"],
   [capabilities.financePaymentApprove]: ["finance"],
   [capabilities.analyticsView]: ["analytics", "management"],
+  [capabilities.analyticsCreate]: ["analytics", "management"],
 };
 
 function normalizeWorkspacePermission(permission?: string | null): WorkspacePermission | null {

@@ -63,21 +63,17 @@ def downgrade() -> None:
 
 def _inspect_legacy_role_values(bind: sa.Connection) -> dict[str, int]:
     return {
-        row["legacy_role"]: row["membership_count"]
-        for row in bind.execute(
-            sa.text("""
+        row["legacy_role"]: row["membership_count"] for row in bind.execute(sa.text("""
                 SELECT role::text AS legacy_role, count(*) AS membership_count
                 FROM organization_memberships
                 GROUP BY role::text
                 ORDER BY role::text
-                """)
-        ).mappings()
+                """)).mappings()
     }
 
 
 def _ensure_workspace_memberships(bind: sa.Connection) -> None:
-    bind.execute(
-        sa.text("""
+    bind.execute(sa.text("""
             INSERT INTO universal_profiles (
                 id,
                 user_id,
@@ -105,10 +101,8 @@ def _ensure_workspace_memberships(bind: sa.Connection) -> None:
                 FROM universal_profiles
                 WHERE universal_profiles.user_id = users.id
             )
-            """)
-    )
-    bind.execute(
-        sa.text("""
+            """))
+    bind.execute(sa.text("""
             UPDATE workspace_memberships
             SET
                 organization_membership_id = organization_memberships.id,
@@ -126,10 +120,8 @@ def _ensure_workspace_memberships(bind: sa.Connection) -> None:
                     WHERE existing.organization_membership_id =
                         organization_memberships.id
                 )
-            """)
-    )
-    bind.execute(
-        sa.text("""
+            """))
+    bind.execute(sa.text("""
             INSERT INTO workspace_memberships (
                 id,
                 workspace_id,
@@ -166,8 +158,7 @@ def _ensure_workspace_memberships(bind: sa.Connection) -> None:
                         AND workspace_memberships.profile_id =
                             universal_profiles.id
                 )
-            """)
-    )
+            """))
 
 
 def _backfill_workspace_membership_role_assignments(
@@ -202,8 +193,7 @@ def _backfill_workspace_membership_role_assignments(
     created = 0
     existing = 0
     mapped: dict[str, int] = {}
-    rows = bind.execute(
-        sa.text("""
+    rows = bind.execute(sa.text("""
             SELECT
                 workspace_memberships.id AS workspace_membership_id,
                 organization_memberships.role::text AS legacy_role
@@ -212,8 +202,7 @@ def _backfill_workspace_membership_role_assignments(
                 ON workspace_memberships.organization_membership_id =
                     organization_memberships.id
             ORDER BY organization_memberships.id
-            """)
-    ).mappings()
+            """)).mappings()
 
     for row in rows:
         legacy_role = row["legacy_role"]

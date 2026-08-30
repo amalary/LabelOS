@@ -78,6 +78,12 @@ export const workspaceNavigationItems: readonly WorkspaceNavigationItem[] = [
     requiresActiveWorkspace: true,
   },
   {
+    href: "/workspace/analytics",
+    label: "Analytics Settings",
+    requiredCapabilities: [capabilities.analyticsView],
+    requiresActiveWorkspace: true,
+  },
+  {
     href: "/contracts",
     label: "Contracts",
     requiredCapabilities: [

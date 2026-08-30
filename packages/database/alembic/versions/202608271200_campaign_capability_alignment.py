@@ -20,22 +20,18 @@ depends_on: str | Sequence[str] | None = None
 
 def upgrade() -> None:
     bind = op.get_bind()
-    role_id = bind.execute(
-        sa.text("""
+    role_id = bind.execute(sa.text("""
             SELECT id
             FROM roles
             WHERE key = 'admin'
                 AND workspace_id IS NULL
                 AND is_system_role IS TRUE
-            """)
-    ).scalar_one_or_none()
-    capability_id = bind.execute(
-        sa.text("""
+            """)).scalar_one_or_none()
+    capability_id = bind.execute(sa.text("""
             SELECT id
             FROM capabilities
             WHERE key = 'marketing.campaign.approve'
-            """)
-    ).scalar_one_or_none()
+            """)).scalar_one_or_none()
     if role_id is None or capability_id is None:
         return
 
@@ -79,22 +75,18 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     bind = op.get_bind()
-    role_id = bind.execute(
-        sa.text("""
+    role_id = bind.execute(sa.text("""
             SELECT id
             FROM roles
             WHERE key = 'admin'
                 AND workspace_id IS NULL
                 AND is_system_role IS TRUE
-            """)
-    ).scalar_one_or_none()
-    capability_id = bind.execute(
-        sa.text("""
+            """)).scalar_one_or_none()
+    capability_id = bind.execute(sa.text("""
             SELECT id
             FROM capabilities
             WHERE key = 'marketing.campaign.approve'
-            """)
-    ).scalar_one_or_none()
+            """)).scalar_one_or_none()
     if role_id is None or capability_id is None:
         return
     bind.execute(

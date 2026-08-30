@@ -117,6 +117,7 @@ DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS: dict[str, tuple[str, ...]] = {
         Capability.finance_view.value,
         Capability.finance_report_view.value,
         Capability.analytics_view.value,
+        Capability.analytics_create.value,
     ),
     "member": (
         Capability.profile_view.value,
@@ -183,6 +184,7 @@ DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS: dict[str, tuple[str, ...]] = {
         Capability.marketing_campaign_edit.value,
         Capability.marketing_campaign_approve.value,
         Capability.analytics_view.value,
+        Capability.analytics_create.value,
     ),
     "finance": (
         Capability.profile_view.value,

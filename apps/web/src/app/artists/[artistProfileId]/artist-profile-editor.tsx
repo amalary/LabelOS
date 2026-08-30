@@ -4,6 +4,7 @@ import { Button, Input, cn } from "@label-os/ui";
 import Link from "next/link";
 import { FormEvent, useEffect, useMemo, useState } from "react";
 
+import { AnalyticsReadSurface } from "../../../components/analytics/analytics-read-surface";
 import { can, capabilities } from "../../../lib/authorization";
 import { useArtistProfile, useUpdateArtistProfile } from "../../../lib/profiles";
 import { useActiveWorkspace, useActiveWorkspaceProfile } from "../../../lib/workspace-context";
@@ -39,6 +40,9 @@ export function ArtistProfileEditor({ artistProfileId }: { artistProfileId: stri
   const update = useUpdateArtistProfile(activeWorkspace?.id ?? null, artistProfileId);
   const canEdit = workspaceProfile.subject
     ? can(workspaceProfile.subject, null, capabilities.artistProfileEdit)
+    : false;
+  const canViewAnalytics = workspaceProfile.subject
+    ? can(workspaceProfile.subject, null, capabilities.analyticsView)
     : false;
   const [stageName, setStageName] = useState("");
   const [careerStage, setCareerStage] = useState("");
@@ -201,6 +205,18 @@ export function ArtistProfileEditor({ artistProfileId }: { artistProfileId: stri
           </div>
         </div>
       </form>
+
+      {canViewAnalytics ? (
+        <AnalyticsReadSurface
+          artistProfileId={artistProfileId}
+          title="Artist analytics"
+          workspaceId={activeWorkspace.id}
+        />
+      ) : !workspaceProfile.isLoading ? (
+        <div className="rounded-md border border-slate-200 bg-white px-4 py-3 text-sm text-slate-600">
+          Analytics are unavailable without analytics view access.
+        </div>
+      ) : null}
     </div>
   );
 }

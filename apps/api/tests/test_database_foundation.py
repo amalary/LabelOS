@@ -19,6 +19,10 @@ from labelos_database.departments import (
 from labelos_database.models import (
     AIAgent,
     AnalyticsEvent,
+    AnalyticsMetricDefinition,
+    AnalyticsMetricValueType,
+    AnalyticsObservation,
+    AnalyticsProvider,
     Artist,
     ArtistProfile,
     AuthIdentity,
@@ -95,6 +99,9 @@ def test_foundational_models_are_registered() -> None:
         Contract.__tablename__,
         Royalty.__tablename__,
         AnalyticsEvent.__tablename__,
+        AnalyticsProvider.__tablename__,
+        AnalyticsMetricDefinition.__tablename__,
+        AnalyticsObservation.__tablename__,
         AIAgent.__tablename__,
         TeamSetting.__tablename__,
         WebhookEvent.__tablename__,
@@ -129,6 +136,9 @@ def test_foundational_models_are_registered() -> None:
         "contracts",
         "royalties",
         "analytics_events",
+        "analytics_providers",
+        "analytics_metric_definitions",
+        "analytics_observations",
         "ai_agents",
         "team_settings",
         "webhook_events",
@@ -1526,6 +1536,9 @@ def test_label_owned_resources_define_organization_boundary() -> None:
         Contract,
         Royalty,
         AnalyticsEvent,
+        AnalyticsProvider,
+        AnalyticsMetricDefinition,
+        AnalyticsObservation,
         AIAgent,
         TeamSetting,
     )
@@ -1557,3 +1570,80 @@ def test_label_owned_unique_constraints_are_organization_scoped() -> None:
     assert "uq_artists_organization_id_name" in artist_constraints
     assert "uq_ai_agents_organization_id_name" in agent_constraints
     assert "uq_team_settings_organization_id_key" in setting_constraints
+
+
+def test_analytics_objects_define_canonical_time_series_contract() -> None:
+    provider_table = AnalyticsProvider.__table__
+    metric_table = AnalyticsMetricDefinition.__table__
+    observation_table = AnalyticsObservation.__table__
+    provider_constraints = {
+        constraint.name for constraint in provider_table.constraints
+    }
+    metric_constraints = {constraint.name for constraint in metric_table.constraints}
+    observation_constraints = {
+        constraint.name for constraint in observation_table.constraints
+    }
+    observation_index_names = {index.name for index in observation_table.indexes}
+    observation_foreign_key_deletions = {
+        foreign_key.parent.name: foreign_key.ondelete
+        for foreign_key in observation_table.foreign_keys
+    }
+
+    assert "organization_id" in provider_table.columns
+    assert "key" in provider_table.columns
+    assert "provider_type" in provider_table.columns
+    assert "metadata" in provider_table.columns
+    assert "uq_analytics_providers_organization_id_key" in provider_constraints
+
+    assert "organization_id" in metric_table.columns
+    assert "provider_id" in metric_table.columns
+    assert "key" in metric_table.columns
+    assert "value_type" in metric_table.columns
+    assert "default_unit" in metric_table.columns
+    assert "metadata" in metric_table.columns
+    assert (
+        "uq_analytics_metric_definitions_workspace_provider_key" in metric_constraints
+    )
+    assert (
+        AnalyticsMetricDefinition(
+            value_type=AnalyticsMetricValueType.integer
+        ).value_type
+        == AnalyticsMetricValueType.integer
+    )
+
+    assert "metric_definition_id" in observation_table.columns
+    assert "provider_id" in observation_table.columns
+    assert "target_type" in observation_table.columns
+    assert "target_id" in observation_table.columns
+    assert "artist_profile_id" in observation_table.columns
+    assert "campaign_id" in observation_table.columns
+    assert "campaign_object_type" in observation_table.columns
+    assert "campaign_object_id" in observation_table.columns
+    assert "value_numeric" in observation_table.columns
+    assert "value_text" in observation_table.columns
+    assert "value_boolean" in observation_table.columns
+    assert "value_json" in observation_table.columns
+    assert "unit" in observation_table.columns
+    assert "observed_at" in observation_table.columns
+    assert "idempotency_fingerprint" in observation_table.columns
+    assert "dimensions" in observation_table.columns
+    assert "metadata" in observation_table.columns
+    assert (
+        "uq_analytics_observations_workspace_provider_idempotency"
+        in observation_constraints
+    )
+    assert {
+        "ix_analytics_observations_workspace_metric_observed",
+        "ix_analytics_observations_workspace_target_observed",
+        "ix_analytics_observations_workspace_artist_observed",
+        "ix_analytics_observations_workspace_campaign_observed",
+        "ix_analytics_observations_workspace_campaign_object_observed",
+        "ix_analytics_observations_workspace_source_record",
+    } <= observation_index_names
+    assert observation_foreign_key_deletions == {
+        "organization_id": "CASCADE",
+        "metric_definition_id": "CASCADE",
+        "provider_id": "CASCADE",
+        "artist_profile_id": "CASCADE",
+        "campaign_id": "CASCADE",
+    }
