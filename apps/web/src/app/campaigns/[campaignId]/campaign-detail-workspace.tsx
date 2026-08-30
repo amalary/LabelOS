@@ -2,8 +2,12 @@
 
 import { Badge, Button, Card, EmptyState, LoadingState, PageHeader, cn } from "@label-os/ui";
 import Link from "next/link";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 
+import {
+  AnalyticsReadSurface,
+  type AnalyticsSelectedChildResource,
+} from "../../../components/analytics/analytics-read-surface";
 import { can, capabilities } from "../../../lib/authorization";
 import {
   type Campaign,
@@ -17,7 +21,7 @@ import { useOrganizationRealtimeContext } from "../../../lib/realtime/use-organi
 import { useActiveWorkspace, useActiveWorkspaceProfile } from "../../../lib/workspace-context";
 import { mapActivityEvents } from "../../dashboard/_components/activity-event-map";
 
-const futureSections = ["Marketing", "Assets", "Legal", "Analytics", "Budget", "Agents"];
+const futureSections = ["Marketing", "Assets", "Legal", "Budget", "Agents"];
 
 function humanize(value: string | null | undefined): string {
   if (!value) {
@@ -134,11 +138,15 @@ function GoalsSection({
   goals,
   isLoading,
   milestones,
+  onInspectAnalytics,
+  selectedAnalyticsChild,
 }: {
   canEdit: boolean;
   goals: CampaignGoal[];
   isLoading: boolean;
   milestones: CampaignMilestone[];
+  onInspectAnalytics: (child: AnalyticsSelectedChildResource) => void;
+  selectedAnalyticsChild: AnalyticsSelectedChildResource;
 }) {
   const activeGoalCount = goals.filter((goal) => goal.status !== "archived").length;
   const completedMilestoneCount = milestones.filter(
@@ -189,8 +197,29 @@ function GoalsSection({
                   key={goal.id}
                 >
                   <div className="flex items-start justify-between gap-3">
-                    <p className="text-sm font-semibold text-slate-950">{goal.title}</p>
-                    <Badge variant={statusVariant(goal.status)}>{humanize(goal.status)}</Badge>
+                    <div className="min-w-0">
+                      <p className="text-sm font-semibold text-slate-950">{goal.title}</p>
+                      <div className="mt-2 flex flex-wrap items-center gap-2">
+                        <Badge variant={statusVariant(goal.status)}>{humanize(goal.status)}</Badge>
+                        {selectedAnalyticsChild?.id === goal.id ? (
+                          <Badge variant="neutral">Inspecting analytics</Badge>
+                        ) : null}
+                      </div>
+                    </div>
+                    <Button
+                      onClick={() =>
+                        onInspectAnalytics(
+                          selectedAnalyticsChild?.id === goal.id
+                            ? null
+                            : { id: goal.id, label: goal.title, type: "goal" },
+                        )
+                      }
+                      size="sm"
+                      type="button"
+                      variant="secondary"
+                    >
+                      Analytics
+                    </Button>
                   </div>
                   {goal.target_value ? (
                     <p className="mt-1 text-sm text-slate-500">{goal.target_value}</p>
@@ -212,10 +241,35 @@ function GoalsSection({
                   key={milestone.id}
                 >
                   <div className="flex items-start justify-between gap-3">
-                    <p className="text-sm font-semibold text-slate-950">{milestone.title}</p>
-                    <Badge variant={statusVariant(milestone.status)}>
-                      {humanize(milestone.status)}
-                    </Badge>
+                    <div className="min-w-0">
+                      <p className="text-sm font-semibold text-slate-950">{milestone.title}</p>
+                      <div className="mt-2 flex flex-wrap items-center gap-2">
+                        <Badge variant={statusVariant(milestone.status)}>
+                          {humanize(milestone.status)}
+                        </Badge>
+                        {selectedAnalyticsChild?.id === milestone.id ? (
+                          <Badge variant="neutral">Inspecting analytics</Badge>
+                        ) : null}
+                      </div>
+                    </div>
+                    <Button
+                      onClick={() =>
+                        onInspectAnalytics(
+                          selectedAnalyticsChild?.id === milestone.id
+                            ? null
+                            : {
+                                id: milestone.id,
+                                label: milestone.title,
+                                type: "milestone",
+                              },
+                        )
+                      }
+                      size="sm"
+                      type="button"
+                      variant="secondary"
+                    >
+                      Analytics
+                    </Button>
                   </div>
                   <p className="mt-1 text-sm text-slate-500">
                     Target: {formatDate(milestone.target_date)}
@@ -350,12 +404,29 @@ export function CampaignDetailWorkspace({ campaignId }: { campaignId: string }) 
     : false;
   const planningError = goals.error || milestones.error;
   const planningIsLoading = goals.isLoading || milestones.isLoading;
+  const [selectedAnalyticsChild, setSelectedAnalyticsChild] =
+    useState<AnalyticsSelectedChildResource>(null);
   const planningData = useMemo(
     () => ({
       goals: goals.data?.goals ?? [],
       milestones: milestones.data?.milestones ?? [],
     }),
     [goals.data, milestones.data],
+  );
+  const analyticsChildResources = useMemo(
+    () => [
+      ...planningData.goals.map((goal) => ({
+        id: goal.id,
+        label: goal.title,
+        type: "goal" as const,
+      })),
+      ...planningData.milestones.map((milestone) => ({
+        id: milestone.id,
+        label: milestone.title,
+        type: "milestone" as const,
+      })),
+    ],
+    [planningData.goals, planningData.milestones],
   );
 
   if (!activeWorkspace) {
@@ -446,6 +517,15 @@ export function CampaignDetailWorkspace({ campaignId }: { campaignId: string }) 
               goals={planningData.goals}
               isLoading={planningIsLoading}
               milestones={planningData.milestones}
+              onInspectAnalytics={setSelectedAnalyticsChild}
+              selectedAnalyticsChild={selectedAnalyticsChild}
+            />
+            <AnalyticsReadSurface
+              campaignId={detail.id}
+              childResources={analyticsChildResources}
+              selectedChild={selectedAnalyticsChild}
+              title="Campaign analytics"
+              workspaceId={activeWorkspace.id}
             />
             <ReleasesSection campaign={detail} />
             <ActivitySection campaign={detail} />
