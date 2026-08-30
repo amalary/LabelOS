@@ -1,6 +1,6 @@
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
-from typing import Annotated, Any
+from typing import Annotated, Any, NoReturn
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
@@ -14,10 +14,15 @@ from pydantic import BaseModel, ConfigDict, Field
 from labelos_api.auth import CurrentUserContext, SessionDep, get_current_user_context
 from labelos_api.services import analytics_service
 from labelos_api.services.analytics_service import (
+    AnalyticsAggregation,
     AnalyticsAuthorizationError,
+    AnalyticsComparisonStatus,
+    AnalyticsHistoricalSeries,
     AnalyticsMetricDefinitionCreate,
     AnalyticsNotFoundError,
     AnalyticsObservationCreate,
+    AnalyticsObservationQuery,
+    AnalyticsPreviousPeriodComparison,
     AnalyticsProviderRef,
     AnalyticsRelationshipError,
 )
@@ -135,6 +140,37 @@ class AnalyticsObservationsListResponse(BaseModel):
     offset: int
 
 
+class AnalyticsSeriesPointResponse(BaseModel):
+    bucket_date: date
+    value: Decimal | str | bool | dict[str, Any] | None
+    observation_count: int
+
+
+class AnalyticsHistoricalSeriesResponse(BaseModel):
+    aggregation: AnalyticsAggregation
+    points: list[AnalyticsSeriesPointResponse]
+    value_type: AnalyticsMetricValueType | None
+    unit: str | None
+    provider_id: UUID | None
+    metric_definition_id: UUID | None
+    observation_count: int
+
+
+class AnalyticsPreviousPeriodComparisonResponse(BaseModel):
+    aggregation: AnalyticsAggregation
+    current_start: datetime
+    current_end: datetime
+    previous_start: datetime
+    previous_end: datetime
+    current_value: Decimal | str | bool | dict[str, Any] | None
+    previous_value: Decimal | str | bool | dict[str, Any] | None
+    current_observation_count: int
+    previous_observation_count: int
+    absolute_change: Decimal | None
+    percentage_change: Decimal | None
+    status: AnalyticsComparisonStatus
+
+
 def _not_found() -> HTTPException:
     return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
 
@@ -147,7 +183,7 @@ def _bad_request(detail: str) -> HTTPException:
     return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail)
 
 
-def _raise_capability_denial(reason: str) -> None:
+def _raise_capability_denial(reason: str) -> NoReturn:
     if reason in {"invalid_resource_scope", "membership_not_found"}:
         raise _not_found()
     if reason == "insufficient_department_access":
@@ -161,7 +197,7 @@ def _service_error(
         | AnalyticsRelationshipError
         | AnalyticsAuthorizationError
     ),
-) -> None:
+) -> NoReturn:
     if isinstance(exc, AnalyticsAuthorizationError):
         _raise_capability_denial(exc.reason)
     if isinstance(exc, AnalyticsNotFoundError):
@@ -208,6 +244,14 @@ def _numeric_response(value: Decimal | None) -> Decimal | None:
     return value.quantize(Decimal("0.000001"))
 
 
+def _analytics_value_response(
+    value: Decimal | str | bool | dict[str, Any] | None,
+) -> Decimal | str | bool | dict[str, Any] | None:
+    if isinstance(value, Decimal):
+        return _numeric_response(value)
+    return value
+
+
 def _observation_response(
     observation: AnalyticsObservation,
 ) -> AnalyticsObservationResponse:
@@ -236,6 +280,73 @@ def _observation_response(
         metadata=dict(observation.metadata_json),
         created_at=observation.created_at,
         updated_at=observation.updated_at,
+    )
+
+
+def _observation_query(
+    *,
+    metric_definition_id: UUID | None = None,
+    provider_id: UUID | None = None,
+    target_type: str | None = None,
+    target_id: UUID | None = None,
+    artist_profile_id: UUID | None = None,
+    campaign_id: UUID | None = None,
+    campaign_object_type: str | None = None,
+    campaign_object_id: UUID | None = None,
+    observed_start: datetime | None = None,
+    observed_end: datetime | None = None,
+) -> AnalyticsObservationQuery:
+    return AnalyticsObservationQuery(
+        metric_definition_id=metric_definition_id,
+        provider_id=provider_id,
+        target_type=target_type,
+        target_id=target_id,
+        artist_profile_id=artist_profile_id,
+        campaign_id=campaign_id,
+        campaign_object_type=campaign_object_type,
+        campaign_object_id=campaign_object_id,
+        observed_start=observed_start,
+        observed_end=observed_end,
+    )
+
+
+def _historical_series_response(
+    series: AnalyticsHistoricalSeries,
+) -> AnalyticsHistoricalSeriesResponse:
+    return AnalyticsHistoricalSeriesResponse(
+        aggregation=series.aggregation,
+        points=[
+            AnalyticsSeriesPointResponse(
+                bucket_date=point.bucket_date,
+                value=_analytics_value_response(point.value),
+                observation_count=point.observation_count,
+            )
+            for point in series.points
+        ],
+        value_type=series.value_type,
+        unit=series.unit,
+        provider_id=series.provider_id,
+        metric_definition_id=series.metric_definition_id,
+        observation_count=series.observation_count,
+    )
+
+
+def _comparison_response(
+    comparison: AnalyticsPreviousPeriodComparison,
+) -> AnalyticsPreviousPeriodComparisonResponse:
+    return AnalyticsPreviousPeriodComparisonResponse(
+        aggregation=comparison.aggregation,
+        current_start=comparison.current_start,
+        current_end=comparison.current_end,
+        previous_start=comparison.previous_start,
+        previous_end=comparison.previous_end,
+        current_value=_analytics_value_response(comparison.current_value),
+        previous_value=_analytics_value_response(comparison.previous_value),
+        current_observation_count=comparison.current_observation_count,
+        previous_observation_count=comparison.previous_observation_count,
+        absolute_change=_numeric_response(comparison.absolute_change),
+        percentage_change=_numeric_response(comparison.percentage_change),
+        status=comparison.status,
     )
 
 
@@ -303,10 +414,13 @@ async def list_observations(
     session: SessionDep,
     context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
     metric_definition_id: UUID | None = None,
+    provider_id: UUID | None = None,
     target_type: str | None = None,
     target_id: UUID | None = None,
     campaign_id: UUID | None = None,
     artist_profile_id: UUID | None = None,
+    campaign_object_type: str | None = None,
+    campaign_object_id: UUID | None = None,
     observed_start: datetime | None = None,
     observed_end: datetime | None = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
@@ -318,10 +432,13 @@ async def list_observations(
             workspace_id,
             actor=context,
             metric_definition_id=metric_definition_id,
+            provider_id=provider_id,
             target_type=target_type,
             target_id=target_id,
             campaign_id=campaign_id,
             artist_profile_id=artist_profile_id,
+            campaign_object_type=campaign_object_type,
+            campaign_object_id=campaign_object_id,
             observed_start=observed_start,
             observed_end=observed_end,
             limit=limit,
@@ -341,6 +458,148 @@ async def list_observations(
         limit=page.limit,
         offset=page.offset,
     )
+
+
+@router.get(
+    "/{workspace_id}/analytics/observations/latest",
+    response_model=AnalyticsObservationResponse | None,
+)
+async def get_latest_observation(
+    workspace_id: UUID,
+    session: SessionDep,
+    context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
+    metric_definition_id: UUID | None = None,
+    provider_id: UUID | None = None,
+    target_type: str | None = None,
+    target_id: UUID | None = None,
+    campaign_id: UUID | None = None,
+    artist_profile_id: UUID | None = None,
+    campaign_object_type: str | None = None,
+    campaign_object_id: UUID | None = None,
+    observed_start: datetime | None = None,
+    observed_end: datetime | None = None,
+) -> AnalyticsObservationResponse | None:
+    try:
+        observation = await analytics_service.get_latest_observation(
+            session,
+            workspace_id,
+            actor=context,
+            query=_observation_query(
+                metric_definition_id=metric_definition_id,
+                provider_id=provider_id,
+                target_type=target_type,
+                target_id=target_id,
+                campaign_id=campaign_id,
+                artist_profile_id=artist_profile_id,
+                campaign_object_type=campaign_object_type,
+                campaign_object_id=campaign_object_id,
+                observed_start=observed_start,
+                observed_end=observed_end,
+            ),
+        )
+    except (
+        AnalyticsNotFoundError,
+        AnalyticsRelationshipError,
+        AnalyticsAuthorizationError,
+    ) as exc:
+        _service_error(exc)
+    return _observation_response(observation) if observation is not None else None
+
+
+@router.get(
+    "/{workspace_id}/analytics/series",
+    response_model=AnalyticsHistoricalSeriesResponse,
+)
+async def get_historical_series(
+    workspace_id: UUID,
+    session: SessionDep,
+    context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
+    metric_definition_id: UUID | None = None,
+    provider_id: UUID | None = None,
+    target_type: str | None = None,
+    target_id: UUID | None = None,
+    campaign_id: UUID | None = None,
+    artist_profile_id: UUID | None = None,
+    campaign_object_type: str | None = None,
+    campaign_object_id: UUID | None = None,
+    observed_start: datetime | None = None,
+    observed_end: datetime | None = None,
+    aggregation: AnalyticsAggregation | None = None,
+) -> AnalyticsHistoricalSeriesResponse:
+    try:
+        series = await analytics_service.get_historical_series(
+            session,
+            workspace_id,
+            actor=context,
+            query=_observation_query(
+                metric_definition_id=metric_definition_id,
+                provider_id=provider_id,
+                target_type=target_type,
+                target_id=target_id,
+                campaign_id=campaign_id,
+                artist_profile_id=artist_profile_id,
+                campaign_object_type=campaign_object_type,
+                campaign_object_id=campaign_object_id,
+                observed_start=observed_start,
+                observed_end=observed_end,
+            ),
+            aggregation=aggregation,
+        )
+    except (
+        AnalyticsNotFoundError,
+        AnalyticsRelationshipError,
+        AnalyticsAuthorizationError,
+    ) as exc:
+        _service_error(exc)
+    return _historical_series_response(series)
+
+
+@router.get(
+    "/{workspace_id}/analytics/comparison",
+    response_model=AnalyticsPreviousPeriodComparisonResponse,
+)
+async def compare_previous_period(
+    workspace_id: UUID,
+    session: SessionDep,
+    context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
+    current_start: datetime,
+    current_end: datetime,
+    metric_definition_id: UUID | None = None,
+    provider_id: UUID | None = None,
+    target_type: str | None = None,
+    target_id: UUID | None = None,
+    campaign_id: UUID | None = None,
+    artist_profile_id: UUID | None = None,
+    campaign_object_type: str | None = None,
+    campaign_object_id: UUID | None = None,
+    aggregation: AnalyticsAggregation | None = None,
+) -> AnalyticsPreviousPeriodComparisonResponse:
+    try:
+        comparison = await analytics_service.compare_previous_period(
+            session,
+            workspace_id,
+            actor=context,
+            current_start=current_start,
+            current_end=current_end,
+            query=_observation_query(
+                metric_definition_id=metric_definition_id,
+                provider_id=provider_id,
+                target_type=target_type,
+                target_id=target_id,
+                campaign_id=campaign_id,
+                artist_profile_id=artist_profile_id,
+                campaign_object_type=campaign_object_type,
+                campaign_object_id=campaign_object_id,
+            ),
+            aggregation=aggregation,
+        )
+    except (
+        AnalyticsNotFoundError,
+        AnalyticsRelationshipError,
+        AnalyticsAuthorizationError,
+    ) as exc:
+        _service_error(exc)
+    return _comparison_response(comparison)
 
 
 @router.post(

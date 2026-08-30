@@ -45,6 +45,18 @@ async def get_provider_by_key(
     )
 
 
+async def get_provider(
+    session: AsyncSession,
+    workspace_id: UUID,
+    provider_id: UUID,
+) -> AnalyticsProvider | None:
+    return await session.scalar(
+        select(AnalyticsProvider)
+        .where(AnalyticsProvider.organization_id == workspace_id)
+        .where(AnalyticsProvider.id == provider_id)
+    )
+
+
 async def create_provider(
     session: AsyncSession,
     workspace_id: UUID,
@@ -143,15 +155,20 @@ async def list_observations(
     session: AsyncSession,
     workspace_id: UUID,
     *,
-    metric_definition_id: UUID | None,
-    target_type: str | None,
-    target_id: UUID | None,
-    campaign_id: UUID | None,
-    artist_profile_id: UUID | None,
-    observed_start: datetime | None,
-    observed_end: datetime | None,
+    metric_definition_id: UUID | None = None,
+    provider_id: UUID | None = None,
+    target_type: str | None = None,
+    target_id: UUID | None = None,
+    campaign_id: UUID | None = None,
+    artist_profile_id: UUID | None = None,
+    campaign_object_type: str | None = None,
+    campaign_object_id: UUID | None = None,
+    observed_start: datetime | None = None,
+    observed_end: datetime | None = None,
+    observed_before: datetime | None = None,
     limit: int,
     offset: int,
+    sort_desc: bool = True,
 ) -> AnalyticsObservationListPage:
     statement = select(AnalyticsObservation).where(
         AnalyticsObservation.organization_id == workspace_id
@@ -160,6 +177,8 @@ async def list_observations(
         statement = statement.where(
             AnalyticsObservation.metric_definition_id == metric_definition_id
         )
+    if provider_id is not None:
+        statement = statement.where(AnalyticsObservation.provider_id == provider_id)
     if target_type is not None:
         statement = statement.where(AnalyticsObservation.target_type == target_type)
     if target_id is not None:
@@ -170,19 +189,38 @@ async def list_observations(
         statement = statement.where(
             AnalyticsObservation.artist_profile_id == artist_profile_id
         )
+    if campaign_object_type is not None:
+        statement = statement.where(
+            AnalyticsObservation.campaign_object_type == campaign_object_type
+        )
+    if campaign_object_id is not None:
+        statement = statement.where(
+            AnalyticsObservation.campaign_object_id == campaign_object_id
+        )
     if observed_start is not None:
         statement = statement.where(AnalyticsObservation.observed_at >= observed_start)
     if observed_end is not None:
         statement = statement.where(AnalyticsObservation.observed_at <= observed_end)
+    if observed_before is not None:
+        statement = statement.where(AnalyticsObservation.observed_at < observed_before)
 
     total = await session.scalar(select(func.count()).select_from(statement.subquery()))
-    rows = await session.scalars(
-        statement.options(*_observation_load_options())
-        .order_by(
+    ordering = (
+        (
             AnalyticsObservation.observed_at.desc(),
             AnalyticsObservation.created_at.desc(),
             AnalyticsObservation.id.desc(),
         )
+        if sort_desc
+        else (
+            AnalyticsObservation.observed_at.asc(),
+            AnalyticsObservation.created_at.asc(),
+            AnalyticsObservation.id.asc(),
+        )
+    )
+    rows = await session.scalars(
+        statement.options(*_observation_load_options())
+        .order_by(*ordering)
         .limit(limit)
         .offset(offset)
     )
@@ -192,6 +230,42 @@ async def list_observations(
         limit=limit,
         offset=offset,
     )
+
+
+async def get_latest_observation(
+    session: AsyncSession,
+    workspace_id: UUID,
+    *,
+    metric_definition_id: UUID | None = None,
+    provider_id: UUID | None = None,
+    target_type: str | None = None,
+    target_id: UUID | None = None,
+    campaign_id: UUID | None = None,
+    artist_profile_id: UUID | None = None,
+    campaign_object_type: str | None = None,
+    campaign_object_id: UUID | None = None,
+    observed_start: datetime | None = None,
+    observed_end: datetime | None = None,
+    observed_before: datetime | None = None,
+) -> AnalyticsObservation | None:
+    page = await list_observations(
+        session,
+        workspace_id,
+        metric_definition_id=metric_definition_id,
+        provider_id=provider_id,
+        target_type=target_type,
+        target_id=target_id,
+        campaign_id=campaign_id,
+        artist_profile_id=artist_profile_id,
+        campaign_object_type=campaign_object_type,
+        campaign_object_id=campaign_object_id,
+        observed_start=observed_start,
+        observed_end=observed_end,
+        observed_before=observed_before,
+        limit=1,
+        offset=0,
+    )
+    return page.observations[0] if page.observations else None
 
 
 async def artist_profile_in_workspace(

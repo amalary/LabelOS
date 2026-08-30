@@ -758,6 +758,166 @@ def test_analytics_observation_route_supports_pagination_and_filters(
     assert invalid_page.status_code == 422
 
 
+def test_analytics_reporting_routes_return_latest_series_and_comparison(
+    analytics_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededAnalyticsApi,
+    ],
+) -> None:
+    client, _sessionmaker, seeded = analytics_client
+    _set_context(client, seeded)
+    base = f"/api/v1/workspaces/{seeded.workspace_id}/analytics"
+    metric = _create_metric(client, seeded.workspace_id, "streams")
+
+    previous = client.post(
+        f"{base}/observations",
+        json=_observation_payload(
+            metric["id"],
+            campaign_id=seeded.campaign_id,
+            value_numeric=50,
+            observed_at="2026-08-22T12:00:00Z",
+        ),
+    )
+    first_current = client.post(
+        f"{base}/observations",
+        json=_observation_payload(
+            metric["id"],
+            campaign_id=seeded.campaign_id,
+            value_numeric=100,
+            observed_at="2026-08-29T12:00:00Z",
+        ),
+    )
+    second_current = client.post(
+        f"{base}/observations",
+        json=_observation_payload(
+            metric["id"],
+            campaign_id=seeded.campaign_id,
+            value_numeric=25,
+            observed_at="2026-08-30T12:00:00Z",
+        ),
+    )
+    params = {
+        "metric_definition_id": metric["id"],
+        "campaign_id": str(seeded.campaign_id),
+    }
+
+    latest = client.get(f"{base}/observations/latest", params=params)
+    series = client.get(
+        f"{base}/series",
+        params={
+            **params,
+            "aggregation": "sum",
+            "observed_start": "2026-08-29T00:00:00Z",
+            "observed_end": "2026-08-31T00:00:00Z",
+        },
+    )
+    comparison = client.get(
+        f"{base}/comparison",
+        params={
+            **params,
+            "aggregation": "sum",
+            "current_start": "2026-08-29T00:00:00Z",
+            "current_end": "2026-09-05T00:00:00Z",
+        },
+    )
+
+    assert previous.status_code == 201
+    assert first_current.status_code == 201
+    assert second_current.status_code == 201
+    assert latest.status_code == 200
+    assert latest.json()["id"] == second_current.json()["id"]
+    assert series.status_code == 200
+    assert series.json()["points"] == [
+        {
+            "bucket_date": "2026-08-29",
+            "value": "100.000000",
+            "observation_count": 1,
+        },
+        {
+            "bucket_date": "2026-08-30",
+            "value": "25.000000",
+            "observation_count": 1,
+        },
+    ]
+    assert comparison.status_code == 200
+    comparison_body = comparison.json()
+    assert comparison_body["current_value"] == "125.000000"
+    assert comparison_body["previous_value"] == "50.000000"
+    assert comparison_body["absolute_change"] == "75.000000"
+    assert comparison_body["percentage_change"] == "1.500000"
+    assert comparison_body["status"] == "compared"
+
+
+def test_analytics_reporting_routes_filter_campaign_child_objects(
+    analytics_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededAnalyticsApi,
+    ],
+) -> None:
+    client, _sessionmaker, seeded = analytics_client
+    _set_context(client, seeded)
+    base = f"/api/v1/workspaces/{seeded.workspace_id}/analytics"
+    metric = _create_metric(client, seeded.workspace_id, "goal-progress")
+
+    goal_observation = client.post(
+        f"{base}/observations",
+        json=_observation_payload(
+            metric["id"],
+            target_type="campaign_object",
+            campaign_id=seeded.campaign_id,
+            campaign_object_type="goal",
+            campaign_object_id=seeded.campaign_goal_id,
+            value_numeric=10,
+            observed_at="2026-08-29T12:00:00Z",
+        ),
+    )
+    milestone_observation = client.post(
+        f"{base}/observations",
+        json=_observation_payload(
+            metric["id"],
+            target_type="campaign_object",
+            campaign_id=seeded.campaign_id,
+            campaign_object_type="milestone",
+            campaign_object_id=seeded.campaign_milestone_id,
+            value_numeric=20,
+            observed_at="2026-08-29T13:00:00Z",
+        ),
+    )
+
+    filtered = client.get(
+        f"{base}/series",
+        params={
+            "metric_definition_id": metric["id"],
+            "target_type": "campaign_object",
+            "campaign_id": str(seeded.campaign_id),
+            "campaign_object_type": "goal",
+            "campaign_object_id": str(seeded.campaign_goal_id),
+            "aggregation": "sum",
+        },
+    )
+    invalid_child = client.get(
+        f"{base}/series",
+        params={
+            "metric_definition_id": metric["id"],
+            "target_type": "campaign_object",
+            "campaign_id": str(seeded.campaign_id),
+            "campaign_object_type": "task",
+            "campaign_object_id": str(seeded.campaign_goal_id),
+            "aggregation": "sum",
+        },
+    )
+
+    assert goal_observation.status_code == 201
+    assert milestone_observation.status_code == 201
+    assert filtered.status_code == 200
+    assert filtered.json()["observation_count"] == 1
+    assert filtered.json()["points"][0]["value"] == "10.000000"
+    assert invalid_child.status_code == 400
+    assert invalid_child.json() == {"detail": "Unsupported campaign object type"}
+
+
 def test_analytics_openapi_contract_exposes_stable_response_fields(
     analytics_client: tuple[
         TestClient,
@@ -769,9 +929,7 @@ def test_analytics_openapi_contract_exposes_stable_response_fields(
 
     schema = client.get("/openapi.json").json()
     provider_schema = schema["components"]["schemas"]["AnalyticsProviderResponse"]
-    metric_schema = schema["components"]["schemas"][
-        "AnalyticsMetricDefinitionResponse"
-    ]
+    metric_schema = schema["components"]["schemas"]["AnalyticsMetricDefinitionResponse"]
     observation_schema = schema["components"]["schemas"]["AnalyticsObservationResponse"]
     observations_list_schema = schema["components"]["schemas"][
         "AnalyticsObservationsListResponse"

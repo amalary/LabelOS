@@ -1,0 +1,7 @@
+{
+  "extraPaths": [
+    "apps/api/src",
+    "apps/agents/src",
+    "packages/database/src"
+  ]
+}
