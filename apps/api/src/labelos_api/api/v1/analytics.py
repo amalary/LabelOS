@@ -4,6 +4,7 @@ from typing import Annotated, Any, NoReturn
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi.responses import JSONResponse
 from labelos_database.models import (
     AnalyticsMetricDefinition,
     AnalyticsMetricValueType,
@@ -16,6 +17,7 @@ from labelos_api.services import analytics_service
 from labelos_api.services.analytics_service import (
     AnalyticsAggregation,
     AnalyticsAuthorizationError,
+    AnalyticsBulkIngestionError,
     AnalyticsComparisonStatus,
     AnalyticsHistoricalSeries,
     AnalyticsMetricDefinitionCreate,
@@ -141,6 +143,40 @@ class AnalyticsObservationsListResponse(BaseModel):
     offset: int
 
 
+class AnalyticsBulkObservationsCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    observations: list[AnalyticsObservationCreateRequest] = Field(
+        min_length=1,
+        max_length=500,
+    )
+
+
+class AnalyticsBulkObservationItemResponse(BaseModel):
+    index: int
+    created: bool
+    observation: AnalyticsObservationResponse
+
+
+class AnalyticsBulkObservationsResponse(BaseModel):
+    observations: list[AnalyticsBulkObservationItemResponse]
+    created_count: int
+    existing_count: int
+    transaction: str
+
+
+class AnalyticsBulkObservationErrorResponse(BaseModel):
+    index: int
+    code: str
+    detail: str
+
+
+class AnalyticsBulkObservationsErrorResponse(BaseModel):
+    detail: str
+    transaction: str
+    errors: list[AnalyticsBulkObservationErrorResponse]
+
+
 class AnalyticsSeriesPointResponse(BaseModel):
     bucket_date: date
     value: Decimal | str | bool | dict[str, Any] | None
@@ -204,6 +240,26 @@ def _service_error(
     if isinstance(exc, AnalyticsNotFoundError):
         raise _not_found() from exc
     raise _bad_request(str(exc)) from exc
+
+
+def _bulk_service_error(exc: AnalyticsBulkIngestionError) -> JSONResponse:
+    return JSONResponse(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        content={
+            "detail": AnalyticsBulkObservationsErrorResponse(
+                detail="Analytics bulk ingestion batch is invalid",
+                transaction="all_or_nothing",
+                errors=[
+                    AnalyticsBulkObservationErrorResponse(
+                        index=error.index,
+                        code=error.code,
+                        detail=error.detail,
+                    )
+                    for error in exc.errors
+                ],
+            ).model_dump()
+        },
+    )
 
 
 def _provider_response(provider) -> AnalyticsProviderResponse:
@@ -350,6 +406,24 @@ def _comparison_response(
         absolute_change=_numeric_response(comparison.absolute_change),
         percentage_change=_numeric_response(comparison.percentage_change),
         status=comparison.status,
+    )
+
+
+def _bulk_observations_response(
+    result: analytics_service.AnalyticsBulkObservationIngestResult,
+) -> AnalyticsBulkObservationsResponse:
+    return AnalyticsBulkObservationsResponse(
+        observations=[
+            AnalyticsBulkObservationItemResponse(
+                index=item.index,
+                created=item.created,
+                observation=_observation_response(item.observation),
+            )
+            for item in result.results
+        ],
+        created_count=result.created_count,
+        existing_count=result.existing_count,
+        transaction=result.transaction,
     )
 
 
@@ -633,3 +707,38 @@ async def create_observation(
     if not result.created:
         response.status_code = status.HTTP_200_OK
     return _observation_response(result.observation)
+
+
+@router.post(
+    "/{workspace_id}/analytics/observations/bulk",
+    response_model=AnalyticsBulkObservationsResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_observations_bulk(
+    workspace_id: UUID,
+    payload: AnalyticsBulkObservationsCreateRequest,
+    response: Response,
+    session: SessionDep,
+    context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
+) -> AnalyticsBulkObservationsResponse | JSONResponse:
+    try:
+        result = await analytics_service.ingest_observations_bulk(
+            session,
+            workspace_id,
+            [
+                AnalyticsObservationCreate(**observation.model_dump())
+                for observation in payload.observations
+            ],
+            actor=context,
+        )
+    except AnalyticsBulkIngestionError as exc:
+        return _bulk_service_error(exc)
+    except (
+        AnalyticsNotFoundError,
+        AnalyticsRelationshipError,
+        AnalyticsAuthorizationError,
+    ) as exc:
+        _service_error(exc)
+    if result.created_count == 0:
+        response.status_code = status.HTTP_200_OK
+    return _bulk_observations_response(result)

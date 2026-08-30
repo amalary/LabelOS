@@ -21,6 +21,7 @@ from sqlalchemy.pool import StaticPool
 
 from labelos_api.services.analytics_service import (
     AnalyticsAggregation,
+    AnalyticsBulkIngestionError,
     AnalyticsMetricDefinitionCreate,
     AnalyticsNotFoundError,
     AnalyticsObservationCreate,
@@ -32,6 +33,7 @@ from labelos_api.services.analytics_service import (
     create_observation,
     get_historical_series,
     get_latest_observation,
+    ingest_observations_bulk,
     list_observations,
     list_observations_by_artist_profile,
     list_observations_by_campaign,
@@ -243,6 +245,217 @@ def test_analytics_service_deduplicates_by_workspace_provider_idempotency_key(
             return first.id == duplicate.id, duplicate.value_numeric, page.total
 
     assert asyncio.run(run()) == (True, Decimal("100.000000"), 1)
+
+
+def test_analytics_service_bulk_ingests_all_valid_batch(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async def run() -> tuple[int, int, int, list[Decimal | None]]:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            campaign = data["campaign"]
+            artist_profile = data["artist_profile"]
+            assert isinstance(workspace, Organization)
+            assert isinstance(campaign, Campaign)
+            assert isinstance(artist_profile, ArtistProfile)
+            metric = await _create_streams_metric(session, workspace.id)
+
+            result = await ingest_observations_bulk(
+                session,
+                workspace.id,
+                [
+                    AnalyticsObservationCreate(
+                        metric_definition_id=metric.id,
+                        target_type="campaign",
+                        campaign_id=campaign.id,
+                        artist_profile_id=artist_profile.id,
+                        observed_at=datetime(2026, 8, 29, 12, 0, tzinfo=UTC),
+                        value_numeric=100,
+                        idempotency_key="bulk-valid-1",
+                    ),
+                    AnalyticsObservationCreate(
+                        metric_definition_id=metric.id,
+                        target_type="workspace",
+                        observed_at=datetime(2026, 8, 29, 13, 0, tzinfo=UTC),
+                        value_numeric=200,
+                        idempotency_key="bulk-valid-2",
+                    ),
+                ],
+            )
+            page = await list_observations(session, workspace.id, limit=10)
+            return (
+                result.created_count,
+                result.existing_count,
+                page.total,
+                [observation.value_numeric for observation in page.observations],
+            )
+
+    assert asyncio.run(run()) == (
+        2,
+        0,
+        2,
+        [Decimal("200.000000"), Decimal("100.000000")],
+    )
+
+
+def test_analytics_service_bulk_reuses_existing_idempotency_keys(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async def run() -> tuple[int, int, bool, Decimal | None, int]:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            campaign = data["campaign"]
+            assert isinstance(workspace, Organization)
+            assert isinstance(campaign, Campaign)
+            metric = await _create_streams_metric(session, workspace.id)
+            existing = await create_observation(
+                session,
+                workspace.id,
+                AnalyticsObservationCreate(
+                    metric_definition_id=metric.id,
+                    target_type="campaign",
+                    campaign_id=campaign.id,
+                    observed_at=datetime(2026, 8, 29, 12, 0, tzinfo=UTC),
+                    value_numeric=100,
+                    idempotency_key="bulk-existing",
+                ),
+            )
+
+            result = await ingest_observations_bulk(
+                session,
+                workspace.id,
+                [
+                    AnalyticsObservationCreate(
+                        metric_definition_id=metric.id,
+                        target_type="campaign",
+                        campaign_id=campaign.id,
+                        observed_at=datetime(2026, 8, 29, 12, 0, tzinfo=UTC),
+                        value_numeric=999,
+                        idempotency_key="bulk-existing",
+                    ),
+                    AnalyticsObservationCreate(
+                        metric_definition_id=metric.id,
+                        target_type="campaign",
+                        campaign_id=campaign.id,
+                        observed_at=datetime(2026, 8, 29, 13, 0, tzinfo=UTC),
+                        value_numeric=200,
+                        idempotency_key="bulk-new",
+                    ),
+                ],
+            )
+            page = await list_observations(session, workspace.id, limit=10)
+            first = result.results[0].observation
+            return (
+                result.created_count,
+                result.existing_count,
+                first.id == existing.id,
+                first.value_numeric,
+                page.total,
+            )
+
+    assert asyncio.run(run()) == (1, 1, True, Decimal("100.000000"), 2)
+
+
+def test_analytics_service_bulk_rejects_partially_invalid_batch_without_writes(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async def run() -> tuple[tuple[tuple[int, str, str], ...], int]:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            campaign = data["campaign"]
+            assert isinstance(workspace, Organization)
+            assert isinstance(campaign, Campaign)
+            metric = await _create_streams_metric(session, workspace.id)
+
+            try:
+                await ingest_observations_bulk(
+                    session,
+                    workspace.id,
+                    [
+                        AnalyticsObservationCreate(
+                            metric_definition_id=metric.id,
+                            target_type="campaign",
+                            campaign_id=campaign.id,
+                            observed_at=datetime(2026, 8, 29, 12, 0, tzinfo=UTC),
+                            value_numeric=100,
+                            idempotency_key="bulk-rollback-valid",
+                        ),
+                        AnalyticsObservationCreate(
+                            metric_definition_id=metric.id,
+                            target_type="campaign",
+                            campaign_id=campaign.id,
+                            observed_at=datetime(2026, 8, 29, 13, 0, tzinfo=UTC),
+                            value_text="not numeric",
+                            idempotency_key="bulk-rollback-invalid",
+                        ),
+                    ],
+                )
+            except AnalyticsBulkIngestionError as exc:
+                errors = tuple(
+                    (error.index, error.code, error.detail) for error in exc.errors
+                )
+            else:
+                errors = ()
+            page = await list_observations(session, workspace.id, limit=10)
+            return errors, page.total
+
+    assert asyncio.run(run()) == (
+        ((1, "invalid_observation", "value_numeric is required"),),
+        0,
+    )
+
+
+def test_analytics_service_bulk_rejects_duplicate_idempotency_keys_in_request(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async def run() -> tuple[tuple[tuple[int, str, str], ...], int]:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            campaign = data["campaign"]
+            assert isinstance(workspace, Organization)
+            assert isinstance(campaign, Campaign)
+            metric = await _create_streams_metric(session, workspace.id)
+
+            try:
+                await ingest_observations_bulk(
+                    session,
+                    workspace.id,
+                    [
+                        AnalyticsObservationCreate(
+                            metric_definition_id=metric.id,
+                            target_type="campaign",
+                            campaign_id=campaign.id,
+                            observed_at=datetime(2026, 8, 29, 12, 0, tzinfo=UTC),
+                            value_numeric=100,
+                            idempotency_key="same-key",
+                        ),
+                        AnalyticsObservationCreate(
+                            metric_definition_id=metric.id,
+                            target_type="campaign",
+                            campaign_id=campaign.id,
+                            observed_at=datetime(2026, 8, 29, 13, 0, tzinfo=UTC),
+                            value_numeric=200,
+                            idempotency_key="same-key",
+                        ),
+                    ],
+                )
+            except AnalyticsBulkIngestionError as exc:
+                errors = tuple(
+                    (error.index, error.code, error.detail) for error in exc.errors
+                )
+            else:
+                errors = ()
+            page = await list_observations(session, workspace.id, limit=10)
+            return errors, page.total
+
+    assert asyncio.run(run()) == (
+        ((1, "invalid_observation", "Duplicate idempotency_key in request"),),
+        0,
+    )
 
 
 def test_analytics_service_blocks_cross_workspace_targets(

@@ -117,6 +117,34 @@ class AnalyticsObservationCreateResult:
 
 
 @dataclass(frozen=True, kw_only=True)
+class AnalyticsBulkObservationError:
+    index: int
+    code: str
+    detail: str
+
+
+class AnalyticsBulkIngestionError(AnalyticsServiceError):
+    def __init__(self, errors: list[AnalyticsBulkObservationError]) -> None:
+        super().__init__("Analytics bulk ingestion batch is invalid")
+        self.errors = tuple(errors)
+
+
+@dataclass(frozen=True, kw_only=True)
+class AnalyticsBulkObservationResult:
+    index: int
+    observation: AnalyticsObservation
+    created: bool
+
+
+@dataclass(frozen=True, kw_only=True)
+class AnalyticsBulkObservationIngestResult:
+    results: tuple[AnalyticsBulkObservationResult, ...]
+    created_count: int
+    existing_count: int
+    transaction: str = "all_or_nothing"
+
+
+@dataclass(frozen=True, kw_only=True)
 class AnalyticsObservationQuery:
     metric_definition_id: UUID | None = None
     provider_id: UUID | None = None
@@ -663,19 +691,19 @@ async def list_metric_definitions(
     return await analytics.list_metric_definitions(session, workspace_id)
 
 
-async def create_observation_result(
+def _bulk_error_code(exc: AnalyticsServiceError) -> str:
+    if isinstance(exc, AnalyticsNotFoundError):
+        return "not_found"
+    if isinstance(exc, AnalyticsRelationshipError):
+        return "invalid_observation"
+    return "analytics_error"
+
+
+async def _create_observation_result_uncommitted(
     session: AsyncSession,
     workspace_id: UUID,
     payload: AnalyticsObservationCreate,
-    *,
-    actor: AuthorizationActorInput | None = None,
 ) -> AnalyticsObservationCreateResult:
-    await _require_capability(
-        session,
-        actor=actor,
-        workspace_id=workspace_id,
-        capability=Capability.analytics_create,
-    )
     metric_definition = await analytics.get_metric_definition(
         session,
         workspace_id,
@@ -721,10 +749,134 @@ async def create_observation_result(
     )
     observation.metric_definition = metric_definition
     observation.provider = metric_definition.provider
-    await session.commit()
     return AnalyticsObservationCreateResult(
         observation=observation,
         created=True,
+    )
+
+
+async def create_observation_result(
+    session: AsyncSession,
+    workspace_id: UUID,
+    payload: AnalyticsObservationCreate,
+    *,
+    actor: AuthorizationActorInput | None = None,
+) -> AnalyticsObservationCreateResult:
+    await _require_capability(
+        session,
+        actor=actor,
+        workspace_id=workspace_id,
+        capability=Capability.analytics_create,
+    )
+    result = await _create_observation_result_uncommitted(
+        session,
+        workspace_id,
+        payload,
+    )
+    await session.commit()
+    return result
+
+
+async def ingest_observations_bulk(
+    session: AsyncSession,
+    workspace_id: UUID,
+    payloads: list[AnalyticsObservationCreate],
+    *,
+    actor: AuthorizationActorInput | None = None,
+) -> AnalyticsBulkObservationIngestResult:
+    """Validate and ingest observations in one all-or-nothing transaction.
+
+    Prior observations matched by workspace, provider, and idempotency_key are
+    returned as existing rows. Duplicate non-empty idempotency keys for the same
+    provider inside a single request are rejected to keep retry semantics
+    deterministic for scheduled syncs, provider integrations, webhooks, and
+    agent tools.
+    """
+
+    await _require_capability(
+        session,
+        actor=actor,
+        workspace_id=workspace_id,
+        capability=Capability.analytics_create,
+    )
+    if not payloads:
+        raise AnalyticsBulkIngestionError(
+            [
+                AnalyticsBulkObservationError(
+                    index=0,
+                    code="empty_batch",
+                    detail="observations must contain at least one item",
+                )
+            ]
+        )
+
+    errors: list[AnalyticsBulkObservationError] = []
+    idempotency_keys: dict[tuple[UUID, str], int] = {}
+    metric_definitions: dict[UUID, AnalyticsMetricDefinition] = {}
+
+    for index, payload in enumerate(payloads):
+        try:
+            metric_definition = metric_definitions.get(payload.metric_definition_id)
+            if metric_definition is None:
+                metric_definition = await analytics.get_metric_definition(
+                    session,
+                    workspace_id,
+                    payload.metric_definition_id,
+                )
+                if metric_definition is None:
+                    raise AnalyticsNotFoundError("Metric definition not found")
+                metric_definitions[payload.metric_definition_id] = metric_definition
+
+            idempotency_key = _normalize_optional_text(payload.idempotency_key)
+            if idempotency_key is not None:
+                key = (metric_definition.provider_id, idempotency_key)
+                first_index = idempotency_keys.get(key)
+                if first_index is not None:
+                    raise AnalyticsRelationshipError(
+                        "Duplicate idempotency_key in request"
+                    )
+                idempotency_keys[key] = index
+
+            target_values = _target_values(payload)
+            if target_values["target_type"] == "workspace":
+                target_values["target_id"] = workspace_id
+            await _validate_target_scope(session, workspace_id, target_values)
+            _value_values(payload, metric_definition.value_type)
+            _json_object(payload.dimensions, "dimensions")
+            _json_object(payload.metadata, "metadata")
+        except (AnalyticsNotFoundError, AnalyticsRelationshipError) as exc:
+            errors.append(
+                AnalyticsBulkObservationError(
+                    index=index,
+                    code=_bulk_error_code(exc),
+                    detail=str(exc),
+                )
+            )
+
+    if errors:
+        raise AnalyticsBulkIngestionError(errors)
+
+    results: list[AnalyticsBulkObservationResult] = []
+    for index, payload in enumerate(payloads):
+        result = await _create_observation_result_uncommitted(
+            session,
+            workspace_id,
+            payload,
+        )
+        results.append(
+            AnalyticsBulkObservationResult(
+                index=index,
+                observation=result.observation,
+                created=result.created,
+            )
+        )
+
+    await session.commit()
+    created_count = sum(1 for result in results if result.created)
+    return AnalyticsBulkObservationIngestResult(
+        results=tuple(results),
+        created_count=created_count,
+        existing_count=len(results) - created_count,
     )
 
 

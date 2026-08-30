@@ -618,6 +618,197 @@ def test_analytics_observation_route_deduplicates_by_idempotency_key(
     assert listed.json()["total"] == 1
 
 
+def test_analytics_observations_bulk_route_ingests_authenticated_batch(
+    analytics_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededAnalyticsApi,
+    ],
+) -> None:
+    client, _sessionmaker, seeded = analytics_client
+    _set_context(client, seeded)
+    metric = _create_metric(client, seeded.workspace_id)
+    base = f"/api/v1/workspaces/{seeded.workspace_id}/analytics/observations"
+
+    response = client.post(
+        f"{base}/bulk",
+        json={
+            "observations": [
+                _observation_payload(
+                    metric["id"],
+                    campaign_id=seeded.campaign_id,
+                    value_numeric=100,
+                    idempotency_key="route-bulk-1",
+                ),
+                _observation_payload(
+                    metric["id"],
+                    target_type="campaign_object",
+                    campaign_id=seeded.campaign_id,
+                    campaign_object_type="goal",
+                    campaign_object_id=seeded.campaign_goal_id,
+                    value_numeric=200,
+                    idempotency_key="route-bulk-2",
+                ),
+            ],
+        },
+    )
+    listed = client.get(base)
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["created_count"] == 2
+    assert body["existing_count"] == 0
+    assert body["transaction"] == "all_or_nothing"
+    assert [item["index"] for item in body["observations"]] == [0, 1]
+    assert body["observations"][1]["observation"]["target_type"] == "campaign_object"
+    assert body["observations"][1]["observation"]["campaign_object_id"] == str(
+        seeded.campaign_goal_id
+    )
+    assert listed.json()["total"] == 2
+
+
+def test_analytics_observations_bulk_route_reuses_existing_idempotency_rows(
+    analytics_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededAnalyticsApi,
+    ],
+) -> None:
+    client, _sessionmaker, seeded = analytics_client
+    _set_context(client, seeded)
+    metric = _create_metric(client, seeded.workspace_id)
+    base = f"/api/v1/workspaces/{seeded.workspace_id}/analytics/observations"
+    payload = _observation_payload(
+        metric["id"],
+        campaign_id=seeded.campaign_id,
+        value_numeric=100,
+        idempotency_key="route-bulk-existing",
+    )
+
+    first = client.post(base, json=payload)
+    reused = client.post(
+        f"{base}/bulk",
+        json={"observations": [{**payload, "value_numeric": 999}]},
+    )
+    listed = client.get(base)
+
+    assert first.status_code == 201
+    assert reused.status_code == 200
+    body = reused.json()
+    assert body["created_count"] == 0
+    assert body["existing_count"] == 1
+    assert body["observations"][0]["created"] is False
+    assert body["observations"][0]["observation"]["id"] == first.json()["id"]
+    assert body["observations"][0]["observation"]["value_numeric"] == "100.000000"
+    assert listed.json()["total"] == 1
+
+
+def test_analytics_observations_bulk_route_returns_structured_errors_without_writes(
+    analytics_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededAnalyticsApi,
+    ],
+) -> None:
+    client, _sessionmaker, seeded = analytics_client
+    _set_context(client, seeded)
+    metric = _create_metric(client, seeded.workspace_id)
+    base = f"/api/v1/workspaces/{seeded.workspace_id}/analytics/observations"
+
+    response = client.post(
+        f"{base}/bulk",
+        json={
+            "observations": [
+                _observation_payload(
+                    metric["id"],
+                    campaign_id=seeded.campaign_id,
+                    value_numeric=100,
+                    idempotency_key="route-bulk-valid-but-rolled-back",
+                ),
+                _observation_payload(
+                    metric["id"],
+                    campaign_id=seeded.outside_campaign_id,
+                    value_numeric=200,
+                    idempotency_key="route-bulk-outside-target",
+                ),
+                {
+                    **_observation_payload(
+                        metric["id"],
+                        campaign_id=seeded.campaign_id,
+                        idempotency_key="route-bulk-bad-value",
+                    ),
+                    "value_numeric": "not-numeric",
+                },
+            ],
+        },
+    )
+    listed = client.get(base)
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "detail": {
+            "detail": "Analytics bulk ingestion batch is invalid",
+            "transaction": "all_or_nothing",
+            "errors": [
+                {
+                    "index": 1,
+                    "code": "not_found",
+                    "detail": "Campaign not found",
+                },
+                {
+                    "index": 2,
+                    "code": "invalid_observation",
+                    "detail": "value_numeric must be numeric",
+                },
+            ],
+        }
+    }
+    assert listed.json()["total"] == 0
+
+
+def test_analytics_observations_bulk_route_rejects_duplicate_keys_in_request(
+    analytics_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededAnalyticsApi,
+    ],
+) -> None:
+    client, _sessionmaker, seeded = analytics_client
+    _set_context(client, seeded)
+    metric = _create_metric(client, seeded.workspace_id)
+    base = f"/api/v1/workspaces/{seeded.workspace_id}/analytics/observations"
+
+    response = client.post(
+        f"{base}/bulk",
+        json={
+            "observations": [
+                _observation_payload(
+                    metric["id"],
+                    campaign_id=seeded.campaign_id,
+                    idempotency_key="route-duplicate-key",
+                ),
+                _observation_payload(
+                    metric["id"],
+                    campaign_id=seeded.campaign_id,
+                    idempotency_key="route-duplicate-key",
+                ),
+            ],
+        },
+    )
+    listed = client.get(base)
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["transaction"] == "all_or_nothing"
+    assert response.json()["detail"]["errors"] == [
+        {
+            "index": 1,
+            "code": "invalid_observation",
+            "detail": "Duplicate idempotency_key in request",
+        }
+    ]
+    assert listed.json()["total"] == 0
+
+
 @pytest.mark.parametrize(
     ("metric_type", "payload_updates", "expected_status", "expected_detail"),
     [
@@ -813,7 +1004,9 @@ def test_analytics_routes_filter_artist_profile_relationship_without_target_dupl
     assert filtered.status_code == 200
     filtered_body = filtered.json()
     assert filtered_body["total"] == 2
-    assert {observation["target_type"] for observation in filtered_body["observations"]} == {
+    assert {
+        observation["target_type"] for observation in filtered_body["observations"]
+    } == {
         "artist_profile",
         "campaign",
     }
