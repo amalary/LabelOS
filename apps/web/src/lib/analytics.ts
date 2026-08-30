@@ -56,6 +56,10 @@ export type AnalyticsMetricDefinitionsList = {
   metric_definitions: AnalyticsMetricDefinition[];
 };
 
+export type AnalyticsProvidersList = {
+  providers: AnalyticsProvider[];
+};
+
 export type AnalyticsObservation = {
   id: string;
   workspace_id: string;
@@ -222,6 +226,7 @@ let activeMutationCount = 0;
 
 export const analyticsQueryKeys = {
   metricDefinitions: (workspaceId: string) => `analytics:metrics:${workspaceId}`,
+  providers: (workspaceId: string) => `analytics:providers:${workspaceId}`,
   observations: (workspaceId: string, options?: AnalyticsQueryOptions) =>
     `analytics:observations:${workspaceId}:${stableQueryKey(normalizeAnalyticsQueryOptions(options))}`,
   latest: (workspaceId: string, options?: AnalyticsQueryOptions) =>
@@ -492,6 +497,7 @@ export function shouldInvalidateAnalyticsRealtimeCacheKey({
 }) {
   return (
     key === analyticsQueryKeys.metricDefinitions(workspaceId) ||
+    key === analyticsQueryKeys.providers(workspaceId) ||
     key.startsWith(`analytics:observations:${workspaceId}:`) ||
     key.startsWith(`analytics:latest:${workspaceId}:`) ||
     key.startsWith(`analytics:series:${workspaceId}:`) ||
@@ -521,6 +527,14 @@ export function listAnalyticsMetricDefinitions(
 }
 
 export const getAnalyticsMetricDefinitions = listAnalyticsMetricDefinitions;
+
+export function listAnalyticsProviders(workspaceId: string): Promise<AnalyticsProvidersList> {
+  return analyticsJson<AnalyticsProvidersList>(
+    `/api/workspaces/${workspaceId}/analytics/providers`,
+  );
+}
+
+export const getAnalyticsProviders = listAnalyticsProviders;
 
 export function createAnalyticsMetricDefinition(
   workspaceId: string,
@@ -837,7 +851,9 @@ export function useCreateAnalyticsMetricDefinition(
         entry.data = metricDefinition;
         entry.error = null;
         invalidateAnalyticsCache(
-          (key) => key === analyticsQueryKeys.metricDefinitions(workspaceId),
+          (key) =>
+            key === analyticsQueryKeys.metricDefinitions(workspaceId) ||
+            key === analyticsQueryKeys.providers(workspaceId),
         );
         return metricDefinition;
       } catch (error) {
@@ -876,6 +892,14 @@ export function useCreateAnalyticsMetricDefinition(
     mutate,
     reset,
   };
+}
+
+export function useAnalyticsProviders(
+  workspaceId: string | null,
+): AnalyticsResourceState<AnalyticsProvidersList> {
+  const key = workspaceId ? analyticsQueryKeys.providers(workspaceId) : null;
+  const fetcher = useCallback(() => getAnalyticsProviders(workspaceId ?? ""), [workspaceId]);
+  return useAnalyticsResource(key, workspaceId ? fetcher : null);
 }
 
 export function useCreateAnalyticsObservation(

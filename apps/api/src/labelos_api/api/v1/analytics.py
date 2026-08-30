@@ -86,6 +86,10 @@ class AnalyticsMetricDefinitionsListResponse(BaseModel):
     metric_definitions: list[AnalyticsMetricDefinitionResponse]
 
 
+class AnalyticsProvidersListResponse(BaseModel):
+    providers: list[AnalyticsProviderResponse]
+
+
 class AnalyticsObservationCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -449,6 +453,28 @@ async def list_metric_definitions(
             _metric_definition_response(metric_definition)
             for metric_definition in metric_definitions
         ]
+    )
+
+
+@router.get(
+    "/{workspace_id}/analytics/providers",
+    response_model=AnalyticsProvidersListResponse,
+)
+async def list_providers(
+    workspace_id: UUID,
+    session: SessionDep,
+    context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
+) -> AnalyticsProvidersListResponse:
+    try:
+        providers = await analytics_service.list_providers(
+            session,
+            workspace_id,
+            actor=context,
+        )
+    except AnalyticsAuthorizationError as exc:
+        _service_error(exc)
+    return AnalyticsProvidersListResponse(
+        providers=[_provider_response(provider) for provider in providers]
     )
 
 

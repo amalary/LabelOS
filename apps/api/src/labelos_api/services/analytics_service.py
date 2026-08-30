@@ -514,9 +514,7 @@ async def _publish_observations_ingested_event(
     results: list[AnalyticsBulkObservationResult],
     actor: AuthorizationActorInput | None,
 ) -> None:
-    created_observations = [
-        result.observation for result in results if result.created
-    ]
+    created_observations = [result.observation for result in results if result.created]
     if not created_observations:
         return
     await RealtimePublisher(session).publish(
@@ -773,6 +771,21 @@ async def list_metric_definitions(
         capability=Capability.analytics_view,
     )
     return await analytics.list_metric_definitions(session, workspace_id)
+
+
+async def list_providers(
+    session: AsyncSession,
+    workspace_id: UUID,
+    *,
+    actor: AuthorizationActorInput | None = None,
+) -> list[AnalyticsProvider]:
+    await _require_capability(
+        session,
+        actor=actor,
+        workspace_id=workspace_id,
+        capability=Capability.analytics_view,
+    )
+    return await analytics.list_providers(session, workspace_id)
 
 
 def _bulk_error_code(exc: AnalyticsServiceError) -> str:

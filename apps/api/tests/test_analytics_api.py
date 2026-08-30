@@ -536,6 +536,66 @@ def test_analytics_routes_require_view_and_create_capabilities(
     assert missing_create.json() == {"detail": "Insufficient capability permission"}
 
 
+def test_analytics_provider_route_lists_workspace_providers_with_view_capability(
+    analytics_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededAnalyticsApi,
+    ],
+) -> None:
+    client, _sessionmaker, seeded = analytics_client
+    _set_context(client, seeded)
+    created_metric = _create_metric(client, seeded.workspace_id, "streams")
+
+    response = client.get(
+        f"/api/v1/workspaces/{seeded.workspace_id}/analytics/providers"
+    )
+
+    assert response.status_code == 200
+    providers = response.json()["providers"]
+    assert len(providers) == 1
+    assert providers[0]["id"] == created_metric["provider"]["id"]
+    assert providers[0]["workspace_id"] == str(seeded.workspace_id)
+    assert providers[0]["key"] == "internal"
+    assert providers[0]["display_name"] == "Internal Analytics"
+    assert providers[0]["provider_type"] == "internal"
+    assert providers[0]["metadata"] == {}
+
+
+def test_analytics_provider_route_requires_view_capability(
+    analytics_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededAnalyticsApi,
+    ],
+) -> None:
+    client, sessionmaker, seeded = analytics_client
+    asyncio.run(
+        _set_analyst_capabilities(
+            sessionmaker,
+            seeded,
+            ("analytics.create",),
+        )
+    )
+    _set_context(
+        client,
+        seeded,
+        user_id=seeded.analyst_user_id,
+        email="analytics-analyst@example.com",
+        display_name="Analyst",
+        workspace_permission=WorkspacePermission.guest,
+        capability_permissions=("analytics.create",),
+        department_access=("analytics",),
+    )
+
+    response = client.get(
+        f"/api/v1/workspaces/{seeded.workspace_id}/analytics/providers"
+    )
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Insufficient capability permission"}
+
+
 def test_analytics_routes_hide_cross_workspace_and_invalid_workspace_access(
     analytics_client: tuple[
         TestClient,

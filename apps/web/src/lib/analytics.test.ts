@@ -8,6 +8,7 @@ import {
   getAnalyticsMetricDefinitions,
   getAnalyticsObservations,
   getAnalyticsPreviousPeriodComparison,
+  getAnalyticsProviders,
   getLatestAnalyticsObservation,
   queryAnalyticsSummary,
   queryMetricHistory,
@@ -62,6 +63,22 @@ describe("analytics data layer", () => {
     );
     const headers = vi.mocked(fetch).mock.calls[0]?.[1]?.headers as Headers;
     expect(headers.get("Accept")).toBe("application/json");
+  });
+
+  it("fetches analytics providers through the workspace analytics proxy", async () => {
+    vi.mocked(fetch).mockResolvedValue(Response.json({ providers: [metricDefinition.provider] }));
+
+    await expect(getAnalyticsProviders("workspace_01")).resolves.toEqual({
+      providers: [metricDefinition.provider],
+    });
+
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/workspaces/workspace_01/analytics/providers",
+      expect.objectContaining({
+        cache: "no-store",
+        headers: expect.any(Headers),
+      }),
+    );
   });
 
   it("builds observation and latest query strings with target filters", async () => {

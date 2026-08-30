@@ -69,6 +69,18 @@ async def create_provider(
     return provider
 
 
+async def list_providers(
+    session: AsyncSession,
+    workspace_id: UUID,
+) -> list[AnalyticsProvider]:
+    rows = await session.scalars(
+        select(AnalyticsProvider)
+        .where(AnalyticsProvider.organization_id == workspace_id)
+        .order_by(AnalyticsProvider.key.asc(), AnalyticsProvider.id.asc())
+    )
+    return list(rows.all())
+
+
 async def list_metric_definitions(
     session: AsyncSession,
     workspace_id: UUID,
