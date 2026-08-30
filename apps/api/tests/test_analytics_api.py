@@ -758,6 +758,80 @@ def test_analytics_observation_route_supports_pagination_and_filters(
     assert invalid_page.status_code == 422
 
 
+def test_analytics_routes_filter_artist_profile_relationship_without_target_duplication(
+    analytics_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededAnalyticsApi,
+    ],
+) -> None:
+    client, _sessionmaker, seeded = analytics_client
+    _set_context(client, seeded)
+    base = f"/api/v1/workspaces/{seeded.workspace_id}/analytics"
+    metric = _create_metric(client, seeded.workspace_id, "artist-streams")
+
+    artist_direct = client.post(
+        f"{base}/observations",
+        json=_observation_payload(
+            metric["id"],
+            target_type="artist_profile",
+            artist_profile_id=seeded.artist_profile_id,
+            value_numeric=100,
+            observed_at="2026-08-29T12:00:00Z",
+        ),
+    )
+    artist_campaign_attributed = client.post(
+        f"{base}/observations",
+        json=_observation_payload(
+            metric["id"],
+            target_type="campaign",
+            campaign_id=seeded.campaign_id,
+            artist_profile_id=seeded.artist_profile_id,
+            value_numeric=25,
+            observed_at="2026-08-30T12:00:00Z",
+        ),
+    )
+    filtered = client.get(
+        f"{base}/observations",
+        params={
+            "artist_profile_id": str(seeded.artist_profile_id),
+            "limit": 10,
+        },
+    )
+    series = client.get(
+        f"{base}/series",
+        params={
+            "aggregation": "sum",
+            "artist_profile_id": str(seeded.artist_profile_id),
+            "metric_definition_id": metric["id"],
+        },
+    )
+
+    assert artist_direct.status_code == 201
+    assert artist_campaign_attributed.status_code == 201
+    assert filtered.status_code == 200
+    filtered_body = filtered.json()
+    assert filtered_body["total"] == 2
+    assert {observation["target_type"] for observation in filtered_body["observations"]} == {
+        "artist_profile",
+        "campaign",
+    }
+    assert series.status_code == 200
+    assert series.json()["observation_count"] == 2
+    assert series.json()["points"] == [
+        {
+            "bucket_date": "2026-08-29",
+            "observation_count": 1,
+            "value": "100.000000",
+        },
+        {
+            "bucket_date": "2026-08-30",
+            "observation_count": 1,
+            "value": "25.000000",
+        },
+    ]
+
+
 def test_analytics_reporting_routes_return_latest_series_and_comparison(
     analytics_client: tuple[
         TestClient,

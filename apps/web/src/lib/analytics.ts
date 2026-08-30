@@ -585,8 +585,6 @@ export function queryObservationsByArtist(
   return listAnalyticsObservations(workspaceId, {
     ...options,
     artist_profile_id: artistProfileId,
-    target_id: artistProfileId,
-    target_type: "artist_profile",
   });
 }
 
@@ -659,8 +657,6 @@ export function useAnalyticsObservationsByArtist(
       : {
           ...options,
           artist_profile_id: artistProfileId,
-          target_id: artistProfileId,
-          target_type: "artist_profile",
         };
   const key =
     workspaceId && queryOptions ? analyticsQueryKeys.observations(workspaceId, queryOptions) : null;
@@ -816,15 +812,22 @@ export function useCreateAnalyticsMetricDefinition(
         const metricDefinition = await createAnalyticsMetricDefinition(workspaceId, payload);
         entry.data = metricDefinition;
         entry.error = null;
-        invalidateAnalyticsCache((key) => key === analyticsQueryKeys.metricDefinitions(workspaceId));
+        invalidateAnalyticsCache(
+          (key) => key === analyticsQueryKeys.metricDefinitions(workspaceId),
+        );
         return metricDefinition;
       } catch (error) {
         entry.error =
           error instanceof AnalyticsApiError
             ? error
-            : new AnalyticsApiError("network_failure", "Analytics metric creation failed.", undefined, {
-                cause: error,
-              });
+            : new AnalyticsApiError(
+                "network_failure",
+                "Analytics metric creation failed.",
+                undefined,
+                {
+                  cause: error,
+                },
+              );
         throw entry.error;
       } finally {
         activeMutationCount = Math.max(0, activeMutationCount - 1);
@@ -879,15 +882,22 @@ export function useCreateAnalyticsObservation(
         const observation = await createAnalyticsObservation(workspaceId, payload);
         entry.data = observation;
         entry.error = null;
-        invalidateAnalyticsCache((key) => key.startsWith(`analytics:`) && key.includes(workspaceId));
+        invalidateAnalyticsCache(
+          (key) => key.startsWith(`analytics:`) && key.includes(workspaceId),
+        );
         return observation;
       } catch (error) {
         entry.error =
           error instanceof AnalyticsApiError
             ? error
-            : new AnalyticsApiError("network_failure", "Analytics observation creation failed.", undefined, {
-                cause: error,
-              });
+            : new AnalyticsApiError(
+                "network_failure",
+                "Analytics observation creation failed.",
+                undefined,
+                {
+                  cause: error,
+                },
+              );
         throw entry.error;
       } finally {
         activeMutationCount = Math.max(0, activeMutationCount - 1);

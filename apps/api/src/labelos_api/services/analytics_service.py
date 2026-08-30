@@ -949,8 +949,6 @@ async def list_observations_by_artist_profile(
         session,
         workspace_id,
         actor=actor,
-        target_type="artist_profile",
-        target_id=artist_profile_id,
         artist_profile_id=artist_profile_id,
         limit=limit,
         offset=offset,

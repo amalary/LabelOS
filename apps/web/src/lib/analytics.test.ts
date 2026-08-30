@@ -128,19 +128,13 @@ describe("analytics data layer", () => {
       include_child_objects: false,
       metric_definition_id: "metric_01",
     });
-    await queryObservationsByCampaignChildObject(
-      "workspace_01",
-      "campaign_01",
-      "goal",
-      "goal_01",
-      {
-        metric_definition_id: "metric_01",
-      },
-    );
+    await queryObservationsByCampaignChildObject("workspace_01", "campaign_01", "goal", "goal_01", {
+      metric_definition_id: "metric_01",
+    });
 
     expect(fetch).toHaveBeenNthCalledWith(
       1,
-      "/api/workspaces/workspace_01/analytics/observations?metric_definition_id=metric_01&artist_profile_id=artist_01&target_id=artist_01&target_type=artist_profile",
+      "/api/workspaces/workspace_01/analytics/observations?metric_definition_id=metric_01&artist_profile_id=artist_01",
       expect.any(Object),
     );
     expect(fetch).toHaveBeenNthCalledWith(

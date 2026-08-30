@@ -9,8 +9,10 @@ vi.mock("../../lib/analytics", async () => {
     ...actual,
     useAnalyticsHistoricalSeries: vi.fn(),
     useAnalyticsMetricDefinitions: vi.fn(),
+    useAnalyticsObservationsByArtist: vi.fn(),
     useAnalyticsObservationsByCampaign: vi.fn(),
     useAnalyticsObservationsByCampaignChildObject: vi.fn(),
+    useAnalyticsPreviousPeriodComparison: vi.fn(),
     useAnalyticsSummary: vi.fn(),
   };
 });
@@ -121,6 +123,25 @@ describe("AnalyticsReadSurface", () => {
       isLoading: false,
       reload: vi.fn(),
     });
+    vi.mocked(analytics.useAnalyticsPreviousPeriodComparison).mockReturnValue({
+      data: {
+        absolute_change: "75.000000",
+        aggregation: "sum",
+        current_end: "2026-08-29T23:59:59Z",
+        current_observation_count: 1,
+        current_start: "2026-07-30T00:00:00Z",
+        current_value: "125.000000",
+        percentage_change: "1.500000",
+        previous_end: "2026-07-30T00:00:00Z",
+        previous_observation_count: 1,
+        previous_start: "2026-06-30T00:00:00Z",
+        previous_value: "50.000000",
+        status: "compared",
+      },
+      error: null,
+      isLoading: false,
+      reload: vi.fn(),
+    });
     vi.mocked(analytics.useAnalyticsObservationsByCampaign).mockReturnValue({
       data: { observations: [observation], total: 1, limit: 8, offset: 0 },
       error: null,
@@ -129,6 +150,25 @@ describe("AnalyticsReadSurface", () => {
     });
     vi.mocked(analytics.useAnalyticsObservationsByCampaignChildObject).mockReturnValue({
       data: { observations: [], total: 0, limit: 8, offset: 0 },
+      error: null,
+      isLoading: false,
+      reload: vi.fn(),
+    });
+    vi.mocked(analytics.useAnalyticsObservationsByArtist).mockReturnValue({
+      data: {
+        observations: [
+          {
+            ...observation,
+            artist_profile_id: "artist_profile_01",
+            campaign_id: "campaign_01",
+            target_id: "artist_profile_01",
+            target_type: "artist_profile",
+          },
+        ],
+        total: 1,
+        limit: 8,
+        offset: 0,
+      },
       error: null,
       isLoading: false,
       reload: vi.fn(),
@@ -147,8 +187,11 @@ describe("AnalyticsReadSurface", () => {
     expect(screen.getByRole("heading", { name: "Campaign analytics" })).toBeInTheDocument();
     expect(screen.getAllByText("Streams")).not.toHaveLength(0);
     expect(screen.getAllByText("125")).not.toHaveLength(0);
-    expect(screen.getByRole("figure", { name: "Campaign analytics trend" })).toBeInTheDocument();
-    expect(screen.getByRole("table", { name: "Recent campaign metric values" })).toBeInTheDocument();
+    expect(screen.getByRole("figure", { name: "Analytics trend" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("table", { name: "Recent analytics metric values" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Range comparison" })).toBeInTheDocument();
     expect(screen.getAllByText("Spotify")).not.toHaveLength(0);
     expect(screen.getByText("spotify-row-1")).toBeInTheDocument();
   });
@@ -178,6 +221,40 @@ describe("AnalyticsReadSurface", () => {
         campaign_object_type: "goal",
         target_id: "goal_01",
         target_type: "campaign_object",
+      }),
+    );
+  });
+
+  it("queries artist analytics with artist_profile_id scoped filters", () => {
+    render(
+      <AnalyticsReadSurface
+        artistProfileId="artist_profile_01"
+        title="Artist analytics"
+        workspaceId="workspace_01"
+      />,
+    );
+
+    expect(screen.getByRole("heading", { name: "Artist analytics" })).toBeInTheDocument();
+    expect(screen.getByText("Artist profile")).toBeInTheDocument();
+    expect(screen.getByText("Campaign attributed")).toBeInTheDocument();
+    expect(analytics.useAnalyticsObservationsByArtist).toHaveBeenCalledWith(
+      "workspace_01",
+      "artist_profile_01",
+      expect.objectContaining({ limit: 8 }),
+    );
+    expect(analytics.useAnalyticsHistoricalSeries).toHaveBeenCalledWith(
+      "workspace_01",
+      expect.objectContaining({
+        artist_profile_id: "artist_profile_01",
+        metric_definition_id: "metric_streams",
+      }),
+    );
+    expect(analytics.useAnalyticsPreviousPeriodComparison).toHaveBeenCalledWith(
+      "workspace_01",
+      expect.objectContaining({
+        artist_profile_id: "artist_profile_01",
+        current_end: expect.any(String),
+        current_start: expect.any(String),
       }),
     );
   });
