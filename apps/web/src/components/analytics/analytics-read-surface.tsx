@@ -523,27 +523,48 @@ export function AnalyticsReadSurface({
   const [dateRange, setDateRange] = useState<AnalyticsDateRange>(initialRange);
   const metrics = useAnalyticsMetricDefinitions(workspaceId);
   const metricDefinitions = metrics.data?.metric_definitions ?? [];
-  const [selectedMetricId, setSelectedMetricId] = useState("");
+  const [selectedMetricId, setSelectedMetricId] = useState("all");
+  const [selectedProviderId, setSelectedProviderId] = useState("all");
+  const providerOptions = useMemo(
+    () =>
+      Array.from(
+        new Map(metricDefinitions.map((metric) => [metric.provider.id, metric.provider])).values(),
+      ),
+    [metricDefinitions],
+  );
+  const filteredMetricDefinitions = useMemo(
+    () =>
+      selectedProviderId === "all"
+        ? metricDefinitions
+        : metricDefinitions.filter((metric) => metric.provider.id === selectedProviderId),
+    [metricDefinitions, selectedProviderId],
+  );
 
   useEffect(() => {
-    const firstMetric = metricDefinitions[0] ?? null;
-    if (!selectedMetricId && firstMetric) {
-      setSelectedMetricId(firstMetric.id);
+    if (
+      selectedMetricId !== "all" &&
+      !filteredMetricDefinitions.some((metric) => metric.id === selectedMetricId)
+    ) {
+      setSelectedMetricId("all");
     }
-  }, [metricDefinitions, selectedMetricId]);
+  }, [filteredMetricDefinitions, selectedMetricId]);
 
   const selectedMetric =
-    metricDefinitions.find((metric) => metric.id === selectedMetricId) ??
-    metricDefinitions[0] ??
-    null;
+    selectedMetricId === "all"
+      ? (filteredMetricDefinitions[0] ?? null)
+      : (filteredMetricDefinitions.find((metric) => metric.id === selectedMetricId) ?? null);
+  const selectedMetricFilter =
+    selectedMetricId === "all" ? null : (selectedMetric?.id ?? selectedMetricId);
   const selectedMetricAggregation = metricDefaultAggregation(selectedMetric);
   const observationFilters = useMemo(
     () => ({
       limit: 8,
+      metric_definition_id: selectedMetricFilter,
       observed_end: toEndIso(dateRange.observedEnd),
       observed_start: toStartIso(dateRange.observedStart),
+      provider_id: selectedProviderId === "all" ? null : selectedProviderId,
     }),
-    [dateRange.observedEnd, dateRange.observedStart],
+    [dateRange.observedEnd, dateRange.observedStart, selectedMetricFilter, selectedProviderId],
   );
   const campaignObservations = useAnalyticsObservationsByCampaign(
     workspaceId,
@@ -605,7 +626,10 @@ export function AnalyticsReadSurface({
     [dateRange, scope, selectedMetric],
   );
   const comparison = useAnalyticsPreviousPeriodComparison(workspaceId, comparisonOptions);
-  const headlineMetrics = metricDefinitions.slice(0, 3);
+  const headlineMetrics =
+    selectedMetricId === "all"
+      ? filteredMetricDefinitions.slice(0, 3)
+      : filteredMetricDefinitions.filter((metric) => metric.id === selectedMetricId).slice(0, 1);
   const campaignAttributedCount =
     scope?.kind === "artist_profile"
       ? recentObservations.filter((observation) => observation.campaign_id).length
@@ -636,6 +660,7 @@ export function AnalyticsReadSurface({
     !campaignObservations.isLoading &&
     !childObservations.isLoading &&
     !artistObservations.isLoading;
+  const noFilteredMetrics = metricDefinitions.length > 0 && filteredMetricDefinitions.length === 0;
 
   return (
     <Card className={cn("grid gap-5", className)}>
@@ -709,6 +734,47 @@ export function AnalyticsReadSurface({
 
       {metricDefinitions.length > 0 ? (
         <>
+          <div className="grid gap-3 rounded-md border border-slate-200 bg-slate-50 p-3 md:grid-cols-2">
+            <label className="grid gap-1 text-xs font-semibold uppercase tracking-normal text-slate-500">
+              Provider
+              <select
+                aria-label="Analytics provider filter"
+                className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950 shadow-sm outline-none transition-colors focus:border-slate-950 focus:ring-2 focus:ring-slate-200"
+                onChange={(event) => setSelectedProviderId(event.target.value)}
+                value={selectedProviderId}
+              >
+                <option value="all">All providers</option>
+                {providerOptions.map((provider) => (
+                  <option key={provider.id} value={provider.id}>
+                    {provider.display_name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="grid gap-1 text-xs font-semibold uppercase tracking-normal text-slate-500">
+              Metric
+              <select
+                aria-label="Analytics metric filter"
+                className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950 shadow-sm outline-none transition-colors focus:border-slate-950 focus:ring-2 focus:ring-slate-200"
+                onChange={(event) => setSelectedMetricId(event.target.value)}
+                value={selectedMetricId}
+              >
+                <option value="all">All metrics</option>
+                {filteredMetricDefinitions.map((metric) => (
+                  <option key={metric.id} value={metric.id}>
+                    {metric.display_name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          {noFilteredMetrics ? (
+            <div className="rounded-md border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
+              No metrics match the selected provider.
+            </div>
+          ) : null}
+
           <div className="grid gap-3 md:grid-cols-3">
             {headlineMetrics.map((metric) => (
               <HeadlineMetricCard
@@ -742,9 +808,9 @@ export function AnalyticsReadSurface({
                   aria-label="Trend metric"
                   className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950 shadow-sm outline-none transition-colors focus:border-slate-950 focus:ring-2 focus:ring-slate-200"
                   onChange={(event) => setSelectedMetricId(event.target.value)}
-                  value={selectedMetric?.id ?? ""}
+                  value={selectedMetric?.id ?? "all"}
                 >
-                  {metricDefinitions.map((metric) => (
+                  {filteredMetricDefinitions.map((metric) => (
                     <option key={metric.id} value={metric.id}>
                       {metric.display_name}
                     </option>
@@ -778,7 +844,7 @@ export function AnalyticsReadSurface({
 
             <div className="grid content-start gap-3">
               <h3 className="text-base font-semibold text-slate-950">Providers</h3>
-              <ProviderList metrics={metricDefinitions} />
+              <ProviderList metrics={filteredMetricDefinitions} />
               {providerObservationBreakdown.length > 0 ? (
                 <div className="grid gap-2">
                   {providerObservationBreakdown.map(([providerKey, count]) => (

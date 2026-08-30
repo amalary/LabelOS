@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 
 import { AnalyticsReadSurface } from "./analytics-read-surface";
@@ -46,6 +46,21 @@ const streamMetric = {
   updated_at: "2026-08-29T12:00:00Z",
 } as const;
 
+const appleProvider = {
+  ...provider,
+  id: "provider_02",
+  key: "apple_music",
+  display_name: "Apple Music",
+};
+
+const savesMetric = {
+  ...streamMetric,
+  id: "metric_saves",
+  key: "saves",
+  display_name: "Saves",
+  provider: appleProvider,
+} as const;
+
 const sentimentMetric = {
   ...streamMetric,
   id: "metric_sentiment",
@@ -88,7 +103,7 @@ describe("AnalyticsReadSurface", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(analytics.useAnalyticsMetricDefinitions).mockReturnValue({
-      data: { metric_definitions: [streamMetric, sentimentMetric] },
+      data: { metric_definitions: [streamMetric, sentimentMetric, savesMetric] },
       error: null,
       isLoading: false,
       reload: vi.fn(),
@@ -258,6 +273,39 @@ describe("AnalyticsReadSurface", () => {
         artist_profile_id: "artist_profile_01",
         current_end: expect.any(String),
         current_start: expect.any(String),
+      }),
+    );
+  });
+
+  it("applies provider and metric quick filters to analytics queries", () => {
+    render(
+      <AnalyticsReadSurface
+        artistProfileId="artist_profile_01"
+        title="Artist analytics"
+        workspaceId="workspace_01"
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("Analytics provider filter"), {
+      target: { value: "provider_02" },
+    });
+    fireEvent.change(screen.getByLabelText("Analytics metric filter"), {
+      target: { value: "metric_saves" },
+    });
+
+    expect(analytics.useAnalyticsObservationsByArtist).toHaveBeenLastCalledWith(
+      "workspace_01",
+      "artist_profile_01",
+      expect.objectContaining({
+        metric_definition_id: "metric_saves",
+        provider_id: "provider_02",
+      }),
+    );
+    expect(analytics.useAnalyticsHistoricalSeries).toHaveBeenLastCalledWith(
+      "workspace_01",
+      expect.objectContaining({
+        artist_profile_id: "artist_profile_01",
+        metric_definition_id: "metric_saves",
       }),
     );
   });
