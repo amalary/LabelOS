@@ -25,9 +25,7 @@ def upgrade() -> None:
         sa.Column("organization_id", sa.Uuid(), nullable=False),
         sa.Column("inviter_user_id", sa.Uuid(), nullable=True),
         sa.Column("invitee_email", sa.String(length=320), nullable=True),
-        sa.Column(
-            "professional_roles", sa.JSON(), server_default="[]", nullable=False
-        ),
+        sa.Column("professional_roles", sa.JSON(), server_default="[]", nullable=False),
         sa.Column(
             "proposed_department_access",
             sa.JSON(),

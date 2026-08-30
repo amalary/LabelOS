@@ -37,6 +37,7 @@ from labelos_api.services.analytics_operations_service import (
 from labelos_api.services.analytics_service import (
     AnalyticsAggregation,
     AnalyticsBulkIngestionError,
+    AnalyticsIdempotencyConflictError,
     AnalyticsMetricDefinitionCreate,
     AnalyticsNotFoundError,
     AnalyticsObservationCreate,
@@ -252,7 +253,7 @@ def test_analytics_service_deduplicates_by_workspace_provider_idempotency_key(
                     target_type="campaign",
                     campaign_id=campaign.id,
                     observed_at=observed_at,
-                    value_numeric=200,
+                    value_numeric=100,
                     idempotency_key="dup-key",
                 ),
             )
@@ -260,6 +261,56 @@ def test_analytics_service_deduplicates_by_workspace_provider_idempotency_key(
             return first.id == duplicate.id, duplicate.value_numeric, page.total
 
     assert asyncio.run(run()) == (True, Decimal("100.000000"), 1)
+
+
+def test_analytics_service_rejects_idempotency_key_payload_mismatch(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async def run() -> tuple[str | None, int]:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            campaign = data["campaign"]
+            assert isinstance(workspace, Organization)
+            assert isinstance(campaign, Campaign)
+            metric = await _create_streams_metric(session, workspace.id)
+            observed_at = datetime(2026, 8, 29, 12, 0, tzinfo=UTC)
+            await create_observation(
+                session,
+                workspace.id,
+                AnalyticsObservationCreate(
+                    metric_definition_id=metric.id,
+                    target_type="campaign",
+                    campaign_id=campaign.id,
+                    observed_at=observed_at,
+                    value_numeric=100,
+                    idempotency_key="mismatch-key",
+                ),
+            )
+            try:
+                await create_observation(
+                    session,
+                    workspace.id,
+                    AnalyticsObservationCreate(
+                        metric_definition_id=metric.id,
+                        target_type="campaign",
+                        campaign_id=campaign.id,
+                        observed_at=observed_at,
+                        value_numeric=200,
+                        idempotency_key="mismatch-key",
+                    ),
+                )
+            except AnalyticsIdempotencyConflictError as exc:
+                detail = str(exc)
+            else:
+                detail = None
+            page = await list_observations(session, workspace.id)
+            return detail, page.total
+
+    assert asyncio.run(run()) == (
+        "idempotency_key was already used with a different observation payload",
+        1,
+    )
 
 
 def test_analytics_service_bulk_ingests_all_valid_batch(
@@ -347,7 +398,7 @@ def test_analytics_service_bulk_reuses_existing_idempotency_keys(
                         target_type="campaign",
                         campaign_id=campaign.id,
                         observed_at=datetime(2026, 8, 29, 12, 0, tzinfo=UTC),
-                        value_numeric=999,
+                        value_numeric=100,
                         idempotency_key="bulk-existing",
                     ),
                     AnalyticsObservationCreate(

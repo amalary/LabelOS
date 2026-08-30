@@ -350,10 +350,7 @@ async def _resolve_metric_selectors(
             definition
             for (provider_key, metric_key), definition in definitions_by_key.items()
             if metric_key == selector.metric_key
-            and (
-                selector.provider_key is None
-                or provider_key == selector.provider_key
-            )
+            and (selector.provider_key is None or provider_key == selector.provider_key)
             and (
                 selector.provider_id is None
                 or definition.provider_id == selector.provider_id
@@ -394,24 +391,19 @@ async def _aggregate_target_metrics(
             selector=selector,
             date_range=date_range,
         )
-        latest = await get_latest_observation(
-            session,
-            workspace_id,
-            actor=actor,
-            query=query,
-        )
-        if latest is None:
-            continue
-        normalized_aggregation = _normalize_aggregation(
-            aggregation,
-            fallback=latest.metric_definition.aggregation,
-        )
         page = await _list_observations_for_query(
             session,
             workspace_id,
             query,
             sort_desc=True,
             limit=10_000,
+        )
+        if not page.observations:
+            continue
+        latest = page.observations[0]
+        normalized_aggregation = _normalize_aggregation(
+            aggregation,
+            fallback=latest.metric_definition.aggregation,
         )
         _require_numeric_aggregation_context(page.observations, normalized_aggregation)
         values.append(

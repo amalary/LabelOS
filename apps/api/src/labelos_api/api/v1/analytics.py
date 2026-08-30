@@ -20,6 +20,7 @@ from labelos_api.services.analytics_service import (
     AnalyticsBulkIngestionError,
     AnalyticsComparisonStatus,
     AnalyticsHistoricalSeries,
+    AnalyticsIdempotencyConflictError,
     AnalyticsMetricDefinitionCreate,
     AnalyticsNotFoundError,
     AnalyticsObservationCreate,
@@ -236,11 +237,17 @@ def _service_error(
     exc: (
         AnalyticsNotFoundError
         | AnalyticsRelationshipError
+        | AnalyticsIdempotencyConflictError
         | AnalyticsAuthorizationError
     ),
 ) -> NoReturn:
     if isinstance(exc, AnalyticsAuthorizationError):
         _raise_capability_denial(exc.reason)
+    if isinstance(exc, AnalyticsIdempotencyConflictError):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
     if isinstance(exc, AnalyticsNotFoundError):
         raise _not_found() from exc
     raise _bad_request(str(exc)) from exc
@@ -727,6 +734,7 @@ async def create_observation(
     except (
         AnalyticsNotFoundError,
         AnalyticsRelationshipError,
+        AnalyticsIdempotencyConflictError,
         AnalyticsAuthorizationError,
     ) as exc:
         _service_error(exc)
@@ -762,6 +770,7 @@ async def create_observations_bulk(
     except (
         AnalyticsNotFoundError,
         AnalyticsRelationshipError,
+        AnalyticsIdempotencyConflictError,
         AnalyticsAuthorizationError,
     ) as exc:
         _service_error(exc)

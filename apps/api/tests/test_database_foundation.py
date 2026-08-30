@@ -1625,6 +1625,7 @@ def test_analytics_objects_define_canonical_time_series_contract() -> None:
     assert "value_json" in observation_table.columns
     assert "unit" in observation_table.columns
     assert "observed_at" in observation_table.columns
+    assert "idempotency_fingerprint" in observation_table.columns
     assert "dimensions" in observation_table.columns
     assert "metadata" in observation_table.columns
     assert (

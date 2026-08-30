@@ -16,6 +16,7 @@ down_revision: str | None = "202608250100"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
+
 def _timestamps() -> tuple[sa.Column, sa.Column]:
     return (
         sa.Column(

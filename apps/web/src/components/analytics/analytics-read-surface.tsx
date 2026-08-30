@@ -601,7 +601,10 @@ export function AnalyticsReadSurface({
     scope?.kind === "artist_profile" ? scope.artistProfileId : null,
     observationFilters,
   );
-  const workspaceObservations = useAnalyticsObservations(workspaceId, observationFilters);
+  const workspaceObservations = useAnalyticsObservations(
+    scope.kind === "workspace" ? workspaceId : null,
+    scope.kind === "workspace" ? observationFilters : null,
+  );
   const recentObservations =
     scope?.kind === "artist_profile"
       ? (artistObservations.data?.observations ?? [])
@@ -827,13 +830,11 @@ export function AnalyticsReadSurface({
                 dateRange={dateRange}
                 key={metric.id}
                 metric={metric}
-                queryOptions={
-                  buildScopedQueryOptions({
-                    dateRange,
-                    metric,
-                    scope,
-                  })
-                }
+                queryOptions={buildScopedQueryOptions({
+                  dateRange,
+                  metric,
+                  scope,
+                })}
                 workspaceId={workspaceId}
               />
             ))}

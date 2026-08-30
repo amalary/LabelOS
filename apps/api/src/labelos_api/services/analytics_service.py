@@ -1,3 +1,5 @@
+import hashlib
+import json
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
@@ -34,6 +36,10 @@ class AnalyticsNotFoundError(AnalyticsServiceError):
 
 
 class AnalyticsRelationshipError(AnalyticsServiceError):
+    pass
+
+
+class AnalyticsIdempotencyConflictError(AnalyticsServiceError):
     pass
 
 
@@ -319,6 +325,40 @@ def _require_numeric_aggregation_context(
         )
 
 
+def _is_sql_numeric_aggregation(
+    metric_definition: AnalyticsMetricDefinition | None,
+    aggregation: AnalyticsAggregation,
+) -> bool:
+    return (
+        metric_definition is not None
+        and metric_definition.value_type in NUMERIC_ANALYTICS_VALUE_TYPES
+        and aggregation
+        in {
+            AnalyticsAggregation.sum,
+            AnalyticsAggregation.average,
+            AnalyticsAggregation.min,
+            AnalyticsAggregation.max,
+            AnalyticsAggregation.count,
+        }
+    )
+
+
+def _validate_sql_numeric_context(
+    *,
+    provider_count: int,
+    unit_count: int,
+    aggregation: AnalyticsAggregation,
+) -> None:
+    if provider_count > 1:
+        raise AnalyticsRelationshipError(
+            "Numeric analytics aggregation requires a single provider"
+        )
+    if aggregation != AnalyticsAggregation.count and unit_count > 1:
+        raise AnalyticsRelationshipError(
+            "Numeric analytics aggregation requires a single unit"
+        )
+
+
 def _aggregate_observations(
     observations: list[AnalyticsObservation],
     aggregation: AnalyticsAggregation,
@@ -400,6 +440,44 @@ async def _aggregate_query_observations(
     query: AnalyticsObservationQuery,
     aggregation: AnalyticsAggregation,
 ) -> _AnalyticsAggregateResult:
+    metric_definition = None
+    if query.metric_definition_id is not None:
+        metric_definition = await analytics.get_metric_definition(
+            session,
+            workspace_id,
+            query.metric_definition_id,
+        )
+    if _is_sql_numeric_aggregation(metric_definition, aggregation):
+        if query.metric_definition_id is None:
+            raise AnalyticsRelationshipError(
+                "Numeric analytics aggregation requires a single metric definition"
+            )
+        result = await analytics.aggregate_numeric_observations(
+            session,
+            workspace_id,
+            aggregation=aggregation.value,
+            metric_definition_id=query.metric_definition_id,
+            provider_id=query.provider_id,
+            target_type=query.target_type,
+            target_id=query.target_id,
+            campaign_id=query.campaign_id,
+            artist_profile_id=query.artist_profile_id,
+            campaign_object_type=query.campaign_object_type,
+            campaign_object_id=query.campaign_object_id,
+            observed_start=query.observed_start,
+            observed_end=query.observed_end,
+            observed_before=query.observed_before,
+        )
+        _validate_sql_numeric_context(
+            provider_count=result.provider_count,
+            unit_count=result.unit_count,
+            aggregation=aggregation,
+        )
+        return _AnalyticsAggregateResult(
+            value=result.value,
+            observation_count=result.total,
+            aggregation=aggregation,
+        )
     page = await _list_observations_for_query(
         session,
         workspace_id,
@@ -687,6 +765,39 @@ def _value_values(
     return values
 
 
+def _fingerprint_json_default(value: object) -> str:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return format(value.quantize(Decimal("0.000001")), "f")
+    if isinstance(value, UUID):
+        return str(value)
+    raise TypeError(f"Unsupported analytics fingerprint value: {type(value)!r}")
+
+
+def _idempotency_fingerprint(values: dict[str, object | None]) -> str:
+    encoded = json.dumps(
+        values,
+        default=_fingerprint_json_default,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _ensure_idempotency_match(
+    existing: AnalyticsObservation,
+    fingerprint: str,
+) -> None:
+    if (
+        existing.idempotency_fingerprint is not None
+        and existing.idempotency_fingerprint != fingerprint
+    ):
+        raise AnalyticsIdempotencyConflictError(
+            "idempotency_key was already used with a different observation payload"
+        )
+
+
 async def _validate_target_scope(
     session: AsyncSession,
     workspace_id: UUID,
@@ -791,6 +902,8 @@ async def list_providers(
 def _bulk_error_code(exc: AnalyticsServiceError) -> str:
     if isinstance(exc, AnalyticsNotFoundError):
         return "not_found"
+    if isinstance(exc, AnalyticsIdempotencyConflictError):
+        return "idempotency_conflict"
     if isinstance(exc, AnalyticsRelationshipError):
         return "invalid_observation"
     return "analytics_error"
@@ -809,7 +922,28 @@ async def _create_observation_result_uncommitted(
     if metric_definition is None:
         raise AnalyticsNotFoundError("Metric definition not found")
 
+    target_values = _target_values(payload)
+    if target_values["target_type"] == "workspace":
+        target_values["target_id"] = workspace_id
+    await _validate_target_scope(session, workspace_id, target_values)
+    value_values = _value_values(payload, metric_definition.value_type)
+    unit = _normalize_optional_text(payload.unit) or metric_definition.default_unit
+    source_record_id = _normalize_optional_text(payload.source_record_id)
+    dimensions = _json_object(payload.dimensions, "dimensions")
+    metadata = _json_object(payload.metadata, "metadata")
     idempotency_key = _normalize_optional_text(payload.idempotency_key)
+    fingerprint = _idempotency_fingerprint(
+        {
+            "metric_definition_id": metric_definition.id,
+            "target": target_values,
+            "values": value_values,
+            "unit": unit,
+            "observed_at": payload.observed_at,
+            "source_record_id": source_record_id,
+            "dimensions": dimensions,
+            "metadata": metadata,
+        }
+    )
     if idempotency_key is not None:
         existing = await analytics.get_observation_by_idempotency_key(
             session,
@@ -818,15 +952,12 @@ async def _create_observation_result_uncommitted(
             idempotency_key,
         )
         if existing is not None:
+            _ensure_idempotency_match(existing, fingerprint)
             return AnalyticsObservationCreateResult(
                 observation=existing,
                 created=False,
             )
 
-    target_values = _target_values(payload)
-    if target_values["target_type"] == "workspace":
-        target_values["target_id"] = workspace_id
-    await _validate_target_scope(session, workspace_id, target_values)
     observation = await analytics.create_observation(
         session,
         workspace_id,
@@ -834,14 +965,14 @@ async def _create_observation_result_uncommitted(
             "metric_definition_id": metric_definition.id,
             "provider_id": metric_definition.provider_id,
             **target_values,
-            **_value_values(payload, metric_definition.value_type),
-            "unit": _normalize_optional_text(payload.unit)
-            or metric_definition.default_unit,
+            **value_values,
+            "unit": unit,
             "observed_at": payload.observed_at,
-            "source_record_id": _normalize_optional_text(payload.source_record_id),
+            "source_record_id": source_record_id,
             "idempotency_key": idempotency_key,
-            "dimensions": _json_object(payload.dimensions, "dimensions"),
-            "metadata_json": _json_object(payload.metadata, "metadata"),
+            "idempotency_fingerprint": fingerprint if idempotency_key else None,
+            "dimensions": dimensions,
+            "metadata_json": metadata,
         },
     )
     observation.metric_definition = metric_definition
@@ -945,10 +1076,39 @@ async def ingest_observations_bulk(
             if target_values["target_type"] == "workspace":
                 target_values["target_id"] = workspace_id
             await _validate_target_scope(session, workspace_id, target_values)
-            _value_values(payload, metric_definition.value_type)
-            _json_object(payload.dimensions, "dimensions")
-            _json_object(payload.metadata, "metadata")
-        except (AnalyticsNotFoundError, AnalyticsRelationshipError) as exc:
+            value_values = _value_values(payload, metric_definition.value_type)
+            unit = (
+                _normalize_optional_text(payload.unit) or metric_definition.default_unit
+            )
+            source_record_id = _normalize_optional_text(payload.source_record_id)
+            dimensions = _json_object(payload.dimensions, "dimensions")
+            metadata = _json_object(payload.metadata, "metadata")
+            if idempotency_key is not None:
+                fingerprint = _idempotency_fingerprint(
+                    {
+                        "metric_definition_id": metric_definition.id,
+                        "target": target_values,
+                        "values": value_values,
+                        "unit": unit,
+                        "observed_at": payload.observed_at,
+                        "source_record_id": source_record_id,
+                        "dimensions": dimensions,
+                        "metadata": metadata,
+                    }
+                )
+                existing = await analytics.get_observation_by_idempotency_key(
+                    session,
+                    workspace_id,
+                    metric_definition.provider_id,
+                    idempotency_key,
+                )
+                if existing is not None:
+                    _ensure_idempotency_match(existing, fingerprint)
+        except (
+            AnalyticsNotFoundError,
+            AnalyticsRelationshipError,
+            AnalyticsIdempotencyConflictError,
+        ) as exc:
             errors.append(
                 AnalyticsBulkObservationError(
                     index=index,
@@ -1381,6 +1541,49 @@ async def get_historical_series(
         aggregation,
         fallback=metric_definition.aggregation if metric_definition else None,
     )
+    if _is_sql_numeric_aggregation(metric_definition, normalized_aggregation):
+        if normalized_query.metric_definition_id is None:
+            raise AnalyticsRelationshipError(
+                "Numeric analytics aggregation requires a single metric definition"
+            )
+        assert metric_definition is not None
+        page = await analytics.aggregate_numeric_series(
+            session,
+            workspace_id,
+            aggregation=normalized_aggregation.value,
+            metric_definition_id=normalized_query.metric_definition_id,
+            provider_id=normalized_query.provider_id,
+            target_type=normalized_query.target_type,
+            target_id=normalized_query.target_id,
+            campaign_id=normalized_query.campaign_id,
+            artist_profile_id=normalized_query.artist_profile_id,
+            campaign_object_type=normalized_query.campaign_object_type,
+            campaign_object_id=normalized_query.campaign_object_id,
+            observed_start=normalized_query.observed_start,
+            observed_end=normalized_query.observed_end,
+            observed_before=normalized_query.observed_before,
+        )
+        _validate_sql_numeric_context(
+            provider_count=page.provider_count,
+            unit_count=page.unit_count,
+            aggregation=normalized_aggregation,
+        )
+        return AnalyticsHistoricalSeries(
+            aggregation=normalized_aggregation,
+            points=tuple(
+                AnalyticsSeriesPoint(
+                    bucket_date=point.bucket_date,
+                    value=point.value,
+                    observation_count=point.observation_count,
+                )
+                for point in page.points
+            ),
+            value_type=metric_definition.value_type if page.total else None,
+            unit=page.unit,
+            provider_id=page.provider_id,
+            metric_definition_id=normalized_query.metric_definition_id,
+            observation_count=page.total,
+        )
     page = await _list_observations_for_query(
         session,
         workspace_id,

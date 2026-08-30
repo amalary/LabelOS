@@ -78,3 +78,4 @@ class AnalyticsOperationsAdapter(Protocol):
         request: AnalyticsOperationRequest,
     ) -> AnalyticsOperationResponse:
         """Run a structured analytics operation outside agent reasoning."""
+        ...

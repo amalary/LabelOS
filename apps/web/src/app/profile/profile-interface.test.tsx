@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -187,13 +187,12 @@ describe("UniversalProfileInterface", () => {
     await user.clear(screen.getByLabelText("GitHub"));
     await user.type(screen.getByLabelText("GitHub"), "github.com/mirastone");
 
-    await act(async () => {
-      await user.click(screen.getByRole("button", { name: "Save" }));
-    });
+    await user.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() =>
       expect(screen.queryByRole("button", { name: "Save" })).not.toBeInTheDocument(),
     );
+    expect(await screen.findByRole("heading", { name: "Mira S." })).toBeInTheDocument();
     const patchCall = vi.mocked(fetch).mock.calls.find(([url, init]) => {
       return url === "/api/profiles/me" && init?.method === "PATCH";
     });

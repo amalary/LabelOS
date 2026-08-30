@@ -44,13 +44,11 @@ def upgrade() -> None:
 
 def _fail_if_unlinked_artist_profiles_exist() -> None:
     connection = op.get_bind()
-    unlinked_count = connection.execute(
-        sa.text("""
+    unlinked_count = connection.execute(sa.text("""
             SELECT count(*) AS count
             FROM artist_profiles
             WHERE universal_profile_id IS NULL
-            """)
-    ).scalar_one()
+            """)).scalar_one()
     if unlinked_count:
         raise RuntimeError(
             "Cannot make artist_profiles.universal_profile_id non-null while "
@@ -62,8 +60,7 @@ def _fail_if_unlinked_artist_profiles_exist() -> None:
 
 def _copy_artist_profile_biographies_to_universal_profiles() -> None:
     connection = op.get_bind()
-    connection.execute(
-        sa.text("""
+    connection.execute(sa.text("""
             UPDATE universal_profiles
             SET biography = (
                 SELECT artist_profiles.biography
@@ -85,8 +82,7 @@ def _copy_artist_profile_biographies_to_universal_profiles() -> None:
                   AND artist_profiles.biography IS NOT NULL
                   AND trim(artist_profiles.biography) != ''
               )
-            """)
-    )
+            """))
 
 
 def downgrade() -> None:

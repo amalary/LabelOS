@@ -1,7 +1,14 @@
 {
-  "extraPaths": [
-    "apps/api/src",
-    "apps/agents/src",
-    "packages/database/src"
-  ]
+  "exclude": ["**/tests", "**/.venv", "**/node_modules"],
+  "extraPaths": ["apps/api/src", "apps/agents/src", "packages/database/src"],
+  "include": [
+    "apps/api/src/labelos_api/api/v1/analytics.py",
+    "apps/api/src/labelos_api/repositories/analytics.py",
+    "apps/api/src/labelos_api/services/analytics_operations_service.py",
+    "apps/api/src/labelos_api/services/analytics_service.py",
+    "apps/agents/src/labelos_agents/tools/analytics.py",
+    "packages/database/src/labelos_database/models.py"
+  ],
+  "reportMissingTypeStubs": false,
+  "typeCheckingMode": "basic"
 }

@@ -470,7 +470,7 @@ def test_analytics_observation_idempotent_reuse_does_not_publish_realtime_event(
     )
 
     first = client.post(base, json=payload)
-    duplicate = client.post(base, json={**payload, "value_numeric": 999})
+    duplicate = client.post(base, json=payload)
 
     assert first.status_code == 201
     assert duplicate.status_code == 200
@@ -759,14 +759,44 @@ def test_analytics_observation_route_deduplicates_by_idempotency_key(
     )
 
     first = client.post(base, json=payload)
-    duplicate_payload = {**payload, "value_numeric": 200}
-    duplicate = client.post(base, json=duplicate_payload)
+    duplicate = client.post(base, json=payload)
     listed = client.get(base)
 
     assert first.status_code == 201
     assert duplicate.status_code == 200
     assert duplicate.json()["id"] == first.json()["id"]
     assert duplicate.json()["value_numeric"] == "100.000000"
+    assert listed.json()["total"] == 1
+
+
+def test_analytics_observation_route_rejects_idempotency_payload_mismatch(
+    analytics_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededAnalyticsApi,
+    ],
+) -> None:
+    client, _sessionmaker, seeded = analytics_client
+    _set_context(client, seeded)
+    metric = _create_metric(client, seeded.workspace_id)
+    base = f"/api/v1/workspaces/{seeded.workspace_id}/analytics/observations"
+    payload = _observation_payload(
+        metric["id"],
+        campaign_id=seeded.campaign_id,
+        idempotency_key="route-mismatch-key",
+    )
+
+    first = client.post(base, json=payload)
+    mismatch = client.post(base, json={**payload, "value_numeric": 200})
+    listed = client.get(base)
+
+    assert first.status_code == 201
+    assert mismatch.status_code == 409
+    assert mismatch.json() == {
+        "detail": (
+            "idempotency_key was already used with a different observation payload"
+        )
+    }
     assert listed.json()["total"] == 1
 
 
@@ -863,7 +893,7 @@ def test_analytics_observations_bulk_route_reuses_existing_idempotency_rows(
     first = client.post(base, json=payload)
     reused = client.post(
         f"{base}/bulk",
-        json={"observations": [{**payload, "value_numeric": 999}]},
+        json={"observations": [payload]},
     )
     listed = client.get(base)
 
@@ -880,6 +910,47 @@ def test_analytics_observations_bulk_route_reuses_existing_idempotency_rows(
     assert [event.event_type for event in events] == [
         RealtimeEventType.analytics_observation_created.value
     ]
+
+
+def test_analytics_observations_bulk_route_rejects_idempotency_payload_mismatch(
+    analytics_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededAnalyticsApi,
+    ],
+) -> None:
+    client, _sessionmaker, seeded = analytics_client
+    _set_context(client, seeded)
+    metric = _create_metric(client, seeded.workspace_id)
+    base = f"/api/v1/workspaces/{seeded.workspace_id}/analytics/observations"
+    payload = _observation_payload(
+        metric["id"],
+        campaign_id=seeded.campaign_id,
+        value_numeric=100,
+        idempotency_key="route-bulk-mismatch",
+    )
+
+    first = client.post(base, json=payload)
+    mismatch = client.post(
+        f"{base}/bulk",
+        json={"observations": [{**payload, "value_numeric": 999}]},
+    )
+    listed = client.get(base)
+
+    assert first.status_code == 201
+    assert mismatch.status_code == 400
+    assert mismatch.json()["detail"]["transaction"] == "all_or_nothing"
+    assert mismatch.json()["detail"]["errors"] == [
+        {
+            "index": 0,
+            "code": "idempotency_conflict",
+            "detail": (
+                "idempotency_key was already used "
+                "with a different observation payload"
+            ),
+        }
+    ]
+    assert listed.json()["total"] == 1
 
 
 def test_analytics_observations_bulk_route_returns_structured_errors_without_writes(

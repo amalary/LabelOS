@@ -1,6 +1,7 @@
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
+from decimal import Decimal
 from uuid import UUID
 
 from labelos_database.models import (
@@ -13,7 +14,7 @@ from labelos_database.models import (
     CampaignGoal,
     CampaignMilestone,
 )
-from sqlalchemy import func, select
+from sqlalchemy import Select, distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -32,6 +33,112 @@ class AnalyticsObservationListPage:
     total: int
     limit: int
     offset: int
+
+
+@dataclass(frozen=True, kw_only=True)
+class AnalyticsNumericSeriesPoint:
+    bucket_date: date
+    value: Decimal | None
+    observation_count: int
+
+
+@dataclass(frozen=True, kw_only=True)
+class AnalyticsNumericSeriesPage:
+    points: list[AnalyticsNumericSeriesPoint]
+    total: int
+    unit: str | None
+    provider_id: UUID | None
+    unit_count: int
+    provider_count: int
+
+
+@dataclass(frozen=True, kw_only=True)
+class AnalyticsNumericAggregate:
+    value: Decimal | None
+    total: int
+    unit: str | None
+    provider_id: UUID | None
+    unit_count: int
+    provider_count: int
+
+
+def _filtered_observations_statement(
+    workspace_id: UUID,
+    *,
+    metric_definition_id: UUID | None = None,
+    provider_id: UUID | None = None,
+    target_type: str | None = None,
+    target_id: UUID | None = None,
+    campaign_id: UUID | None = None,
+    artist_profile_id: UUID | None = None,
+    campaign_object_type: str | None = None,
+    campaign_object_id: UUID | None = None,
+    observed_start: datetime | None = None,
+    observed_end: datetime | None = None,
+    observed_before: datetime | None = None,
+) -> Select:
+    statement = select(AnalyticsObservation).where(
+        AnalyticsObservation.organization_id == workspace_id
+    )
+    if metric_definition_id is not None:
+        statement = statement.where(
+            AnalyticsObservation.metric_definition_id == metric_definition_id
+        )
+    if provider_id is not None:
+        statement = statement.where(AnalyticsObservation.provider_id == provider_id)
+    if target_type is not None:
+        statement = statement.where(AnalyticsObservation.target_type == target_type)
+    if target_id is not None:
+        statement = statement.where(AnalyticsObservation.target_id == target_id)
+    if campaign_id is not None:
+        statement = statement.where(AnalyticsObservation.campaign_id == campaign_id)
+    if artist_profile_id is not None:
+        statement = statement.where(
+            AnalyticsObservation.artist_profile_id == artist_profile_id
+        )
+    if campaign_object_type is not None:
+        statement = statement.where(
+            AnalyticsObservation.campaign_object_type == campaign_object_type
+        )
+    if campaign_object_id is not None:
+        statement = statement.where(
+            AnalyticsObservation.campaign_object_id == campaign_object_id
+        )
+    if observed_start is not None:
+        statement = statement.where(AnalyticsObservation.observed_at >= observed_start)
+    if observed_end is not None:
+        statement = statement.where(AnalyticsObservation.observed_at <= observed_end)
+    if observed_before is not None:
+        statement = statement.where(AnalyticsObservation.observed_at < observed_before)
+    return statement
+
+
+def _numeric_aggregate_expression(aggregation: str, value_column, id_column):
+    if aggregation == "sum":
+        return func.sum(value_column)
+    if aggregation == "average":
+        return func.avg(value_column)
+    if aggregation == "min":
+        return func.min(value_column)
+    if aggregation == "max":
+        return func.max(value_column)
+    if aggregation == "count":
+        return func.count(id_column)
+    raise ValueError("Unsupported numeric aggregation")
+
+
+def _date_from_bucket(value: object) -> date:
+    if isinstance(value, date):
+        return value
+    return date.fromisoformat(str(value))
+
+
+def _decimal_or_none(value: object) -> Decimal | None:
+    if value is None:
+        return None
+    if isinstance(value, Decimal):
+        return value
+    return Decimal(str(value))
 
 
 async def get_provider_by_key(
@@ -183,40 +290,20 @@ async def list_observations(
     offset: int,
     sort_desc: bool = True,
 ) -> AnalyticsObservationListPage:
-    statement = select(AnalyticsObservation).where(
-        AnalyticsObservation.organization_id == workspace_id
+    statement = _filtered_observations_statement(
+        workspace_id,
+        metric_definition_id=metric_definition_id,
+        provider_id=provider_id,
+        target_type=target_type,
+        target_id=target_id,
+        campaign_id=campaign_id,
+        artist_profile_id=artist_profile_id,
+        campaign_object_type=campaign_object_type,
+        campaign_object_id=campaign_object_id,
+        observed_start=observed_start,
+        observed_end=observed_end,
+        observed_before=observed_before,
     )
-    if metric_definition_id is not None:
-        statement = statement.where(
-            AnalyticsObservation.metric_definition_id == metric_definition_id
-        )
-    if provider_id is not None:
-        statement = statement.where(AnalyticsObservation.provider_id == provider_id)
-    if target_type is not None:
-        statement = statement.where(AnalyticsObservation.target_type == target_type)
-    if target_id is not None:
-        statement = statement.where(AnalyticsObservation.target_id == target_id)
-    if campaign_id is not None:
-        statement = statement.where(AnalyticsObservation.campaign_id == campaign_id)
-    if artist_profile_id is not None:
-        statement = statement.where(
-            AnalyticsObservation.artist_profile_id == artist_profile_id
-        )
-    if campaign_object_type is not None:
-        statement = statement.where(
-            AnalyticsObservation.campaign_object_type == campaign_object_type
-        )
-    if campaign_object_id is not None:
-        statement = statement.where(
-            AnalyticsObservation.campaign_object_id == campaign_object_id
-        )
-    if observed_start is not None:
-        statement = statement.where(AnalyticsObservation.observed_at >= observed_start)
-    if observed_end is not None:
-        statement = statement.where(AnalyticsObservation.observed_at <= observed_end)
-    if observed_before is not None:
-        statement = statement.where(AnalyticsObservation.observed_at < observed_before)
-
     total = await session.scalar(select(func.count()).select_from(statement.subquery()))
     ordering = (
         (
@@ -279,6 +366,143 @@ async def get_latest_observation(
         offset=0,
     )
     return page.observations[0] if page.observations else None
+
+
+async def aggregate_numeric_observations(
+    session: AsyncSession,
+    workspace_id: UUID,
+    *,
+    aggregation: str,
+    metric_definition_id: UUID,
+    provider_id: UUID | None = None,
+    target_type: str | None = None,
+    target_id: UUID | None = None,
+    campaign_id: UUID | None = None,
+    artist_profile_id: UUID | None = None,
+    campaign_object_type: str | None = None,
+    campaign_object_id: UUID | None = None,
+    observed_start: datetime | None = None,
+    observed_end: datetime | None = None,
+    observed_before: datetime | None = None,
+) -> AnalyticsNumericAggregate:
+    base = _filtered_observations_statement(
+        workspace_id,
+        metric_definition_id=metric_definition_id,
+        provider_id=provider_id,
+        target_type=target_type,
+        target_id=target_id,
+        campaign_id=campaign_id,
+        artist_profile_id=artist_profile_id,
+        campaign_object_type=campaign_object_type,
+        campaign_object_id=campaign_object_id,
+        observed_start=observed_start,
+        observed_end=observed_end,
+        observed_before=observed_before,
+    ).subquery()
+    row = (
+        await session.execute(
+            select(
+                _numeric_aggregate_expression(
+                    aggregation,
+                    base.c.value_numeric,
+                    base.c.id,
+                ),
+                func.count(base.c.id),
+            ).select_from(base)
+        )
+    ).one()
+    providers = list(
+        (
+            await session.scalars(
+                select(distinct(base.c.provider_id)).select_from(base)
+            )
+        ).all()
+    )
+    units = list(
+        (await session.scalars(select(distinct(base.c.unit)).select_from(base))).all()
+    )
+    return AnalyticsNumericAggregate(
+        value=_decimal_or_none(row[0]),
+        total=row[1] or 0,
+        provider_id=providers[0] if len(providers) == 1 else None,
+        unit=units[0] if len(units) == 1 else None,
+        provider_count=len(providers),
+        unit_count=len(units),
+    )
+
+
+async def aggregate_numeric_series(
+    session: AsyncSession,
+    workspace_id: UUID,
+    *,
+    aggregation: str,
+    metric_definition_id: UUID,
+    provider_id: UUID | None = None,
+    target_type: str | None = None,
+    target_id: UUID | None = None,
+    campaign_id: UUID | None = None,
+    artist_profile_id: UUID | None = None,
+    campaign_object_type: str | None = None,
+    campaign_object_id: UUID | None = None,
+    observed_start: datetime | None = None,
+    observed_end: datetime | None = None,
+    observed_before: datetime | None = None,
+) -> AnalyticsNumericSeriesPage:
+    base = _filtered_observations_statement(
+        workspace_id,
+        metric_definition_id=metric_definition_id,
+        provider_id=provider_id,
+        target_type=target_type,
+        target_id=target_id,
+        campaign_id=campaign_id,
+        artist_profile_id=artist_profile_id,
+        campaign_object_type=campaign_object_type,
+        campaign_object_id=campaign_object_id,
+        observed_start=observed_start,
+        observed_end=observed_end,
+        observed_before=observed_before,
+    ).subquery()
+    bucket = func.date(base.c.observed_at)
+    rows = await session.execute(
+        select(
+            bucket,
+            _numeric_aggregate_expression(
+                aggregation,
+                base.c.value_numeric,
+                base.c.id,
+            ),
+            func.count(base.c.id),
+        )
+        .select_from(base)
+        .group_by(bucket)
+        .order_by(bucket.asc())
+    )
+    providers = list(
+        (
+            await session.scalars(
+                select(distinct(base.c.provider_id)).select_from(base)
+            )
+        ).all()
+    )
+    units = list(
+        (await session.scalars(select(distinct(base.c.unit)).select_from(base))).all()
+    )
+    points = [
+        AnalyticsNumericSeriesPoint(
+            bucket_date=_date_from_bucket(row[0]),
+            value=_decimal_or_none(row[1]),
+            observation_count=row[2] or 0,
+        )
+        for row in rows.all()
+    ]
+    return AnalyticsNumericSeriesPage(
+        points=points,
+        total=sum(point.observation_count for point in points),
+        provider_id=providers[0] if len(providers) == 1 else None,
+        unit=units[0] if len(units) == 1 else None,
+        provider_count=len(providers),
+        unit_count=len(units),
+    )
 
 
 async def artist_profile_in_workspace(

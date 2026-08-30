@@ -18,7 +18,9 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.execute("ALTER TYPE organization_membership_role ADD VALUE IF NOT EXISTS 'viewer'")
+    op.execute(
+        "ALTER TYPE organization_membership_role ADD VALUE IF NOT EXISTS 'viewer'"
+    )
     op.create_table(
         "auth_identities",
         sa.Column("id", sa.Uuid(), nullable=False),

@@ -218,6 +218,7 @@ describe("AnalyticsReadSurface", () => {
     expect(screen.getByRole("heading", { name: "Range comparison" })).toBeInTheDocument();
     expect(screen.getAllByText("Spotify")).not.toHaveLength(0);
     expect(screen.getByText("spotify-row-1")).toBeInTheDocument();
+    expect(analytics.useAnalyticsObservations).toHaveBeenCalledWith(null, null);
   });
 
   it("queries selected goal analytics with campaign object fields", () => {

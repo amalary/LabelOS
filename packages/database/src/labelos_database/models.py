@@ -2141,6 +2141,7 @@ class AnalyticsObservation(Base, TimestampMixin, OrganizationOwnedMixin):
     )
     source_record_id: Mapped[str | None] = mapped_column(String(255))
     idempotency_key: Mapped[str | None] = mapped_column(String(255))
+    idempotency_fingerprint: Mapped[str | None] = mapped_column(String(64))
     dimensions: Mapped[dict] = mapped_column(
         JSON,
         nullable=False,
