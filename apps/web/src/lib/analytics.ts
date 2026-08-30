@@ -34,6 +34,9 @@ export type AnalyticsProvider = {
   updated_at: string;
 };
 
+export type AnalyticsTargetType = "workspace" | "artist_profile" | "campaign" | "campaign_object";
+export type AnalyticsCampaignObjectType = "goal" | "milestone" | (string & {});
+
 export type AnalyticsMetricDefinition = {
   id: string;
   workspace_id: string;
@@ -118,21 +121,31 @@ export type AnalyticsPreviousPeriodComparison = {
   status: AnalyticsComparisonStatus;
 };
 
+export type AnalyticsSummaryResult = AnalyticsHistoricalSeries;
+
 export type AnalyticsQueryOptions = {
+  metric?: string | null;
+  provider?: string | null;
+  artist?: string | null;
+  campaign?: string | null;
   metric_definition_id?: string | null;
   provider_id?: string | null;
-  target_type?: string | null;
+  target_type?: AnalyticsTargetType | string | null;
   target_id?: string | null;
   campaign_id?: string | null;
   artist_profile_id?: string | null;
   campaign_object_type?: string | null;
   campaign_object_id?: string | null;
+  start_date?: string | null;
+  end_date?: string | null;
   observed_start?: string | null;
   observed_end?: string | null;
   aggregation?: AnalyticsAggregation | null;
   limit?: number;
   offset?: number;
 };
+
+export type AnalyticsObservationFilters = Omit<AnalyticsQueryOptions, "aggregation">;
 
 export type AnalyticsMetricDefinitionCreate = {
   key: string;
@@ -183,6 +196,14 @@ export type AnalyticsResourceState<T> = {
   reload: () => Promise<T>;
 };
 
+export type AnalyticsMutationState<TData, TVariables> = {
+  data: TData | null;
+  error: AnalyticsApiError | null;
+  isMutating: boolean;
+  mutate: (variables: TVariables) => Promise<TData>;
+  reset: () => void;
+};
+
 type CacheEntry<T> = {
   data: T | null;
   error: AnalyticsApiError | null;
@@ -194,17 +215,22 @@ type CacheEntry<T> = {
 };
 
 const cache = new Map<string, CacheEntry<unknown>>();
+const mutationListeners = new Set<() => void>();
+let mutationVersion = 0;
+let activeMutationCount = 0;
 
 export const analyticsQueryKeys = {
   metricDefinitions: (workspaceId: string) => `analytics:metrics:${workspaceId}`,
   observations: (workspaceId: string, options?: AnalyticsQueryOptions) =>
-    `analytics:observations:${workspaceId}:${stableQueryKey(options)}`,
+    `analytics:observations:${workspaceId}:${stableQueryKey(normalizeAnalyticsQueryOptions(options))}`,
   latest: (workspaceId: string, options?: AnalyticsQueryOptions) =>
-    `analytics:latest:${workspaceId}:${stableQueryKey(options)}`,
+    `analytics:latest:${workspaceId}:${stableQueryKey(normalizeAnalyticsQueryOptions(options))}`,
   series: (workspaceId: string, options?: AnalyticsQueryOptions) =>
-    `analytics:series:${workspaceId}:${stableQueryKey(options)}`,
+    `analytics:series:${workspaceId}:${stableQueryKey(normalizeAnalyticsQueryOptions(options))}`,
+  summary: (workspaceId: string, options?: AnalyticsQueryOptions) =>
+    `analytics:summary:${workspaceId}:${stableQueryKey(normalizeAnalyticsQueryOptions(options))}`,
   comparison: (workspaceId: string, options: AnalyticsComparisonOptions) =>
-    `analytics:comparison:${workspaceId}:${stableQueryKey(options)}`,
+    `analytics:comparison:${workspaceId}:${stableQueryKey(normalizeAnalyticsQueryOptions(options))}`,
 };
 
 function entryFor<T>(key: string): CacheEntry<T> {
@@ -231,6 +257,13 @@ function emit(entry: CacheEntry<unknown>) {
   }
 }
 
+function emitMutationChange() {
+  mutationVersion += 1;
+  for (const listener of mutationListeners) {
+    listener();
+  }
+}
+
 function stableQueryKey(options?: Record<string, unknown> | null): string {
   if (!options) {
     return "default";
@@ -242,9 +275,45 @@ function stableQueryKey(options?: Record<string, unknown> | null): string {
     .join("|");
 }
 
+function normalizeAnalyticsQueryOptions(
+  options?: AnalyticsQueryOptions | AnalyticsComparisonOptions,
+): Record<string, string | number | boolean | null | undefined> {
+  if (!options) {
+    return {};
+  }
+  const normalized: Record<string, string | number | boolean | null | undefined> = {
+    ...options,
+  };
+  if (normalized.metric_definition_id === undefined && options.metric !== undefined) {
+    normalized.metric_definition_id = options.metric;
+  }
+  if (normalized.provider_id === undefined && options.provider !== undefined) {
+    normalized.provider_id = options.provider;
+  }
+  if (normalized.artist_profile_id === undefined && options.artist !== undefined) {
+    normalized.artist_profile_id = options.artist;
+  }
+  if (normalized.campaign_id === undefined && options.campaign !== undefined) {
+    normalized.campaign_id = options.campaign;
+  }
+  if (normalized.observed_start === undefined && options.start_date !== undefined) {
+    normalized.observed_start = options.start_date;
+  }
+  if (normalized.observed_end === undefined && options.end_date !== undefined) {
+    normalized.observed_end = options.end_date;
+  }
+  delete normalized.metric;
+  delete normalized.provider;
+  delete normalized.artist;
+  delete normalized.campaign;
+  delete normalized.start_date;
+  delete normalized.end_date;
+  return normalized;
+}
+
 function analyticsQuery(options?: AnalyticsQueryOptions | AnalyticsComparisonOptions): string {
   const params = new URLSearchParams();
-  for (const [key, value] of Object.entries(options ?? {})) {
+  for (const [key, value] of Object.entries(normalizeAnalyticsQueryOptions(options))) {
     if (value === undefined || value === null || value === "") {
       continue;
     }
@@ -266,6 +335,9 @@ function toAnalyticsApiError(status: number): AnalyticsApiError {
   }
   if (status === 409) {
     return new AnalyticsApiError("conflict", "Analytics data could not be changed.", status);
+  }
+  if (status === 400 || status === 422) {
+    return new AnalyticsApiError("conflict", "Analytics query parameters are invalid.", status);
   }
   return new AnalyticsApiError("network_failure", "Analytics data could not be loaded.", status);
 }
@@ -395,17 +467,36 @@ function useAnalyticsResource<T>(
   };
 }
 
-export function clearAnalyticsCache() {
-  cache.clear();
+export function invalidateAnalyticsCache(predicate?: (key: string) => boolean) {
+  for (const [key, entry] of cache.entries()) {
+    if (predicate && !predicate(key)) {
+      continue;
+    }
+    entry.data = null;
+    entry.error = null;
+    if (entry.fetcher) {
+      void loadResource(key, entry.fetcher).catch(() => undefined);
+    } else {
+      emit(entry);
+    }
+  }
 }
 
-export function getAnalyticsMetricDefinitions(
+export function clearAnalyticsCache() {
+  cache.clear();
+  activeMutationCount = 0;
+  mutationVersion = 0;
+}
+
+export function listAnalyticsMetricDefinitions(
   workspaceId: string,
 ): Promise<AnalyticsMetricDefinitionsList> {
   return analyticsJson<AnalyticsMetricDefinitionsList>(
     `/api/workspaces/${workspaceId}/analytics/metric-definitions`,
   );
 }
+
+export const getAnalyticsMetricDefinitions = listAnalyticsMetricDefinitions;
 
 export function createAnalyticsMetricDefinition(
   workspaceId: string,
@@ -420,7 +511,7 @@ export function createAnalyticsMetricDefinition(
   );
 }
 
-export function getAnalyticsObservations(
+export function listAnalyticsObservations(
   workspaceId: string,
   options?: AnalyticsQueryOptions,
 ): Promise<AnalyticsObservationsList> {
@@ -428,6 +519,8 @@ export function getAnalyticsObservations(
     `/api/workspaces/${workspaceId}/analytics/observations${analyticsQuery(options)}`,
   );
 }
+
+export const getAnalyticsObservations = listAnalyticsObservations;
 
 export function createAnalyticsObservation(
   workspaceId: string,
@@ -442,7 +535,7 @@ export function createAnalyticsObservation(
   );
 }
 
-export function getLatestAnalyticsObservation(
+export function queryLatestAnalyticsObservation(
   workspaceId: string,
   options?: AnalyticsQueryOptions,
 ): Promise<AnalyticsObservation | null> {
@@ -451,7 +544,9 @@ export function getLatestAnalyticsObservation(
   );
 }
 
-export function getAnalyticsHistoricalSeries(
+export const getLatestAnalyticsObservation = queryLatestAnalyticsObservation;
+
+export function queryMetricHistory(
   workspaceId: string,
   options?: AnalyticsQueryOptions,
 ): Promise<AnalyticsHistoricalSeries> {
@@ -460,13 +555,74 @@ export function getAnalyticsHistoricalSeries(
   );
 }
 
-export function getAnalyticsPreviousPeriodComparison(
+export const getAnalyticsHistoricalSeries = queryMetricHistory;
+
+export function queryAnalyticsSummary(
+  workspaceId: string,
+  options?: AnalyticsQueryOptions,
+): Promise<AnalyticsSummaryResult> {
+  return analyticsJson<AnalyticsSummaryResult>(
+    `/api/workspaces/${workspaceId}/analytics/summary${analyticsQuery(options)}`,
+  );
+}
+
+export function queryAnalyticsPreviousPeriodComparison(
   workspaceId: string,
   options: AnalyticsComparisonOptions,
 ): Promise<AnalyticsPreviousPeriodComparison> {
   return analyticsJson<AnalyticsPreviousPeriodComparison>(
     `/api/workspaces/${workspaceId}/analytics/comparison${analyticsQuery(options)}`,
   );
+}
+
+export const getAnalyticsPreviousPeriodComparison = queryAnalyticsPreviousPeriodComparison;
+
+export function queryObservationsByArtist(
+  workspaceId: string,
+  artistProfileId: string,
+  options?: AnalyticsObservationFilters,
+): Promise<AnalyticsObservationsList> {
+  return listAnalyticsObservations(workspaceId, {
+    ...options,
+    artist_profile_id: artistProfileId,
+    target_id: artistProfileId,
+    target_type: "artist_profile",
+  });
+}
+
+export function queryObservationsByCampaign(
+  workspaceId: string,
+  campaignId: string,
+  options?: AnalyticsObservationFilters & { include_child_objects?: boolean },
+): Promise<AnalyticsObservationsList> {
+  const { include_child_objects = true, ...filters } = options ?? {};
+  return listAnalyticsObservations(workspaceId, {
+    ...filters,
+    campaign_id: campaignId,
+    ...(include_child_objects
+      ? {}
+      : {
+          target_id: campaignId,
+          target_type: "campaign",
+        }),
+  });
+}
+
+export function queryObservationsByCampaignChildObject(
+  workspaceId: string,
+  campaignId: string,
+  campaignObjectType: AnalyticsCampaignObjectType,
+  campaignObjectId: string,
+  options?: AnalyticsObservationFilters,
+): Promise<AnalyticsObservationsList> {
+  return listAnalyticsObservations(workspaceId, {
+    ...options,
+    campaign_id: campaignId,
+    campaign_object_id: campaignObjectId,
+    campaign_object_type: campaignObjectType,
+    target_id: campaignObjectId,
+    target_type: "campaign_object",
+  });
 }
 
 export function useAnalyticsMetricDefinitions(
@@ -480,6 +636,118 @@ export function useAnalyticsMetricDefinitions(
   return useAnalyticsResource(key, workspaceId ? fetcher : null);
 }
 
+export function useAnalyticsObservations(
+  workspaceId: string | null,
+  options: AnalyticsQueryOptions | null,
+): AnalyticsResourceState<AnalyticsObservationsList> {
+  const key = workspaceId && options ? analyticsQueryKeys.observations(workspaceId, options) : null;
+  const fetcher = useCallback(
+    () => listAnalyticsObservations(workspaceId ?? "", options as AnalyticsQueryOptions),
+    [options, workspaceId],
+  );
+  return useAnalyticsResource(key, workspaceId && options ? fetcher : null);
+}
+
+export function useAnalyticsObservationsByArtist(
+  workspaceId: string | null,
+  artistProfileId: string | null,
+  options?: AnalyticsObservationFilters,
+): AnalyticsResourceState<AnalyticsObservationsList> {
+  const queryOptions =
+    artistProfileId === null
+      ? null
+      : {
+          ...options,
+          artist_profile_id: artistProfileId,
+          target_id: artistProfileId,
+          target_type: "artist_profile",
+        };
+  const key =
+    workspaceId && queryOptions ? analyticsQueryKeys.observations(workspaceId, queryOptions) : null;
+  const fetcher = useCallback(
+    () => queryObservationsByArtist(workspaceId ?? "", artistProfileId ?? "", options),
+    [artistProfileId, options, workspaceId],
+  );
+  return useAnalyticsResource(key, workspaceId && artistProfileId ? fetcher : null);
+}
+
+export function useAnalyticsObservationsByCampaign(
+  workspaceId: string | null,
+  campaignId: string | null,
+  options?: AnalyticsObservationFilters & { include_child_objects?: boolean },
+): AnalyticsResourceState<AnalyticsObservationsList> {
+  const includeChildObjects = options?.include_child_objects ?? true;
+  const queryOptions =
+    campaignId === null
+      ? null
+      : {
+          ...options,
+          campaign_id: campaignId,
+          ...(includeChildObjects
+            ? {}
+            : {
+                target_id: campaignId,
+                target_type: "campaign",
+              }),
+        };
+  const key =
+    workspaceId && queryOptions ? analyticsQueryKeys.observations(workspaceId, queryOptions) : null;
+  const fetcher = useCallback(
+    () => queryObservationsByCampaign(workspaceId ?? "", campaignId ?? "", options),
+    [campaignId, options, workspaceId],
+  );
+  return useAnalyticsResource(key, workspaceId && campaignId ? fetcher : null);
+}
+
+export function useAnalyticsObservationsByCampaignChildObject(
+  workspaceId: string | null,
+  campaignId: string | null,
+  campaignObjectType: AnalyticsCampaignObjectType | null,
+  campaignObjectId: string | null,
+  options?: AnalyticsObservationFilters,
+): AnalyticsResourceState<AnalyticsObservationsList> {
+  const queryOptions =
+    campaignId && campaignObjectType && campaignObjectId
+      ? {
+          ...options,
+          campaign_id: campaignId,
+          campaign_object_id: campaignObjectId,
+          campaign_object_type: campaignObjectType,
+          target_id: campaignObjectId,
+          target_type: "campaign_object",
+        }
+      : null;
+  const key =
+    workspaceId && queryOptions ? analyticsQueryKeys.observations(workspaceId, queryOptions) : null;
+  const fetcher = useCallback(
+    () =>
+      queryObservationsByCampaignChildObject(
+        workspaceId ?? "",
+        campaignId ?? "",
+        campaignObjectType ?? "",
+        campaignObjectId ?? "",
+        options,
+      ),
+    [campaignId, campaignObjectId, campaignObjectType, options, workspaceId],
+  );
+  return useAnalyticsResource(
+    key,
+    workspaceId && campaignId && campaignObjectType && campaignObjectId ? fetcher : null,
+  );
+}
+
+export function useLatestAnalyticsObservation(
+  workspaceId: string | null,
+  options: AnalyticsQueryOptions | null,
+): AnalyticsResourceState<AnalyticsObservation | null> {
+  const key = workspaceId && options ? analyticsQueryKeys.latest(workspaceId, options) : null;
+  const fetcher = useCallback(
+    () => queryLatestAnalyticsObservation(workspaceId ?? "", options as AnalyticsQueryOptions),
+    [options, workspaceId],
+  );
+  return useAnalyticsResource(key, workspaceId && options ? fetcher : null);
+}
+
 export function useAnalyticsHistoricalSeries(
   workspaceId: string | null,
   options: AnalyticsQueryOptions | null,
@@ -487,6 +755,18 @@ export function useAnalyticsHistoricalSeries(
   const key = workspaceId && options ? analyticsQueryKeys.series(workspaceId, options) : null;
   const fetcher = useCallback(
     () => getAnalyticsHistoricalSeries(workspaceId ?? "", options as AnalyticsQueryOptions),
+    [options, workspaceId],
+  );
+  return useAnalyticsResource(key, workspaceId && options ? fetcher : null);
+}
+
+export function useAnalyticsSummary(
+  workspaceId: string | null,
+  options: AnalyticsQueryOptions | null,
+): AnalyticsResourceState<AnalyticsSummaryResult> {
+  const key = workspaceId && options ? analyticsQueryKeys.summary(workspaceId, options) : null;
+  const fetcher = useCallback(
+    () => queryAnalyticsSummary(workspaceId ?? "", options as AnalyticsQueryOptions),
     [options, workspaceId],
   );
   return useAnalyticsResource(key, workspaceId && options ? fetcher : null);
@@ -506,4 +786,130 @@ export function useAnalyticsPreviousPeriodComparison(
     [options, workspaceId],
   );
   return useAnalyticsResource(key, workspaceId && options ? fetcher : null);
+}
+
+export function useCreateAnalyticsMetricDefinition(
+  workspaceId: string | null,
+): AnalyticsMutationState<AnalyticsMetricDefinition, AnalyticsMetricDefinitionCreate> {
+  const getVersion = useCallback(() => mutationVersion, []);
+  const subscribe = useCallback((listener: () => void) => {
+    mutationListeners.add(listener);
+    return () => {
+      mutationListeners.delete(listener);
+    };
+  }, []);
+  useSyncExternalStore(subscribe, getVersion, getVersion);
+
+  const entry = entryFor<AnalyticsMetricDefinition>(
+    `analytics:mutation:create-metric:${workspaceId ?? "none"}`,
+  );
+  const mutate = useCallback(
+    async (payload: AnalyticsMetricDefinitionCreate) => {
+      if (!workspaceId) {
+        throw new AnalyticsApiError("not_found", "A workspace resource key is required.");
+      }
+      activeMutationCount += 1;
+      entry.isLoading = true;
+      entry.error = null;
+      emitMutationChange();
+      try {
+        const metricDefinition = await createAnalyticsMetricDefinition(workspaceId, payload);
+        entry.data = metricDefinition;
+        entry.error = null;
+        invalidateAnalyticsCache((key) => key === analyticsQueryKeys.metricDefinitions(workspaceId));
+        return metricDefinition;
+      } catch (error) {
+        entry.error =
+          error instanceof AnalyticsApiError
+            ? error
+            : new AnalyticsApiError("network_failure", "Analytics metric creation failed.", undefined, {
+                cause: error,
+              });
+        throw entry.error;
+      } finally {
+        activeMutationCount = Math.max(0, activeMutationCount - 1);
+        entry.isLoading = false;
+        emitMutationChange();
+      }
+    },
+    [entry, workspaceId],
+  );
+
+  const reset = useCallback(() => {
+    entry.data = null;
+    entry.error = null;
+    entry.isLoading = false;
+    emitMutationChange();
+  }, [entry]);
+
+  return {
+    data: entry.data,
+    error: entry.error,
+    isMutating: entry.isLoading || activeMutationCount > 0,
+    mutate,
+    reset,
+  };
+}
+
+export function useCreateAnalyticsObservation(
+  workspaceId: string | null,
+): AnalyticsMutationState<AnalyticsObservation, AnalyticsObservationCreate> {
+  const getVersion = useCallback(() => mutationVersion, []);
+  const subscribe = useCallback((listener: () => void) => {
+    mutationListeners.add(listener);
+    return () => {
+      mutationListeners.delete(listener);
+    };
+  }, []);
+  useSyncExternalStore(subscribe, getVersion, getVersion);
+
+  const entry = entryFor<AnalyticsObservation>(
+    `analytics:mutation:create-observation:${workspaceId ?? "none"}`,
+  );
+  const mutate = useCallback(
+    async (payload: AnalyticsObservationCreate) => {
+      if (!workspaceId) {
+        throw new AnalyticsApiError("not_found", "A workspace resource key is required.");
+      }
+      activeMutationCount += 1;
+      entry.isLoading = true;
+      entry.error = null;
+      emitMutationChange();
+      try {
+        const observation = await createAnalyticsObservation(workspaceId, payload);
+        entry.data = observation;
+        entry.error = null;
+        invalidateAnalyticsCache((key) => key.startsWith(`analytics:`) && key.includes(workspaceId));
+        return observation;
+      } catch (error) {
+        entry.error =
+          error instanceof AnalyticsApiError
+            ? error
+            : new AnalyticsApiError("network_failure", "Analytics observation creation failed.", undefined, {
+                cause: error,
+              });
+        throw entry.error;
+      } finally {
+        activeMutationCount = Math.max(0, activeMutationCount - 1);
+        entry.isLoading = false;
+        emitMutationChange();
+      }
+    },
+    [entry, workspaceId],
+  );
+
+  const reset = useCallback(() => {
+    entry.data = null;
+    entry.error = null;
+    entry.isLoading = false;
+    emitMutationChange();
+  }, [entry]);
+
+  return {
+    data: entry.data,
+    error: entry.error,
+    isMutating: entry.isLoading || activeMutationCount > 0,
+    mutate,
+    reset,
+  };
 }

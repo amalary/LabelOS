@@ -9,6 +9,11 @@ import {
   getAnalyticsObservations,
   getAnalyticsPreviousPeriodComparison,
   getLatestAnalyticsObservation,
+  queryAnalyticsSummary,
+  queryMetricHistory,
+  queryObservationsByArtist,
+  queryObservationsByCampaign,
+  queryObservationsByCampaignChildObject,
 } from "./analytics";
 
 const metricDefinition = {
@@ -92,6 +97,64 @@ describe("analytics data layer", () => {
     );
   });
 
+  it("normalizes reusable analytics filter aliases", async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      Response.json({ observations: [], total: 0, limit: 100, offset: 0 }),
+    );
+
+    await getAnalyticsObservations("workspace_01", {
+      end_date: "2026-08-31T23:59:59Z",
+      metric: "metric_01",
+      provider: "provider_01",
+      start_date: "2026-08-01T00:00:00Z",
+    });
+
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/workspaces/workspace_01/analytics/observations?metric_definition_id=metric_01&provider_id=provider_01&observed_start=2026-08-01T00%3A00%3A00Z&observed_end=2026-08-31T23%3A59%3A59Z",
+      expect.any(Object),
+    );
+  });
+
+  it("queries observations by analytics object scope", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(Response.json({ observations: [], total: 0, limit: 100, offset: 0 }))
+      .mockResolvedValueOnce(Response.json({ observations: [], total: 0, limit: 100, offset: 0 }))
+      .mockResolvedValueOnce(Response.json({ observations: [], total: 0, limit: 100, offset: 0 }));
+
+    await queryObservationsByArtist("workspace_01", "artist_01", {
+      metric_definition_id: "metric_01",
+    });
+    await queryObservationsByCampaign("workspace_01", "campaign_01", {
+      include_child_objects: false,
+      metric_definition_id: "metric_01",
+    });
+    await queryObservationsByCampaignChildObject(
+      "workspace_01",
+      "campaign_01",
+      "goal",
+      "goal_01",
+      {
+        metric_definition_id: "metric_01",
+      },
+    );
+
+    expect(fetch).toHaveBeenNthCalledWith(
+      1,
+      "/api/workspaces/workspace_01/analytics/observations?metric_definition_id=metric_01&artist_profile_id=artist_01&target_id=artist_01&target_type=artist_profile",
+      expect.any(Object),
+    );
+    expect(fetch).toHaveBeenNthCalledWith(
+      2,
+      "/api/workspaces/workspace_01/analytics/observations?metric_definition_id=metric_01&campaign_id=campaign_01&target_id=campaign_01&target_type=campaign",
+      expect.any(Object),
+    );
+    expect(fetch).toHaveBeenNthCalledWith(
+      3,
+      "/api/workspaces/workspace_01/analytics/observations?metric_definition_id=metric_01&campaign_id=campaign_01&campaign_object_id=goal_01&campaign_object_type=goal&target_id=goal_01&target_type=campaign_object",
+      expect.any(Object),
+    );
+  });
+
   it("fetches historical series and previous-period comparison", async () => {
     const series = {
       aggregation: "sum",
@@ -143,6 +206,46 @@ describe("analytics data layer", () => {
     expect(fetch).toHaveBeenNthCalledWith(
       2,
       "/api/workspaces/workspace_01/analytics/comparison?metric_definition_id=metric_01&aggregation=sum&current_start=2026-08-29T00%3A00%3A00Z&current_end=2026-09-05T00%3A00%3A00Z",
+      expect.any(Object),
+    );
+  });
+
+  it("queries metric history and summary aggregation results", async () => {
+    const series = {
+      aggregation: "sum",
+      points: [{ bucket_date: "2026-08-29", value: "100.000000", observation_count: 1 }],
+      value_type: "integer",
+      unit: "count",
+      provider_id: "provider_01",
+      metric_definition_id: "metric_01",
+      observation_count: 1,
+    };
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(Response.json(series))
+      .mockResolvedValueOnce(Response.json(series));
+
+    await expect(
+      queryMetricHistory("workspace_01", {
+        aggregation: "sum",
+        metric: "metric_01",
+      }),
+    ).resolves.toEqual(series);
+    await expect(
+      queryAnalyticsSummary("workspace_01", {
+        aggregation: "sum",
+        campaign: "campaign_01",
+        metric: "metric_01",
+      }),
+    ).resolves.toEqual(series);
+
+    expect(fetch).toHaveBeenNthCalledWith(
+      1,
+      "/api/workspaces/workspace_01/analytics/series?aggregation=sum&metric_definition_id=metric_01",
+      expect.any(Object),
+    );
+    expect(fetch).toHaveBeenNthCalledWith(
+      2,
+      "/api/workspaces/workspace_01/analytics/summary?aggregation=sum&metric_definition_id=metric_01&campaign_id=campaign_01",
       expect.any(Object),
     );
   });
