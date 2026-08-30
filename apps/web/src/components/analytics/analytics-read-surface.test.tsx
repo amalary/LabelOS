@@ -67,6 +67,7 @@ const observation = {
   target_id: "campaign_01",
   artist_profile_id: null,
   campaign_id: "campaign_01",
+  campaign_name: "Launch Campaign",
   campaign_object_type: null,
   campaign_object_id: null,
   value_numeric: "125.000000",
@@ -161,6 +162,7 @@ describe("AnalyticsReadSurface", () => {
             ...observation,
             artist_profile_id: "artist_profile_01",
             campaign_id: "campaign_01",
+            campaign_name: "Launch Campaign",
             target_id: "artist_profile_01",
             target_type: "artist_profile",
           },
@@ -237,6 +239,7 @@ describe("AnalyticsReadSurface", () => {
     expect(screen.getByRole("heading", { name: "Artist analytics" })).toBeInTheDocument();
     expect(screen.getByText("Artist profile")).toBeInTheDocument();
     expect(screen.getByText("Campaign attributed")).toBeInTheDocument();
+    expect(screen.getByText("Launch Campaign")).toBeInTheDocument();
     expect(analytics.useAnalyticsObservationsByArtist).toHaveBeenCalledWith(
       "workspace_01",
       "artist_profile_01",

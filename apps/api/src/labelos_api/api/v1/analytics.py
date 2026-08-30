@@ -117,6 +117,7 @@ class AnalyticsObservationResponse(BaseModel):
     target_id: UUID | None
     artist_profile_id: UUID | None
     campaign_id: UUID | None
+    campaign_name: str | None
     campaign_object_type: str | None
     campaign_object_id: UUID | None
     value_numeric: Decimal | None
@@ -255,6 +256,7 @@ def _analytics_value_response(
 def _observation_response(
     observation: AnalyticsObservation,
 ) -> AnalyticsObservationResponse:
+    campaign = observation.__dict__.get("campaign")
     return AnalyticsObservationResponse(
         id=observation.id,
         workspace_id=observation.organization_id,
@@ -266,6 +268,7 @@ def _observation_response(
         target_id=observation.target_id,
         artist_profile_id=observation.artist_profile_id,
         campaign_id=observation.campaign_id,
+        campaign_name=campaign.name if campaign is not None else None,
         campaign_object_type=observation.campaign_object_type,
         campaign_object_id=observation.campaign_object_id,
         value_numeric=_numeric_response(observation.value_numeric),

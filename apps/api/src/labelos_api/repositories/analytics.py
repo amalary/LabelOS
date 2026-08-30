@@ -22,6 +22,7 @@ def _observation_load_options():
     return (
         selectinload(AnalyticsObservation.metric_definition),
         selectinload(AnalyticsObservation.provider),
+        selectinload(AnalyticsObservation.campaign),
     )
 
 

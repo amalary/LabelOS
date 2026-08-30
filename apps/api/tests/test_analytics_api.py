@@ -379,6 +379,7 @@ def test_analytics_routes_support_authenticated_metric_and_observation_workflow(
     assert body["target_type"] == "campaign"
     assert body["target_id"] == str(seeded.campaign_id)
     assert body["campaign_id"] == str(seeded.campaign_id)
+    assert body["campaign_name"] is None
     assert body["value_numeric"] == "100.000000"
     assert body["unit"] == "count"
     assert body["dimensions"] == {"market": "US"}
@@ -816,6 +817,11 @@ def test_analytics_routes_filter_artist_profile_relationship_without_target_dupl
         "artist_profile",
         "campaign",
     }
+    assert {
+        observation["campaign_name"]
+        for observation in filtered_body["observations"]
+        if observation["campaign_id"]
+    } == {"Alpha Campaign"}
     assert series.status_code == 200
     assert series.json()["observation_count"] == 2
     assert series.json()["points"] == [
@@ -1045,6 +1051,7 @@ def test_analytics_openapi_contract_exposes_stable_response_fields(
         "target_id",
         "artist_profile_id",
         "campaign_id",
+        "campaign_name",
         "campaign_object_type",
         "campaign_object_id",
         "value_numeric",

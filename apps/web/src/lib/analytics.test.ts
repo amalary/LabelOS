@@ -260,6 +260,7 @@ describe("analytics data layer", () => {
             target_id: "workspace_01",
             artist_profile_id: null,
             campaign_id: null,
+            campaign_name: null,
             campaign_object_type: null,
             campaign_object_id: null,
             value_numeric: "125.000000",

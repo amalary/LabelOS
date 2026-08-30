@@ -67,6 +67,7 @@ export type AnalyticsObservation = {
   target_id: string | null;
   artist_profile_id: string | null;
   campaign_id: string | null;
+  campaign_name: string | null;
   campaign_object_type: string | null;
   campaign_object_id: string | null;
   value_numeric: string | null;

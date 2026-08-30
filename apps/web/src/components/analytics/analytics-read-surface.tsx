@@ -610,6 +610,17 @@ export function AnalyticsReadSurface({
     scope?.kind === "artist_profile"
       ? recentObservations.filter((observation) => observation.campaign_id).length
       : 0;
+  const campaignAttributionBreakdown = Array.from(
+    recentObservations
+      .filter((observation) => observation.campaign_id)
+      .reduce((campaigns, observation) => {
+        const label =
+          observation.campaign_name ?? `Campaign ${observation.campaign_id?.slice(0, 8)}`;
+        campaigns.set(label, (campaigns.get(label) ?? 0) + 1);
+        return campaigns;
+      }, new Map<string, number>())
+      .entries(),
+  );
   const providerObservationBreakdown = Array.from(
     recentObservations
       .reduce((providers, observation) => {
@@ -790,6 +801,21 @@ export function AnalyticsReadSurface({
                     {campaignAttributedCount}
                   </p>
                   <p className="mt-1 text-sm text-slate-500">Recent artist observations</p>
+                  {campaignAttributionBreakdown.length > 0 ? (
+                    <div className="mt-3 grid gap-2">
+                      {campaignAttributionBreakdown.slice(0, 4).map(([campaignName, count]) => (
+                        <div
+                          className="flex items-center justify-between gap-3 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm"
+                          key={campaignName}
+                        >
+                          <span className="min-w-0 truncate font-medium text-slate-800">
+                            {campaignName}
+                          </span>
+                          <Badge variant="neutral">{count}</Badge>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
                 </div>
               ) : null}
               {childResources.length > 0 ? (
