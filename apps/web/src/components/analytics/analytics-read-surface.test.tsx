@@ -309,4 +309,31 @@ describe("AnalyticsReadSurface", () => {
       }),
     );
   });
+
+  it("updates analytics comparison dates from preset controls", () => {
+    render(
+      <AnalyticsReadSurface
+        artistProfileId="artist_profile_01"
+        title="Artist analytics"
+        workspaceId="workspace_01"
+      />,
+    );
+
+    const expectedEnd = new Date().toISOString().slice(0, 10);
+    const expectedStart = new Date();
+    expectedStart.setDate(expectedStart.getDate() - 7);
+    fireEvent.click(screen.getByRole("button", { name: "7D" }));
+
+    expect(screen.getByLabelText("Analytics start date")).toHaveValue(
+      expectedStart.toISOString().slice(0, 10),
+    );
+    expect(screen.getByLabelText("Analytics end date")).toHaveValue(expectedEnd);
+    expect(analytics.useAnalyticsPreviousPeriodComparison).toHaveBeenLastCalledWith(
+      "workspace_01",
+      expect.objectContaining({
+        current_end: `${expectedEnd}T23:59:59Z`,
+        current_start: `${expectedStart.toISOString().slice(0, 10)}T00:00:00Z`,
+      }),
+    );
+  });
 });

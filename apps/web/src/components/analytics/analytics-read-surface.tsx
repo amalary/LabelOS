@@ -62,15 +62,24 @@ const numericAggregations: AnalyticsAggregation[] = [
   "count",
 ];
 const nonNumericAggregations: AnalyticsAggregation[] = ["latest", "count"];
+const dateRangePresets = [
+  ["7", "7D"],
+  ["30", "30D"],
+  ["90", "90D"],
+] as const;
 
 function isoDate(date: Date): string {
   return date.toISOString().slice(0, 10);
 }
 
 function defaultDateRange(): AnalyticsDateRange {
+  return dateRangeForDays(30);
+}
+
+function dateRangeForDays(days: number): AnalyticsDateRange {
   const end = new Date();
   const start = new Date(end);
-  start.setDate(end.getDate() - 30);
+  start.setDate(end.getDate() - days);
   return {
     observedEnd: isoDate(end),
     observedStart: isoDate(start),
@@ -521,6 +530,7 @@ export function AnalyticsReadSurface({
   }, [artistProfileId, campaignId, selectedChild]);
   const initialRange = useMemo(() => defaultDateRange(), []);
   const [dateRange, setDateRange] = useState<AnalyticsDateRange>(initialRange);
+  const [selectedRangePreset, setSelectedRangePreset] = useState("30");
   const metrics = useAnalyticsMetricDefinitions(workspaceId);
   const metricDefinitions = metrics.data?.metric_definitions ?? [];
   const [selectedMetricId, setSelectedMetricId] = useState("all");
@@ -684,13 +694,34 @@ export function AnalyticsReadSurface({
           </p>
         </div>
         <div className="grid gap-2 sm:grid-cols-2">
+          <div className="flex items-end gap-2 sm:col-span-2" aria-label="Analytics date presets">
+            {dateRangePresets.map(([days, label]) => (
+              <button
+                className={cn(
+                  "h-8 rounded-md border px-3 text-xs font-semibold transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-700",
+                  selectedRangePreset === days
+                    ? "border-slate-950 bg-slate-950 text-white"
+                    : "border-slate-300 bg-white text-slate-700 hover:bg-slate-50",
+                )}
+                key={days}
+                onClick={() => {
+                  setDateRange(dateRangeForDays(Number(days)));
+                  setSelectedRangePreset(days);
+                }}
+                type="button"
+              >
+                {label}
+              </button>
+            ))}
+          </div>
           <label className="grid gap-1 text-xs font-semibold uppercase tracking-normal text-slate-500">
             Start
             <Input
               aria-label="Analytics start date"
-              onChange={(event) =>
-                setDateRange((current) => ({ ...current, observedStart: event.target.value }))
-              }
+              onChange={(event) => {
+                setDateRange((current) => ({ ...current, observedStart: event.target.value }));
+                setSelectedRangePreset("custom");
+              }}
               type="date"
               value={dateRange.observedStart}
             />
@@ -699,9 +730,10 @@ export function AnalyticsReadSurface({
             End
             <Input
               aria-label="Analytics end date"
-              onChange={(event) =>
-                setDateRange((current) => ({ ...current, observedEnd: event.target.value }))
-              }
+              onChange={(event) => {
+                setDateRange((current) => ({ ...current, observedEnd: event.target.value }));
+                setSelectedRangePreset("custom");
+              }}
               type="date"
               value={dateRange.observedEnd}
             />
