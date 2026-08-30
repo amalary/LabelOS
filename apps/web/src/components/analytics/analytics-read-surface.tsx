@@ -12,6 +12,7 @@ import {
   type AnalyticsSeriesPoint,
   useAnalyticsHistoricalSeries,
   useAnalyticsMetricDefinitions,
+  useAnalyticsObservations,
   useAnalyticsObservationsByArtist,
   useAnalyticsObservationsByCampaign,
   useAnalyticsObservationsByCampaignChildObject,
@@ -51,6 +52,9 @@ type AnalyticsScope =
   | {
       artistProfileId: string;
       kind: "artist_profile";
+    }
+  | {
+      kind: "workspace";
     };
 
 const numericAggregations: AnalyticsAggregation[] = [
@@ -194,6 +198,10 @@ function buildScopedQueryOptions({
       ...base,
       artist_profile_id: scope.artistProfileId,
     };
+  }
+
+  if (scope.kind === "workspace") {
+    return base;
   }
 
   if (scope.selectedChild) {
@@ -519,14 +527,14 @@ export function AnalyticsReadSurface({
   title = "Analytics",
   workspaceId,
 }: AnalyticsReadSurfaceProps) {
-  const scope = useMemo<AnalyticsScope | null>(() => {
+  const scope = useMemo<AnalyticsScope>(() => {
     if (artistProfileId) {
       return { artistProfileId, kind: "artist_profile" };
     }
     if (campaignId) {
       return { campaignId, kind: "campaign", selectedChild };
     }
-    return null;
+    return { kind: "workspace" };
   }, [artistProfileId, campaignId, selectedChild]);
   const initialRange = useMemo(() => defaultDateRange(), []);
   const [dateRange, setDateRange] = useState<AnalyticsDateRange>(initialRange);
@@ -593,46 +601,49 @@ export function AnalyticsReadSurface({
     scope?.kind === "artist_profile" ? scope.artistProfileId : null,
     observationFilters,
   );
+  const workspaceObservations = useAnalyticsObservations(workspaceId, observationFilters);
   const recentObservations =
     scope?.kind === "artist_profile"
       ? (artistObservations.data?.observations ?? [])
-      : selectedChild
-        ? (childObservations.data?.observations ?? [])
-        : (campaignObservations.data?.observations ?? []);
+      : scope.kind === "campaign"
+        ? selectedChild
+          ? (childObservations.data?.observations ?? [])
+          : (campaignObservations.data?.observations ?? [])
+        : (workspaceObservations.data?.observations ?? []);
   const recentLoading =
     scope?.kind === "artist_profile"
       ? artistObservations.isLoading
-      : selectedChild
-        ? childObservations.isLoading
-        : campaignObservations.isLoading;
+      : scope.kind === "campaign"
+        ? selectedChild
+          ? childObservations.isLoading
+          : campaignObservations.isLoading
+        : workspaceObservations.isLoading;
   const recentError =
     scope?.kind === "artist_profile"
       ? artistObservations.error
-      : selectedChild
-        ? childObservations.error
-        : campaignObservations.error;
+      : scope.kind === "campaign"
+        ? selectedChild
+          ? childObservations.error
+          : campaignObservations.error
+        : workspaceObservations.error;
 
   const selectedQueryOptions = useMemo(
     () =>
-      scope
-        ? buildScopedQueryOptions({
-            dateRange,
-            metric: selectedMetric,
-            scope,
-          })
-        : null,
+      buildScopedQueryOptions({
+        dateRange,
+        metric: selectedMetric,
+        scope,
+      }),
     [dateRange, scope, selectedMetric],
   );
   const series = useAnalyticsHistoricalSeries(workspaceId, selectedQueryOptions);
   const comparisonOptions = useMemo(
     () =>
-      scope
-        ? buildComparisonOptions({
-            dateRange,
-            metric: selectedMetric,
-            scope,
-          })
-        : null,
+      buildComparisonOptions({
+        dateRange,
+        metric: selectedMetric,
+        scope,
+      }),
     [dateRange, scope, selectedMetric],
   );
   const comparison = useAnalyticsPreviousPeriodComparison(workspaceId, comparisonOptions);
@@ -667,6 +678,7 @@ export function AnalyticsReadSurface({
   const noAnalytics =
     !metrics.isLoading &&
     metricDefinitions.length === 0 &&
+    !workspaceObservations.isLoading &&
     !campaignObservations.isLoading &&
     !childObservations.isLoading &&
     !artistObservations.isLoading;
@@ -684,6 +696,8 @@ export function AnalyticsReadSurface({
               </Badge>
             ) : scope?.kind === "artist_profile" ? (
               <Badge variant="neutral">Artist profile</Badge>
+            ) : scope.kind === "workspace" ? (
+              <Badge variant="neutral">Workspace</Badge>
             ) : (
               <Badge variant="neutral">Campaign</Badge>
             )}
@@ -814,13 +828,11 @@ export function AnalyticsReadSurface({
                 key={metric.id}
                 metric={metric}
                 queryOptions={
-                  scope
-                    ? buildScopedQueryOptions({
-                        dateRange,
-                        metric,
-                        scope,
-                      })
-                    : null
+                  buildScopedQueryOptions({
+                    dateRange,
+                    metric,
+                    scope,
+                  })
                 }
                 workspaceId={workspaceId}
               />

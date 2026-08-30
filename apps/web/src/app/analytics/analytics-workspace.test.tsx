@@ -1,7 +1,18 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AnalyticsWorkspace } from "./analytics-workspace";
+
+vi.mock("../../components/analytics/analytics-read-surface", () => ({
+  AnalyticsReadSurface: vi.fn(
+    (props: { artistProfileId?: string; campaignId?: string; title?: string }) => (
+      <section data-testid="analytics-read-surface">
+        <h2>{props.title}</h2>
+        <span>{props.artistProfileId ?? props.campaignId ?? "workspace"}</span>
+      </section>
+    ),
+  ),
+}));
 
 vi.mock("../../lib/workspace-context", () => ({
   useActiveWorkspace: vi.fn(),
@@ -12,17 +23,12 @@ vi.mock("../../lib/analytics", async () => {
   const actual = await vi.importActual<typeof import("../../lib/analytics")>("../../lib/analytics");
   return {
     ...actual,
-    createAnalyticsMetricDefinition: vi.fn(),
-    createAnalyticsObservation: vi.fn(),
-    useAnalyticsHistoricalSeries: vi.fn(),
     useAnalyticsMetricDefinitions: vi.fn(),
-    useAnalyticsPreviousPeriodComparison: vi.fn(),
+    useAnalyticsObservations: vi.fn(),
   };
 });
 
 vi.mock("../../lib/campaigns", () => ({
-  useCampaignGoals: vi.fn(),
-  useCampaignMilestones: vi.fn(),
   useCampaigns: vi.fn(),
 }));
 
@@ -34,21 +40,24 @@ const workspaceContext = await import("../../lib/workspace-context");
 const analytics = await import("../../lib/analytics");
 const campaigns = await import("../../lib/campaigns");
 const profiles = await import("../../lib/profiles");
+const readSurface = await import("../../components/analytics/analytics-read-surface");
+
+const provider = {
+  id: "provider_01",
+  workspace_id: "workspace_01",
+  key: "spotify",
+  display_name: "Spotify",
+  provider_type: "streaming",
+  external_account_id: null,
+  metadata: {},
+  created_at: "2026-08-29T12:00:00Z",
+  updated_at: "2026-08-29T12:00:00Z",
+};
 
 const metric = {
   id: "metric_01",
   workspace_id: "workspace_01",
-  provider: {
-    id: "provider_01",
-    workspace_id: "workspace_01",
-    key: "internal",
-    display_name: "Internal Analytics",
-    provider_type: "internal",
-    external_account_id: null,
-    metadata: {},
-    created_at: "2026-08-29T12:00:00Z",
-    updated_at: "2026-08-29T12:00:00Z",
-  },
+  provider,
   key: "streams",
   display_name: "Streams",
   description: null,
@@ -60,40 +69,37 @@ const metric = {
   updated_at: "2026-08-29T12:00:00Z",
 } as const;
 
-describe("AnalyticsWorkspace", () => {
-  const reloadMetrics = vi.fn();
-  const reloadSeries = vi.fn();
-  const reloadComparison = vi.fn();
+const observation = {
+  id: "observation_01",
+  workspace_id: "workspace_01",
+  metric_definition_id: "metric_01",
+  metric_key: "streams",
+  provider_id: "provider_01",
+  provider_key: "spotify",
+  target_type: "campaign",
+  target_id: "campaign_01",
+  artist_profile_id: "artist_profile_01",
+  campaign_id: "campaign_01",
+  campaign_name: "Launch Campaign",
+  campaign_object_type: null,
+  campaign_object_id: null,
+  value_numeric: "125.000000",
+  value_text: null,
+  value_boolean: null,
+  value_json: null,
+  unit: "count",
+  observed_at: "2026-08-29T12:00:00Z",
+  source_record_id: "spotify-row-1",
+  idempotency_key: null,
+  dimensions: {},
+  metadata: {},
+  created_at: "2026-08-29T12:00:00Z",
+  updated_at: "2026-08-29T12:00:00Z",
+};
 
+describe("AnalyticsWorkspace", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    reloadMetrics.mockResolvedValue({ metric_definitions: [metric] });
-    reloadSeries.mockResolvedValue({
-      aggregation: "sum",
-      metric_definition_id: "metric_01",
-      observation_count: 2,
-      points: [
-        { bucket_date: "2026-08-29", observation_count: 1, value: "100.000000" },
-        { bucket_date: "2026-08-30", observation_count: 1, value: "125.000000" },
-      ],
-      provider_id: "provider_01",
-      unit: "count",
-      value_type: "integer",
-    });
-    reloadComparison.mockResolvedValue({
-      absolute_change: "75.000000",
-      aggregation: "sum",
-      current_end: "2026-09-01T00:00:00Z",
-      current_observation_count: 2,
-      current_start: "2026-08-01T00:00:00Z",
-      current_value: "225.000000",
-      percentage_change: "0.500000",
-      previous_end: "2026-08-01T00:00:00Z",
-      previous_observation_count: 1,
-      previous_start: "2026-07-01T00:00:00Z",
-      previous_value: "150.000000",
-      status: "compared",
-    });
     vi.mocked(workspaceContext.useActiveWorkspace).mockReturnValue({
       activeWorkspace: {
         id: "workspace_01",
@@ -102,14 +108,14 @@ describe("AnalyticsWorkspace", () => {
         role: "owner",
         workspace_permission: "owner",
         department_access: ["analytics"],
-        capability_permissions: ["analytics.view", "analytics.create"],
+        capability_permissions: ["analytics.view"],
         can_switch: true,
       },
       hasActiveWorkspace: true,
       workspaces: [],
     });
     vi.mocked(workspaceContext.useActiveWorkspaceProfile).mockReturnValue({
-      capabilities: ["analytics.view", "analytics.create"],
+      capabilities: ["analytics.view"],
       canEditProfile: false,
       departmentAccess: ["analytics"],
       isLoading: false,
@@ -117,7 +123,7 @@ describe("AnalyticsWorkspace", () => {
       responsibilities: [],
       roles: ["owner"],
       subject: {
-        capabilities: ["analytics.view", "analytics.create"],
+        capabilities: ["analytics.view"],
         departmentAccess: ["analytics"],
         role: "owner",
         workspacePermission: "owner",
@@ -127,43 +133,13 @@ describe("AnalyticsWorkspace", () => {
       data: { metric_definitions: [metric] },
       error: null,
       isLoading: false,
-      reload: reloadMetrics,
+      reload: vi.fn(),
     });
-    vi.mocked(analytics.useAnalyticsHistoricalSeries).mockReturnValue({
-      data: {
-        aggregation: "sum",
-        metric_definition_id: "metric_01",
-        observation_count: 2,
-        points: [
-          { bucket_date: "2026-08-29", observation_count: 1, value: "100.000000" },
-          { bucket_date: "2026-08-30", observation_count: 1, value: "125.000000" },
-        ],
-        provider_id: "provider_01",
-        unit: "count",
-        value_type: "integer",
-      },
+    vi.mocked(analytics.useAnalyticsObservations).mockReturnValue({
+      data: { observations: [observation], total: 1, limit: 100, offset: 0 },
       error: null,
       isLoading: false,
-      reload: reloadSeries,
-    });
-    vi.mocked(analytics.useAnalyticsPreviousPeriodComparison).mockReturnValue({
-      data: {
-        absolute_change: "75.000000",
-        aggregation: "sum",
-        current_end: "2026-09-01T00:00:00Z",
-        current_observation_count: 2,
-        current_start: "2026-08-01T00:00:00Z",
-        current_value: "225.000000",
-        percentage_change: "0.500000",
-        previous_end: "2026-08-01T00:00:00Z",
-        previous_observation_count: 1,
-        previous_start: "2026-07-01T00:00:00Z",
-        previous_value: "150.000000",
-        status: "compared",
-      },
-      error: null,
-      isLoading: false,
-      reload: reloadComparison,
+      reload: vi.fn(),
     });
     vi.mocked(campaigns.useCampaigns).mockReturnValue({
       data: {
@@ -199,34 +175,6 @@ describe("AnalyticsWorkspace", () => {
       isMutating: false,
       reload: vi.fn(),
     });
-    vi.mocked(campaigns.useCampaignGoals).mockReturnValue({
-      data: {
-        goals: [
-          {
-            id: "goal_01",
-            campaign_id: "campaign_01",
-            created_at: "2026-08-29T12:00:00Z",
-            description: null,
-            status: "active",
-            success_criteria: null,
-            target_value: null,
-            title: "Pre-save goal",
-            updated_at: "2026-08-29T12:00:00Z",
-          },
-        ],
-      },
-      error: null,
-      isLoading: false,
-      isMutating: false,
-      reload: vi.fn(),
-    });
-    vi.mocked(campaigns.useCampaignMilestones).mockReturnValue({
-      data: { milestones: [] },
-      error: null,
-      isLoading: false,
-      isMutating: false,
-      reload: vi.fn(),
-    });
     vi.mocked(profiles.useWorkspacePeopleDirectory).mockReturnValue({
       data: {
         limit: 100,
@@ -254,113 +202,68 @@ describe("AnalyticsWorkspace", () => {
       isMutating: false,
       reload: vi.fn(),
     });
-    vi.mocked(analytics.createAnalyticsMetricDefinition).mockResolvedValue({
-      ...metric,
-      id: "metric_created",
-      key: "followers",
-      display_name: "Followers",
-    });
-    vi.mocked(analytics.createAnalyticsObservation).mockResolvedValue({
-      id: "observation_created",
-      workspace_id: "workspace_01",
-      metric_definition_id: "metric_01",
-      metric_key: "streams",
-      provider_id: "provider_01",
-      provider_key: "internal",
-      target_type: "workspace",
-      target_id: "workspace_01",
-      artist_profile_id: null,
-      campaign_id: null,
-      campaign_name: null,
-      campaign_object_type: null,
-      campaign_object_id: null,
-      value_numeric: "175.000000",
-      value_text: null,
-      value_boolean: null,
-      value_json: null,
-      unit: "count",
-      observed_at: "2026-08-30T00:00:00Z",
-      source_record_id: null,
-      idempotency_key: null,
-      dimensions: {},
-      metadata: {},
-      created_at: "2026-08-30T00:00:00Z",
-      updated_at: "2026-08-30T00:00:00Z",
-    });
   });
 
-  it("renders reporting controls, summary, chart, and data table", async () => {
+  it("renders workspace analytics using the shared read surface and comparison tables", () => {
     render(<AnalyticsWorkspace />);
 
     expect(screen.getByRole("heading", { name: "Analytics" })).toBeInTheDocument();
-    expect(screen.getByLabelText("Metric")).toHaveValue("metric_01");
-    expect(screen.getAllByText("125")).toHaveLength(2);
-    expect(screen.getByText("50%")).toBeInTheDocument();
-    expect(screen.getByRole("figure", { name: "Analytics series chart" })).toBeInTheDocument();
-    expect(screen.getByRole("table", { name: "Analytics series data" })).toBeInTheDocument();
-    expect(screen.getAllByText("2026-08-30")).toHaveLength(2);
+    expect(screen.getByTestId("analytics-read-surface")).toHaveTextContent("Workspace analytics");
+    expect(screen.getByRole("heading", { name: "Workspace comparisons" })).toBeInTheDocument();
+    expect(screen.getByRole("table", { name: "Artist comparison" })).toBeInTheDocument();
+    expect(screen.getByRole("table", { name: "Campaign comparison" })).toBeInTheDocument();
+    expect(screen.getByRole("table", { name: "Provider breakdown" })).toBeInTheDocument();
+    expect(screen.getByText("All value types")).toBeInTheDocument();
+    expect(screen.getAllByText("Launch Campaign")).not.toHaveLength(0);
   });
 
-  it("exposes campaign child target controls", () => {
+  it("filters the reusable read surface by artist and campaign", () => {
     render(<AnalyticsWorkspace />);
 
-    fireEvent.change(screen.getByLabelText("Target"), {
-      target: { value: "campaign_object" },
+    fireEvent.change(screen.getByLabelText("Explore"), { target: { value: "artist" } });
+    fireEvent.change(screen.getByLabelText("Artist"), {
+      target: { value: "artist_profile_01" },
     });
+
+    expect(readSurface.AnalyticsReadSurface).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        artistProfileId: "artist_profile_01",
+        title: "Mira Stone",
+      }),
+      undefined,
+    );
+
+    fireEvent.change(screen.getByLabelText("Explore"), { target: { value: "campaign" } });
     fireEvent.change(screen.getByLabelText("Campaign"), {
       target: { value: "campaign_01" },
     });
 
-    expect(screen.getByLabelText("Item type")).toHaveValue("goal");
-    expect(screen.getByLabelText("Item")).toHaveTextContent("Pre-save goal");
+    expect(readSurface.AnalyticsReadSurface).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        campaignId: "campaign_01",
+        title: "Launch Campaign",
+      }),
+      undefined,
+    );
   });
 
-  it("creates a metric definition from the analytics page", async () => {
+  it("applies metric, provider, and date filters to workspace comparisons", () => {
     render(<AnalyticsWorkspace />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Add metric" }));
-    fireEvent.change(screen.getByLabelText("Metric name"), {
-      target: { value: "Followers" },
-    });
-    fireEvent.change(screen.getByLabelText("Metric key"), {
-      target: { value: "followers" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Create metric" }));
+    fireEvent.change(screen.getByLabelText("Metric"), { target: { value: "metric_01" } });
+    fireEvent.change(screen.getByLabelText("Provider"), { target: { value: "provider_01" } });
+    fireEvent.change(screen.getByLabelText("Start"), { target: { value: "2026-08-01" } });
+    fireEvent.change(screen.getByLabelText("End"), { target: { value: "2026-08-31" } });
 
-    await waitFor(() =>
-      expect(analytics.createAnalyticsMetricDefinition).toHaveBeenCalledWith(
-        "workspace_01",
-        expect.objectContaining({
-          display_name: "Followers",
-          key: "followers",
-          value_type: "integer",
-        }),
-      ),
+    expect(analytics.useAnalyticsObservations).toHaveBeenLastCalledWith(
+      "workspace_01",
+      expect.objectContaining({
+        metric_definition_id: "metric_01",
+        observed_end: "2026-08-31T23:59:59Z",
+        observed_start: "2026-08-01T00:00:00Z",
+        provider_id: "provider_01",
+      }),
     );
-    await waitFor(() => expect(reloadMetrics).toHaveBeenCalled());
-    expect(screen.getByText("Metric definition created.")).toBeInTheDocument();
-  });
-
-  it("records an observation for the current report target", async () => {
-    render(<AnalyticsWorkspace />);
-
-    fireEvent.change(screen.getByLabelText("Value"), {
-      target: { value: "175" },
-    });
-    fireEvent.click(screen.getAllByRole("button", { name: "Record observation" }).at(-1)!);
-
-    await waitFor(() =>
-      expect(analytics.createAnalyticsObservation).toHaveBeenCalledWith(
-        "workspace_01",
-        expect.objectContaining({
-          metric_definition_id: "metric_01",
-          target_id: "workspace_01",
-          target_type: "workspace",
-          value_numeric: "175",
-        }),
-      ),
-    );
-    await waitFor(() => expect(reloadSeries).toHaveBeenCalled());
-    await waitFor(() => expect(reloadComparison).toHaveBeenCalled());
+    expect(screen.getByText("Numeric metrics chart and aggregate.")).toBeInTheDocument();
   });
 });

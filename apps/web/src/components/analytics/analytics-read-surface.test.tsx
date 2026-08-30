@@ -9,6 +9,7 @@ vi.mock("../../lib/analytics", async () => {
     ...actual,
     useAnalyticsHistoricalSeries: vi.fn(),
     useAnalyticsMetricDefinitions: vi.fn(),
+    useAnalyticsObservations: vi.fn(),
     useAnalyticsObservationsByArtist: vi.fn(),
     useAnalyticsObservationsByCampaign: vi.fn(),
     useAnalyticsObservationsByCampaignChildObject: vi.fn(),
@@ -190,6 +191,12 @@ describe("AnalyticsReadSurface", () => {
       isLoading: false,
       reload: vi.fn(),
     });
+    vi.mocked(analytics.useAnalyticsObservations).mockReturnValue({
+      data: { observations: [observation], total: 1, limit: 8, offset: 0 },
+      error: null,
+      isLoading: false,
+      reload: vi.fn(),
+    });
   });
 
   it("renders campaign headline metrics, trends, recent values, and provider details", () => {
@@ -333,6 +340,26 @@ describe("AnalyticsReadSurface", () => {
       expect.objectContaining({
         current_end: `${expectedEnd}T23:59:59Z`,
         current_start: `${expectedStart.toISOString().slice(0, 10)}T00:00:00Z`,
+      }),
+    );
+  });
+
+  it("queries workspace analytics without target object filters", () => {
+    render(<AnalyticsReadSurface title="Workspace analytics" workspaceId="workspace_01" />);
+
+    expect(screen.getByRole("heading", { name: "Workspace analytics" })).toBeInTheDocument();
+    expect(screen.getByText("Workspace")).toBeInTheDocument();
+    expect(analytics.useAnalyticsObservations).toHaveBeenCalledWith(
+      "workspace_01",
+      expect.objectContaining({
+        limit: 8,
+        metric_definition_id: null,
+      }),
+    );
+    expect(analytics.useAnalyticsHistoricalSeries).toHaveBeenCalledWith(
+      "workspace_01",
+      expect.objectContaining({
+        metric_definition_id: "metric_streams",
       }),
     );
   });
