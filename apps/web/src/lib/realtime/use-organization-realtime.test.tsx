@@ -2,6 +2,11 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  clearAnalyticsCache,
+  shouldInvalidateAnalyticsRealtimeCacheKey,
+  useAnalyticsHistoricalSeries,
+} from "../analytics";
+import {
   shouldInvalidateProfileRealtimeCacheKey,
   useOrganizationRealtime,
 } from "./use-organization-realtime";
@@ -49,6 +54,11 @@ class FakeEventSource {
   }
 }
 
+const analyticsSeriesOptions = {
+  aggregation: "sum" as const,
+  metric_definition_id: "metric_01",
+};
+
 function RealtimeProbe() {
   const { connectionState, lastUpdatedBy, presence, recentActivityEvents } =
     useOrganizationRealtime("org_01");
@@ -63,12 +73,25 @@ function RealtimeProbe() {
   );
 }
 
+function RealtimeAnalyticsProbe() {
+  const { recentActivityEvents } = useOrganizationRealtime("org_01");
+  const series = useAnalyticsHistoricalSeries("org_01", analyticsSeriesOptions);
+  return (
+    <div>
+      <span>{series.data?.observation_count ?? "no series"}</span>
+      <span>{recentActivityEvents[0]?.type ?? "no activity"}</span>
+    </div>
+  );
+}
+
 describe("useOrganizationRealtime", () => {
   beforeEach(() => {
+    clearAnalyticsCache();
     navigation.refresh.mockReset();
     routeState.pathname = "/artists";
     FakeEventSource.instances = [];
     window.sessionStorage.clear();
+    vi.stubGlobal("fetch", vi.fn());
     vi.stubGlobal("EventSource", FakeEventSource);
   });
 
@@ -178,6 +201,65 @@ describe("useOrganizationRealtime", () => {
     expect(window.sessionStorage.getItem("labelos:artists")).toBe("cached");
   });
 
+  it("invalidates analytics queries for workspace scoped analytics events", async () => {
+    routeState.pathname = "/analytics";
+    vi.mocked(fetch).mockResolvedValue(
+      Response.json({
+        aggregation: "sum",
+        points: [],
+        value_type: "integer",
+        unit: "count",
+        provider_id: "provider_01",
+        metric_definition_id: "metric_01",
+        observation_count: 1,
+      }),
+    );
+    render(<RealtimeAnalyticsProbe />);
+    const source = FakeEventSource.instances[0]!;
+
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+    act(() => {
+      source.emit("message", {
+        id: "analytics_event_01",
+        type: "analytics.observations.ingested",
+        version: 1,
+        channel: "organization:org_01",
+        organization_id: "org_01",
+        entity_type: "analytics_observation_batch",
+        entity_id: "org_01",
+        operation_id: "operation_analytics_01",
+        actor: { user_id: "user_01", display_name: "Mara Chen" },
+        payload: {
+          workspace_id: "org_01",
+          created_count: 2,
+          existing_count: 0,
+          observation_count: 2,
+          observations: [
+            {
+              workspace_id: "org_01",
+              observation_id: "observation_01",
+              metric_definition_id: "metric_01",
+              artist_profile_id: null,
+              campaign_id: "campaign_01",
+              campaign_object_type: null,
+              campaign_object_id: null,
+              observed_at: "2026-08-29T12:00:00+00:00",
+            },
+          ],
+        },
+        created_at: new Date().toISOString(),
+      });
+    });
+
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+    expect(fetch).toHaveBeenLastCalledWith(
+      "/api/workspaces/org_01/analytics/series?aggregation=sum&metric_definition_id=metric_01",
+      expect.any(Object),
+    );
+    expect(navigation.refresh).not.toHaveBeenCalled();
+    expect(screen.getByText("no activity")).toBeInTheDocument();
+  });
+
   it("ignores events for a different organization", () => {
     render(<RealtimeProbe />);
     const source = FakeEventSource.instances[0]!;
@@ -264,6 +346,27 @@ describe("useOrganizationRealtime", () => {
         key: "profiles:artist-profile:org_01:artist_profile_01",
         organizationId: "org_01",
         profileId: "profile_01",
+      }),
+    ).toBe(false);
+  });
+
+  it("matches only analytics query cache keys for the event workspace", () => {
+    expect(
+      shouldInvalidateAnalyticsRealtimeCacheKey({
+        key: "analytics:series:org_01:aggregation:sum|metric_definition_id:metric_01",
+        workspaceId: "org_01",
+      }),
+    ).toBe(true);
+    expect(
+      shouldInvalidateAnalyticsRealtimeCacheKey({
+        key: "analytics:series:org_02:aggregation:sum|metric_definition_id:metric_01",
+        workspaceId: "org_01",
+      }),
+    ).toBe(false);
+    expect(
+      shouldInvalidateAnalyticsRealtimeCacheKey({
+        key: "analytics:mutation:create-observation:org_01",
+        workspaceId: "org_01",
       }),
     ).toBe(false);
   });

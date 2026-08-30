@@ -15,6 +15,7 @@ from labelos_database.models import (
     MembershipRole,
     Organization,
     OrganizationMembership,
+    RealtimeEvent,
     UniversalProfile,
     User,
     WorkspaceMembership,
@@ -32,6 +33,7 @@ from labelos_api.auth import (
     get_session,
 )
 from labelos_api.main import create_app
+from labelos_api.realtime import RealtimeEventType, realtime_channel
 
 
 @dataclass(frozen=True)
@@ -267,6 +269,19 @@ async def _set_analyst_capabilities(
         await session.commit()
 
 
+async def _realtime_events(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    organization_id: UUID,
+) -> list[RealtimeEvent]:
+    async with sessionmaker() as session:
+        rows = await session.scalars(
+            select(RealtimeEvent)
+            .where(RealtimeEvent.organization_id == organization_id)
+            .order_by(RealtimeEvent.created_at.asc(), RealtimeEvent.id.asc())
+        )
+        return list(rows.all())
+
+
 def _metric_payload(key: str = "streams", value_type: str = "integer") -> dict:
     return {
         "key": key,
@@ -386,6 +401,83 @@ def test_analytics_routes_support_authenticated_metric_and_observation_workflow(
     assert body["metadata"] == {"source": "route-test"}
     assert listed_observations.status_code == 200
     assert listed_observations.json()["total"] == 1
+
+
+def test_analytics_observation_creation_publishes_workspace_scoped_realtime_event(
+    analytics_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededAnalyticsApi,
+    ],
+) -> None:
+    client, sessionmaker, seeded = analytics_client
+    _set_context(client, seeded)
+    metric = _create_metric(client, seeded.workspace_id)
+
+    response = client.post(
+        f"/api/v1/workspaces/{seeded.workspace_id}/analytics/observations",
+        json=_observation_payload(
+            metric["id"],
+            target_type="campaign_object",
+            campaign_id=seeded.campaign_id,
+            artist_profile_id=seeded.artist_profile_id,
+            campaign_object_type="goal",
+            campaign_object_id=seeded.campaign_goal_id,
+            idempotency_key="realtime-single-created",
+        ),
+    )
+
+    assert response.status_code == 201
+    events = asyncio.run(_realtime_events(sessionmaker, seeded.workspace_id))
+    assert len(events) == 1
+    event = events[0]
+    assert event.event_type == RealtimeEventType.analytics_observation_created.value
+    assert event.channel == realtime_channel(seeded.workspace_id)
+    assert event.entity_type == "analytics_observation"
+    assert event.entity_id == response.json()["id"]
+    assert event.actor_user_id == seeded.owner_user_id
+    assert event.payload == {
+        "workspace_id": str(seeded.workspace_id),
+        "observation_id": response.json()["id"],
+        "metric_definition_id": metric["id"],
+        "artist_profile_id": str(seeded.artist_profile_id),
+        "campaign_id": str(seeded.campaign_id),
+        "campaign_object_type": "goal",
+        "campaign_object_id": str(seeded.campaign_goal_id),
+        "observed_at": "2026-08-29T12:00:00+00:00",
+    }
+    outside_events = asyncio.run(
+        _realtime_events(sessionmaker, seeded.outside_workspace_id)
+    )
+    assert outside_events == []
+
+
+def test_analytics_observation_idempotent_reuse_does_not_publish_realtime_event(
+    analytics_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededAnalyticsApi,
+    ],
+) -> None:
+    client, sessionmaker, seeded = analytics_client
+    _set_context(client, seeded)
+    metric = _create_metric(client, seeded.workspace_id)
+    base = f"/api/v1/workspaces/{seeded.workspace_id}/analytics/observations"
+    payload = _observation_payload(
+        metric["id"],
+        campaign_id=seeded.campaign_id,
+        idempotency_key="realtime-idempotent",
+    )
+
+    first = client.post(base, json=payload)
+    duplicate = client.post(base, json={**payload, "value_numeric": 999})
+
+    assert first.status_code == 201
+    assert duplicate.status_code == 200
+    events = asyncio.run(_realtime_events(sessionmaker, seeded.workspace_id))
+    assert [event.event_type for event in events] == [
+        RealtimeEventType.analytics_observation_created.value
+    ]
 
 
 def test_analytics_routes_require_view_and_create_capabilities(
@@ -625,7 +717,7 @@ def test_analytics_observations_bulk_route_ingests_authenticated_batch(
         SeededAnalyticsApi,
     ],
 ) -> None:
-    client, _sessionmaker, seeded = analytics_client
+    client, sessionmaker, seeded = analytics_client
     _set_context(client, seeded)
     metric = _create_metric(client, seeded.workspace_id)
     base = f"/api/v1/workspaces/{seeded.workspace_id}/analytics/observations"
@@ -665,6 +757,29 @@ def test_analytics_observations_bulk_route_ingests_authenticated_batch(
         seeded.campaign_goal_id
     )
     assert listed.json()["total"] == 2
+    events = asyncio.run(_realtime_events(sessionmaker, seeded.workspace_id))
+    assert len(events) == 1
+    event = events[0]
+    assert event.event_type == RealtimeEventType.analytics_observations_ingested.value
+    assert event.channel == realtime_channel(seeded.workspace_id)
+    assert event.entity_type == "analytics_observation_batch"
+    assert event.entity_id == str(seeded.workspace_id)
+    assert event.payload["workspace_id"] == str(seeded.workspace_id)
+    assert event.payload["created_count"] == 2
+    assert event.payload["existing_count"] == 0
+    assert event.payload["observation_count"] == 2
+    assert [
+        observation["observation_id"] for observation in event.payload["observations"]
+    ] == [item["observation"]["id"] for item in body["observations"]]
+    metric_definition_ids = {
+        observation["metric_definition_id"]
+        for observation in event.payload["observations"]
+    }
+    assert metric_definition_ids == {metric["id"]}
+    outside_events = asyncio.run(
+        _realtime_events(sessionmaker, seeded.outside_workspace_id)
+    )
+    assert outside_events == []
 
 
 def test_analytics_observations_bulk_route_reuses_existing_idempotency_rows(
@@ -674,7 +789,7 @@ def test_analytics_observations_bulk_route_reuses_existing_idempotency_rows(
         SeededAnalyticsApi,
     ],
 ) -> None:
-    client, _sessionmaker, seeded = analytics_client
+    client, sessionmaker, seeded = analytics_client
     _set_context(client, seeded)
     metric = _create_metric(client, seeded.workspace_id)
     base = f"/api/v1/workspaces/{seeded.workspace_id}/analytics/observations"
@@ -701,6 +816,10 @@ def test_analytics_observations_bulk_route_reuses_existing_idempotency_rows(
     assert body["observations"][0]["observation"]["id"] == first.json()["id"]
     assert body["observations"][0]["observation"]["value_numeric"] == "100.000000"
     assert listed.json()["total"] == 1
+    events = asyncio.run(_realtime_events(sessionmaker, seeded.workspace_id))
+    assert [event.event_type for event in events] == [
+        RealtimeEventType.analytics_observation_created.value
+    ]
 
 
 def test_analytics_observations_bulk_route_returns_structured_errors_without_writes(
@@ -710,7 +829,7 @@ def test_analytics_observations_bulk_route_returns_structured_errors_without_wri
         SeededAnalyticsApi,
     ],
 ) -> None:
-    client, _sessionmaker, seeded = analytics_client
+    client, sessionmaker, seeded = analytics_client
     _set_context(client, seeded)
     metric = _create_metric(client, seeded.workspace_id)
     base = f"/api/v1/workspaces/{seeded.workspace_id}/analytics/observations"
@@ -764,6 +883,7 @@ def test_analytics_observations_bulk_route_returns_structured_errors_without_wri
         }
     }
     assert listed.json()["total"] == 0
+    assert asyncio.run(_realtime_events(sessionmaker, seeded.workspace_id)) == []
 
 
 def test_analytics_observations_bulk_route_rejects_duplicate_keys_in_request(

@@ -12,6 +12,7 @@ import {
 } from "react";
 import { usePathname, useRouter } from "next/navigation";
 
+import { invalidateAnalyticsWorkspaceCache } from "../analytics";
 import { clearOrganizationScopedBrowserCaches } from "../browser-cache";
 import { invalidateCampaignCache, shouldInvalidateCampaignRealtimeCacheKey } from "../campaigns";
 import { invalidateProfileCache } from "../profiles";
@@ -50,6 +51,7 @@ const OrganizationRealtimeContext = createContext<OrganizationRealtimeContextVal
 const maxRecentActivityEvents = 25;
 const profileEventPrefix = "profile.";
 const campaignEventPrefix = "campaign.";
+const analyticsEventPrefix = "analytics.";
 const artistProfileEventTypes = new Set<string>([
   "profile.artist_updated",
   "profile.artist_profile_created",
@@ -278,6 +280,9 @@ export function useOrganizationRealtime(organizationId: string | null): Organiza
               }),
             );
           }
+          if (event.type.startsWith(analyticsEventPrefix)) {
+            invalidateAnalyticsWorkspaceCache(organizationId);
+          }
           if (
             event.type === "member.updated" ||
             event.type === "member.role_changed" ||
@@ -301,7 +306,13 @@ export function useOrganizationRealtime(organizationId: string | null): Organiza
             pathname === "/dashboard" && activityEventTypes.has(event.type);
           const isCampaignWorkspaceRefresh =
             pathname.startsWith("/campaigns") && event.type.startsWith(campaignEventPrefix);
-          if (!isDashboardActivityRefresh && !isCampaignWorkspaceRefresh) {
+          const isAnalyticsWorkspaceRefresh =
+            pathname.startsWith("/analytics") && event.type.startsWith(analyticsEventPrefix);
+          if (
+            !isDashboardActivityRefresh &&
+            !isCampaignWorkspaceRefresh &&
+            !isAnalyticsWorkspaceRefresh
+          ) {
             clearOrganizationScopedBrowserCaches();
             router.refresh();
           }

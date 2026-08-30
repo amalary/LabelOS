@@ -483,6 +483,29 @@ export function invalidateAnalyticsCache(predicate?: (key: string) => boolean) {
   }
 }
 
+export function shouldInvalidateAnalyticsRealtimeCacheKey({
+  key,
+  workspaceId,
+}: {
+  key: string;
+  workspaceId: string;
+}) {
+  return (
+    key === analyticsQueryKeys.metricDefinitions(workspaceId) ||
+    key.startsWith(`analytics:observations:${workspaceId}:`) ||
+    key.startsWith(`analytics:latest:${workspaceId}:`) ||
+    key.startsWith(`analytics:series:${workspaceId}:`) ||
+    key.startsWith(`analytics:summary:${workspaceId}:`) ||
+    key.startsWith(`analytics:comparison:${workspaceId}:`)
+  );
+}
+
+export function invalidateAnalyticsWorkspaceCache(workspaceId: string) {
+  invalidateAnalyticsCache((key) =>
+    shouldInvalidateAnalyticsRealtimeCacheKey({ key, workspaceId }),
+  );
+}
+
 export function clearAnalyticsCache() {
   cache.clear();
   activeMutationCount = 0;

@@ -10,6 +10,7 @@ from labelos_database.models import (
     AnalyticsMetricValueType,
     AnalyticsObservation,
     AnalyticsProvider,
+    User,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,6 +21,7 @@ from labelos_api.authorization import (
     ResourceKind,
     authorization_service,
 )
+from labelos_api.realtime import RealtimeEventType, RealtimePublisher
 from labelos_api.repositories import analytics
 
 
@@ -454,6 +456,88 @@ def _comparison_status(
     return AnalyticsComparisonStatus.compared
 
 
+def _realtime_actor(actor: AuthorizationActorInput | None) -> User | None:
+    if isinstance(actor, User):
+        return actor
+    user = getattr(actor, "user", None)
+    return user if isinstance(user, User) else None
+
+
+def _analytics_observation_event_payload(
+    observation: AnalyticsObservation,
+) -> dict[str, str | None]:
+    return {
+        "workspace_id": str(observation.organization_id),
+        "observation_id": str(observation.id),
+        "metric_definition_id": str(observation.metric_definition_id),
+        "artist_profile_id": (
+            str(observation.artist_profile_id)
+            if observation.artist_profile_id is not None
+            else None
+        ),
+        "campaign_id": (
+            str(observation.campaign_id)
+            if observation.campaign_id is not None
+            else None
+        ),
+        "campaign_object_type": observation.campaign_object_type,
+        "campaign_object_id": (
+            str(observation.campaign_object_id)
+            if observation.campaign_object_id is not None
+            else None
+        ),
+        "observed_at": observation.observed_at.isoformat(),
+    }
+
+
+async def _publish_observation_created_event(
+    session: AsyncSession,
+    *,
+    workspace_id: UUID,
+    observation: AnalyticsObservation,
+    actor: AuthorizationActorInput | None,
+) -> None:
+    await RealtimePublisher(session).publish(
+        organization_id=workspace_id,
+        event_type=RealtimeEventType.analytics_observation_created,
+        actor=_realtime_actor(actor),
+        entity_type="analytics_observation",
+        entity_id=observation.id,
+        payload=_analytics_observation_event_payload(observation),
+    )
+
+
+async def _publish_observations_ingested_event(
+    session: AsyncSession,
+    *,
+    workspace_id: UUID,
+    results: list[AnalyticsBulkObservationResult],
+    actor: AuthorizationActorInput | None,
+) -> None:
+    created_observations = [
+        result.observation for result in results if result.created
+    ]
+    if not created_observations:
+        return
+    await RealtimePublisher(session).publish(
+        organization_id=workspace_id,
+        event_type=RealtimeEventType.analytics_observations_ingested,
+        actor=_realtime_actor(actor),
+        entity_type="analytics_observation_batch",
+        entity_id=workspace_id,
+        payload={
+            "workspace_id": str(workspace_id),
+            "created_count": len(created_observations),
+            "existing_count": len(results) - len(created_observations),
+            "observation_count": len(results),
+            "observations": [
+                _analytics_observation_event_payload(observation)
+                for observation in created_observations
+            ],
+        },
+    )
+
+
 async def _require_capability(
     session: AsyncSession,
     *,
@@ -773,6 +857,13 @@ async def create_observation_result(
         workspace_id,
         payload,
     )
+    if result.created:
+        await _publish_observation_created_event(
+            session,
+            workspace_id=workspace_id,
+            observation=result.observation,
+            actor=actor,
+        )
     await session.commit()
     return result
 
@@ -871,8 +962,14 @@ async def ingest_observations_bulk(
             )
         )
 
-    await session.commit()
     created_count = sum(1 for result in results if result.created)
+    await _publish_observations_ingested_event(
+        session,
+        workspace_id=workspace_id,
+        results=results,
+        actor=actor,
+    )
+    await session.commit()
     return AnalyticsBulkObservationIngestResult(
         results=tuple(results),
         created_count=created_count,
