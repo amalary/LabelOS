@@ -571,6 +571,8 @@ async def campaign_milestone_in_workspace(
         )
         is not None
     )
+
+
 async def marketing_content_item_in_workspace(
     session: AsyncSession,
     workspace_id: UUID,
