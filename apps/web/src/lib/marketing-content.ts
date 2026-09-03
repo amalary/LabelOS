@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useSyncExternalStore } from "react";
 
 export type MarketingContentApiErrorCode =
-  "unauthorized" | "forbidden" | "not_found" | "conflict" | "network_failure";
+  "unauthorized" | "forbidden" | "not_found" | "conflict" | "validation" | "network_failure";
 
 export class MarketingContentApiError extends Error {
   constructor(
@@ -236,7 +236,34 @@ function emitMutationChange() {
   }
 }
 
-function toMarketingContentApiError(status: number): MarketingContentApiError {
+function errorDetailMessage(detail: unknown): string | null {
+  if (typeof detail === "string") {
+    return detail;
+  }
+  if (Array.isArray(detail)) {
+    return detail
+      .map((entry) => {
+        if (entry && typeof entry === "object" && "msg" in entry) {
+          return String(entry.msg);
+        }
+        return null;
+      })
+      .filter(Boolean)
+      .join(" ");
+  }
+  return null;
+}
+
+async function responseErrorDetail(response: Response): Promise<string | null> {
+  try {
+    const payload = (await response.json()) as { detail?: unknown };
+    return errorDetailMessage(payload.detail);
+  } catch {
+    return null;
+  }
+}
+
+function toMarketingContentApiError(status: number, detail?: string | null): MarketingContentApiError {
   if (status === 401) {
     return new MarketingContentApiError(
       "unauthorized",
@@ -255,9 +282,16 @@ function toMarketingContentApiError(status: number): MarketingContentApiError {
     return new MarketingContentApiError("not_found", "Marketing content was not found.", status);
   }
   if (status === 400 || status === 409 || status === 422) {
+    if (status === 422) {
+      return new MarketingContentApiError(
+        "validation",
+        detail || "Marketing content has validation errors.",
+        status,
+      );
+    }
     return new MarketingContentApiError(
       "conflict",
-      "Marketing content could not be changed.",
+      detail || "Marketing content could not be changed.",
       status,
     );
   }
@@ -288,7 +322,7 @@ async function marketingContentJson<T>(path: string, init?: RequestInit): Promis
   }
 
   if (!response.ok) {
-    throw toMarketingContentApiError(response.status);
+    throw toMarketingContentApiError(response.status, await responseErrorDetail(response));
   }
   return (await response.json()) as T;
 }

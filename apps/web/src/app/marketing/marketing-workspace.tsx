@@ -1,16 +1,21 @@
 "use client";
 
 import { Badge, Button, Card, EmptyState, LoadingState, PageHeader, cn } from "@label-os/ui";
-import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useMemo, useState } from "react";
 
 import { can, capabilities } from "../../lib/authorization";
 import { type Campaign, useCampaigns } from "../../lib/campaigns";
 import {
+  type MarketingContentChannelCreate,
   type MarketingContentItem,
+  type MarketingContentItemCreate,
   type MarketingContentItemStatus,
+  type MarketingContentItemUpdate,
   type MarketingContentListOptions,
+  useCreateMarketingContentItem,
+  useTransitionMarketingContentStatus,
+  useUpdateMarketingContentItem,
   useWorkspaceCalendarContent,
 } from "../../lib/marketing-content";
 import { useActiveWorkspace, useActiveWorkspaceProfile } from "../../lib/workspace-context";
@@ -302,6 +307,158 @@ type CalendarFilters = {
   status: string;
 };
 
+type ContentEditorMode = "create" | "edit";
+
+type ChannelFormRow = {
+  id: string;
+  channel: string;
+  placement: string;
+  scheduledAt: string;
+  copyTextOverride: string;
+  assetRefsJson: string;
+};
+
+type ContentFormState = {
+  campaignId: string;
+  artistId: string;
+  releaseId: string;
+  title: string;
+  contentType: string;
+  copyText: string;
+  assetRefsJson: string;
+  ownerProfileId: string;
+  scheduledAt: string;
+  channels: ChannelFormRow[];
+};
+
+const contentTypeOptions = ["social_post", "video", "email", "ad", "press", "playlist_pitch"];
+
+function formatDateTimeInput(value: string | null): string {
+  return value ? value.slice(0, 16) : "";
+}
+
+function selectedDateInput(dateKey: string | null): string {
+  return dateKey ? `${dateKey}T09:00` : "";
+}
+
+function dateTimeInputToIso(value: string): string | null {
+  return value ? new Date(value).toISOString() : null;
+}
+
+function parseAssetRefs(value: string, fieldName: string): unknown[] {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return [];
+  }
+  const parsed = JSON.parse(trimmed) as unknown;
+  if (!Array.isArray(parsed)) {
+    throw new Error(`${fieldName} must be a JSON array.`);
+  }
+  return parsed;
+}
+
+function assetRefsInput(value: unknown[] | null | undefined): string {
+  return value && value.length ? JSON.stringify(value, null, 2) : "";
+}
+
+function channelTargetKey(row: Pick<ChannelFormRow, "channel" | "placement">): string {
+  return `${row.channel.trim().toLowerCase()}::${(row.placement.trim() || "default").toLowerCase()}`;
+}
+
+function duplicateChannelTargets(channels: ChannelFormRow[]): boolean {
+  const seen = new Set<string>();
+  for (const row of channels) {
+    if (!row.channel.trim()) {
+      continue;
+    }
+    const key = channelTargetKey(row);
+    if (seen.has(key)) {
+      return true;
+    }
+    seen.add(key);
+  }
+  return false;
+}
+
+function emptyChannelRow(index: number): ChannelFormRow {
+  return {
+    assetRefsJson: "",
+    channel: index === 0 ? "instagram" : "",
+    copyTextOverride: "",
+    id: `channel_${Date.now()}_${index}`,
+    placement: index === 0 ? "feed" : "",
+    scheduledAt: "",
+  };
+}
+
+function initialFormState({
+  campaigns,
+  createDate,
+  filters,
+  item,
+}: {
+  campaigns: Campaign[];
+  createDate: string | null;
+  filters: CalendarFilters;
+  item?: MarketingContentItem | null;
+}): ContentFormState {
+  if (item) {
+    return {
+      assetRefsJson: assetRefsInput(item.asset_refs),
+      artistId: item.artist_id ?? "",
+      campaignId: item.campaign_id,
+      channels: item.channels.map((channel, index) => ({
+        assetRefsJson: assetRefsInput(channel.asset_refs),
+        channel: channel.channel,
+        copyTextOverride: channel.copy_text_override ?? "",
+        id: channel.id || `channel_${index}`,
+        placement: channel.placement ?? "",
+        scheduledAt: formatDateTimeInput(channel.scheduled_at),
+      })),
+      contentType: item.content_type,
+      copyText: item.copy_text ?? "",
+      ownerProfileId: item.owner_profile_id ?? "",
+      releaseId: item.release_id ?? "",
+      scheduledAt: formatDateTimeInput(item.scheduled_at),
+      title: item.title,
+    };
+  }
+  const campaignId = filters.campaignId || campaigns[0]?.id || "";
+  const campaign = campaigns.find((entry) => entry.id === campaignId);
+  return {
+    assetRefsJson: "",
+    artistId: campaign?.primary_artist?.id ?? "",
+    campaignId,
+    channels: [emptyChannelRow(0)],
+    contentType: "social_post",
+    copyText: "",
+    ownerProfileId: campaign?.owner_profile_id ?? "",
+    releaseId: campaign?.release?.id ?? "",
+    scheduledAt: selectedDateInput(createDate),
+    title: "",
+  };
+}
+
+function formToPayload(form: ContentFormState): MarketingContentItemCreate {
+  return {
+    artist_id: form.artistId || null,
+    asset_refs: parseAssetRefs(form.assetRefsJson, "Asset references"),
+    channels: form.channels.map<MarketingContentChannelCreate>((channel) => ({
+      asset_refs: parseAssetRefs(channel.assetRefsJson, "Channel asset references"),
+      channel: channel.channel,
+      copy_text_override: channel.copyTextOverride || null,
+      placement: channel.placement || null,
+      scheduled_at: dateTimeInputToIso(channel.scheduledAt),
+    })),
+    content_type: form.contentType,
+    copy_text: form.copyText || null,
+    owner_profile_id: form.ownerProfileId || null,
+    release_id: form.releaseId || null,
+    scheduled_at: dateTimeInputToIso(form.scheduledAt),
+    title: form.title,
+  };
+}
+
 function Filters({
   campaigns,
   filters,
@@ -315,6 +472,23 @@ function Filters({
   onChange: (next: Partial<CalendarFilters>) => void;
   onReset: () => void;
 }) {
+  const artistOptions = [
+    ...campaigns.flatMap((campaign) => [
+      ...(campaign.primary_artist ? [campaign.primary_artist] : []),
+      ...campaign.artists.map((entry) => entry.artist),
+    ]),
+  ].filter(
+    (artist, index, artists) => artists.findIndex((entry) => entry.id === artist.id) === index,
+  );
+  const releaseOptions = [
+    ...campaigns.flatMap((campaign) => [
+      ...(campaign.release ? [campaign.release] : []),
+      ...campaign.releases.map((entry) => entry.release),
+    ]),
+  ].filter(
+    (release, index, releases) =>
+      releases.findIndex((entry) => entry.id === release.id) === index,
+  );
   return (
     <Card className="grid gap-3 p-4">
       <div className="grid gap-3 md:grid-cols-5">
@@ -365,27 +539,39 @@ function Filters({
         </label>
         <label className="grid gap-1 text-sm font-medium text-slate-700">
           <span>Artist</span>
-          <input
+          <select
             className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950"
             onChange={(event) => onChange({ artistId: event.target.value })}
-            placeholder="Artist ID"
             value={filters.artistId}
-          />
+          >
+            <option value="">Any artist</option>
+            {artistOptions.map((artist) => (
+              <option key={artist.id} value={artist.id}>
+                {artist.name}
+              </option>
+            ))}
+          </select>
         </label>
         <label className="grid gap-1 text-sm font-medium text-slate-700">
           <span>Release</span>
-          <input
+          <select
             className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950"
             onChange={(event) => onChange({ releaseId: event.target.value })}
-            placeholder="Release ID"
             value={filters.releaseId}
-          />
+          >
+            <option value="">Any release</option>
+            {releaseOptions.map((release) => (
+              <option key={release.id} value={release.id}>
+                {release.title}
+              </option>
+            ))}
+          </select>
         </label>
       </div>
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="text-xs text-slate-500">
-          Filters are sent to the marketing content API. Artist and release selectors use IDs until
-          relationship lookup endpoints are exposed here.
+          Filters are sent to the marketing content API using campaigns and linked catalog
+          relationships in this workspace.
         </p>
         <Button
           disabled={!filtersActive(filters) || isLoadingCampaigns}
@@ -401,17 +587,457 @@ function Filters({
   );
 }
 
+function ContentEditor({
+  campaigns,
+  canApprove,
+  canEdit,
+  canSubmitForReview,
+  createDate,
+  filters,
+  item,
+  mode,
+  onCancel,
+  onSaved,
+  timeZone,
+}: {
+  campaigns: Campaign[];
+  canApprove: boolean;
+  canEdit: boolean;
+  canSubmitForReview: boolean;
+  createDate: string | null;
+  filters: CalendarFilters;
+  item: MarketingContentItem | null;
+  mode: ContentEditorMode;
+  onCancel: () => void;
+  onSaved: () => void;
+  timeZone: string;
+}) {
+  const [form, setForm] = useState(() =>
+    initialFormState({ campaigns, createDate, filters, item }),
+  );
+  const [clientError, setClientError] = useState<string | null>(null);
+  const selectedCampaign = campaigns.find((campaign) => campaign.id === form.campaignId) ?? null;
+  const create = useCreateMarketingContentItem(
+    selectedCampaign?.workspace_id ?? item?.workspace_id ?? null,
+    mode === "create" ? form.campaignId || null : null,
+  );
+  const update = useUpdateMarketingContentItem(
+    item?.workspace_id ?? selectedCampaign?.workspace_id ?? null,
+    item?.campaign_id ?? null,
+    item?.id ?? null,
+  );
+  const transition = useTransitionMarketingContentStatus(
+    item?.workspace_id ?? selectedCampaign?.workspace_id ?? null,
+    item?.campaign_id ?? null,
+    item?.id ?? null,
+  );
+  const isEditable = mode === "create" || canEdit;
+  const artistOptions = selectedCampaign
+    ? [
+        ...(selectedCampaign.primary_artist ? [selectedCampaign.primary_artist] : []),
+        ...selectedCampaign.artists.map((entry) => entry.artist),
+      ].filter(
+        (artist, index, artists) => artists.findIndex((entry) => entry.id === artist.id) === index,
+      )
+    : [];
+  const releaseOptions = (selectedCampaign
+    ? [
+        ...(selectedCampaign.release ? [selectedCampaign.release] : []),
+        ...selectedCampaign.releases.map((entry) => entry.release),
+      ].filter(
+        (release, index, releases) =>
+          releases.findIndex((entry) => entry.id === release.id) === index,
+      )
+    : []
+  ).filter((release) => !form.artistId || !release.artist_id || release.artist_id === form.artistId);
+  const ownerOptions = selectedCampaign?.members ?? [];
+  const duplicateChannels = duplicateChannelTargets(form.channels);
+  const mutationError = create.error ?? update.error ?? transition.error;
+  const isMutating = create.isMutating || update.isMutating || transition.isMutating;
+
+  const setField = (next: Partial<ContentFormState>) => {
+    setClientError(null);
+    setForm((current) => ({ ...current, ...next }));
+  };
+  const setChannel = (id: string, next: Partial<ChannelFormRow>) => {
+    setClientError(null);
+    setForm((current) => ({
+      ...current,
+      channels: current.channels.map((channel) =>
+        channel.id === id ? { ...channel, ...next } : channel,
+      ),
+    }));
+  };
+
+  async function saveDraft() {
+    setClientError(null);
+    if (!form.campaignId) {
+      setClientError("Campaign is required.");
+      return;
+    }
+    if (!form.title.trim()) {
+      setClientError("Title is required.");
+      return;
+    }
+    if (!form.contentType.trim()) {
+      setClientError("Content type is required.");
+      return;
+    }
+    if (form.channels.length < 1 || form.channels.some((channel) => !channel.channel.trim())) {
+      setClientError("At least one channel is required.");
+      return;
+    }
+    if (duplicateChannels) {
+      setClientError("Each channel and placement target can only be selected once.");
+      return;
+    }
+    if (form.artistId && !artistOptions.some((artist) => artist.id === form.artistId)) {
+      setClientError("Choose an artist linked to this workspace campaign.");
+      return;
+    }
+    if (form.releaseId && !releaseOptions.some((release) => release.id === form.releaseId)) {
+      setClientError("Choose a release linked to this workspace campaign.");
+      return;
+    }
+    try {
+      const payload = formToPayload(form);
+      if (mode === "create") {
+        await create.mutate(payload);
+      } else {
+        await update.mutate(payload as MarketingContentItemUpdate);
+      }
+      onSaved();
+    } catch (error) {
+      if (error instanceof SyntaxError || error instanceof Error) {
+        setClientError(error.message);
+      }
+    }
+  }
+
+  async function submitForReview() {
+    setClientError(null);
+    if (!item) {
+      return;
+    }
+    try {
+      await transition.mutate({ status: "in_review" });
+      onSaved();
+    } catch {
+      // The mutation state renders API denial and invalid transition messages.
+    }
+  }
+
+  async function approveForAdminTest() {
+    setClientError(null);
+    if (!item) {
+      return;
+    }
+    try {
+      await transition.mutate({ status: "approved" });
+      onSaved();
+    } catch {
+      // The mutation state renders API denial and invalid transition messages.
+    }
+  }
+
+  return (
+    <Card className="grid gap-4 p-4" role="region" aria-label="Marketing content editor">
+      <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+        <div>
+          <h2 className="text-lg font-semibold text-slate-950">
+            {mode === "create" ? "Create content draft" : "Edit content"}
+          </h2>
+          <p className="text-sm text-slate-500">
+            Schedule for calendar by setting a planned publish time. LabelOS will not automatically
+            publish posts yet.
+          </p>
+          {item ? (
+            <p className="mt-1 text-xs font-medium text-slate-500">
+              Current status: {humanize(item.status)}
+            </p>
+          ) : null}
+        </div>
+        <Button onClick={onCancel} size="sm" type="button" variant="secondary">
+          Close
+        </Button>
+      </div>
+
+      {clientError || mutationError ? (
+        <div className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-900" role="alert">
+          {clientError ?? mutationError?.message}
+        </div>
+      ) : null}
+
+      <div className="grid gap-3 md:grid-cols-2">
+        <label className="grid gap-1 text-sm font-medium text-slate-700">
+          <span>Campaign</span>
+          <select
+            className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950"
+            disabled={!isEditable || mode === "edit"}
+            onChange={(event) => {
+              const campaign = campaigns.find((entry) => entry.id === event.target.value);
+              setField({
+                artistId: campaign?.primary_artist?.id ?? "",
+                campaignId: event.target.value,
+                ownerProfileId: campaign?.owner_profile_id ?? "",
+                releaseId: campaign?.release?.id ?? "",
+              });
+            }}
+            value={form.campaignId}
+          >
+            <option value="">Choose campaign</option>
+            {campaigns.map((campaign) => (
+              <option key={campaign.id} value={campaign.id}>
+                {campaign.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="grid gap-1 text-sm font-medium text-slate-700">
+          <span>Title</span>
+          <input
+            className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950"
+            disabled={!isEditable}
+            onChange={(event) => setField({ title: event.target.value })}
+            value={form.title}
+          />
+        </label>
+        <label className="grid gap-1 text-sm font-medium text-slate-700">
+          <span>Artist</span>
+          <select
+            className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950"
+            disabled={!isEditable || !selectedCampaign}
+            onChange={(event) => setField({ artistId: event.target.value })}
+            value={form.artistId}
+          >
+            <option value="">No artist</option>
+            {artistOptions.map((artist) => (
+              <option key={artist.id} value={artist.id}>
+                {artist.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="grid gap-1 text-sm font-medium text-slate-700">
+          <span>Release</span>
+          <select
+            className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950"
+            disabled={!isEditable || !selectedCampaign}
+            onChange={(event) => setField({ releaseId: event.target.value })}
+            value={form.releaseId}
+          >
+            <option value="">No release</option>
+            {releaseOptions.map((release) => (
+              <option key={release.id} value={release.id}>
+                {release.title}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="grid gap-1 text-sm font-medium text-slate-700">
+          <span>Content Type</span>
+          <select
+            className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950"
+            disabled={!isEditable}
+            onChange={(event) => setField({ contentType: event.target.value })}
+            value={form.contentType}
+          >
+            {contentTypeOptions.map((contentType) => (
+              <option key={contentType} value={contentType}>
+                {humanize(contentType)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="grid gap-1 text-sm font-medium text-slate-700">
+          <span>Owner</span>
+          <select
+            className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950"
+            disabled={!isEditable || !selectedCampaign}
+            onChange={(event) => setField({ ownerProfileId: event.target.value })}
+            value={form.ownerProfileId}
+          >
+            <option value="">No owner</option>
+            {ownerOptions.map((member) => (
+              <option key={member.profile_id} value={member.profile_id}>
+                {member.display_name ?? member.profile_id}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="grid gap-1 text-sm font-medium text-slate-700 md:col-span-2">
+          <span>Planned publish time</span>
+          <input
+            aria-label="Planned publish time"
+            className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950"
+            disabled={!isEditable}
+            onChange={(event) => setField({ scheduledAt: event.target.value })}
+            type="datetime-local"
+            value={form.scheduledAt}
+          />
+          <span className="text-xs font-normal text-slate-500">Calendar timezone: {timeZone}</span>
+        </label>
+        <label className="grid gap-1 text-sm font-medium text-slate-700 md:col-span-2">
+          <span>Core Copy / Caption</span>
+          <textarea
+            className="min-h-24 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-950"
+            disabled={!isEditable}
+            onChange={(event) => setField({ copyText: event.target.value })}
+            value={form.copyText}
+          />
+        </label>
+        <label className="grid gap-1 text-sm font-medium text-slate-700 md:col-span-2">
+          <span>Asset references</span>
+          <textarea
+            className="min-h-20 rounded-md border border-slate-300 bg-white px-3 py-2 font-mono text-xs text-slate-950"
+            disabled={!isEditable}
+            onChange={(event) => setField({ assetRefsJson: event.target.value })}
+            placeholder='[{"id":"asset_01","type":"image"}]'
+            value={form.assetRefsJson}
+          />
+        </label>
+      </div>
+
+      <div className="grid gap-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h3 className="text-base font-semibold text-slate-950">Channel targets</h3>
+          <Button
+            disabled={!isEditable}
+            onClick={() =>
+              setForm((current) => ({
+                ...current,
+                channels: [...current.channels, emptyChannelRow(current.channels.length)],
+              }))
+            }
+            size="sm"
+            type="button"
+            variant="secondary"
+          >
+            Add channel
+          </Button>
+        </div>
+        {duplicateChannels ? (
+          <p className="text-sm font-medium text-red-700">
+            Duplicate channel and placement targets are not allowed.
+          </p>
+        ) : null}
+        {form.channels.map((channel, index) => (
+          <div className="grid gap-3 rounded-md border border-slate-200 p-3" key={channel.id}>
+            <div className="grid gap-3 md:grid-cols-[1fr_1fr_1fr_auto]">
+              <label className="grid gap-1 text-sm font-medium text-slate-700">
+                <span>Channel</span>
+                <select
+                  className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950"
+                  disabled={!isEditable}
+                  onChange={(event) => setChannel(channel.id, { channel: event.target.value })}
+                  value={channel.channel}
+                >
+                  <option value="">Choose channel</option>
+                  {channelOptions.map((option) => (
+                    <option key={option} value={option}>
+                      {humanize(option)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="grid gap-1 text-sm font-medium text-slate-700">
+                <span>Placement</span>
+                <input
+                  className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950"
+                  disabled={!isEditable}
+                  onChange={(event) => setChannel(channel.id, { placement: event.target.value })}
+                  placeholder="default"
+                  value={channel.placement}
+                />
+              </label>
+              <label className="grid gap-1 text-sm font-medium text-slate-700">
+                <span>Channel planned publish time</span>
+                <input
+                  aria-label="Channel planned publish time"
+                  className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950"
+                  disabled={!isEditable}
+                  onChange={(event) => setChannel(channel.id, { scheduledAt: event.target.value })}
+                  type="datetime-local"
+                  value={channel.scheduledAt}
+                />
+              </label>
+              <Button
+                className="self-end"
+                disabled={!isEditable || form.channels.length === 1}
+                onClick={() =>
+                  setForm((current) => ({
+                    ...current,
+                    channels: current.channels.filter((entry) => entry.id !== channel.id),
+                  }))
+                }
+                size="sm"
+                type="button"
+                variant="secondary"
+              >
+                Remove
+              </Button>
+            </div>
+            <label className="grid gap-1 text-sm font-medium text-slate-700">
+              <span>Channel copy override</span>
+              <textarea
+                className="min-h-16 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-950"
+                disabled={!isEditable}
+                onChange={(event) =>
+                  setChannel(channel.id, { copyTextOverride: event.target.value })
+                }
+                value={channel.copyTextOverride}
+              />
+            </label>
+            <label className="grid gap-1 text-sm font-medium text-slate-700">
+              <span>Channel asset references</span>
+              <textarea
+                className="min-h-16 rounded-md border border-slate-300 bg-white px-3 py-2 font-mono text-xs text-slate-950"
+                disabled={!isEditable}
+                onChange={(event) => setChannel(channel.id, { assetRefsJson: event.target.value })}
+                placeholder="[]"
+                value={channel.assetRefsJson}
+              />
+            </label>
+            <p className="text-xs text-slate-500">Target {index + 1}</p>
+          </div>
+        ))}
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <Button disabled={!isEditable || isMutating} onClick={saveDraft} type="button">
+          {mode === "create" ? "Save draft" : "Save changes"}
+        </Button>
+        {item?.status === "draft" && canSubmitForReview ? (
+          <Button disabled={isMutating} onClick={submitForReview} type="button" variant="secondary">
+            Submit for Review
+          </Button>
+        ) : null}
+        {item?.status === "in_review" && canApprove ? (
+          <Button disabled={isMutating} onClick={approveForAdminTest} type="button" variant="secondary">
+            Approve
+          </Button>
+        ) : null}
+        {!isEditable ? (
+          <span className="text-sm text-slate-500">You need edit access to change this content.</span>
+        ) : null}
+      </div>
+    </Card>
+  );
+}
+
 function MonthCalendar({
   campaigns,
   days,
   instancesByDay,
   onEmptyDayClick,
+  onItemClick,
   timeZone,
 }: {
   campaigns: Campaign[];
   days: CalendarDay[];
   instancesByDay: Map<string, MarketingScheduleInstance[]>;
   onEmptyDayClick: (dateKey: string) => void;
+  onItemClick: (item: MarketingContentItem) => void;
   timeZone: string;
 }) {
   return (
@@ -452,10 +1078,11 @@ function MonthCalendar({
               </button>
               <div className="grid gap-1">
                 {dayItems.slice(0, 3).map((instance) => (
-                  <Link
+                  <button
                     className="grid gap-1 rounded-md border border-slate-200 bg-slate-50 px-2 py-1.5 text-left transition hover:border-slate-400 hover:bg-white"
-                    href={`/campaigns/${instance.item.campaign_id}?contentId=${instance.item.id}`}
                     key={instance.item.id}
+                    onClick={() => onItemClick(instance.item)}
+                    type="button"
                   >
                     <span className="truncate text-xs font-semibold text-slate-950">
                       {instance.item.title}
@@ -476,7 +1103,7 @@ function MonthCalendar({
                     <span className="truncate text-xs text-slate-500">
                       {campaignName(campaigns, instance.item.campaign_id)}
                     </span>
-                  </Link>
+                  </button>
                 ))}
                 {dayItems.length > 3 ? (
                   <span className="text-xs font-medium text-slate-500">
@@ -495,10 +1122,12 @@ function MonthCalendar({
 function CalendarList({
   campaigns,
   instances,
+  onItemClick,
   timeZone,
 }: {
   campaigns: Campaign[];
   instances: MarketingScheduleInstance[];
+  onItemClick: (item: MarketingContentItem) => void;
   timeZone: string;
 }) {
   return (
@@ -511,10 +1140,11 @@ function CalendarList({
       </div>
       <div className="divide-y divide-slate-100">
         {instances.map((instance) => (
-          <Link
-            className="grid gap-3 px-4 py-4 transition hover:bg-slate-50 md:grid-cols-[190px_minmax(0,1fr)_170px_170px]"
-            href={`/campaigns/${instance.item.campaign_id}?contentId=${instance.item.id}`}
+          <button
+            className="grid gap-3 px-4 py-4 text-left transition hover:bg-slate-50 md:grid-cols-[190px_minmax(0,1fr)_170px_170px]"
             key={instance.item.id}
+            onClick={() => onItemClick(instance.item)}
+            type="button"
           >
             <div>
               <p className="text-xs font-semibold uppercase text-slate-500">Planned</p>
@@ -553,7 +1183,7 @@ function CalendarList({
                 {relationshipLabel(instance.item.release_id)}
               </p>
             </div>
-          </Link>
+          </button>
         ))}
       </div>
     </Card>
@@ -578,6 +1208,7 @@ export function MarketingWorkspace() {
   const [activeTab, setActiveTab] = useState<MarketingTab>("calendar");
   const [view, setView] = useState<CalendarView>("month");
   const initialCampaignId = searchParams.get("campaignId") ?? "";
+  const createDate = searchParams.get("createDate");
   const timeZone =
     workspaceProfile.membership?.profile.preferences.timezone ??
     workspaceProfile.membership?.profile.timezone ??
@@ -590,11 +1221,32 @@ export function MarketingWorkspace() {
     status: "",
   });
   const [monthDate, setMonthDate] = useState(() => currentMonthDate(timeZone));
+  const [editor, setEditor] = useState<
+    | { key: string; mode: "create"; item: null; createDate: string | null }
+    | { key: string; mode: "edit"; item: MarketingContentItem; createDate: null }
+    | null
+  >(() => (createDate ? { createDate, item: null, key: `create:${createDate}`, mode: "create" } : null));
   const range = useMemo(() => calendarVisibleRange(monthDate, timeZone), [monthDate, timeZone]);
   const campaigns = useCampaigns(activeWorkspace?.id ?? null, { limit: 500, offset: 0 });
   const canView =
     workspaceProfile.subject && activeWorkspace
       ? can(workspaceProfile.subject, null, capabilities.marketingContentView)
+      : false;
+  const canCreate =
+    workspaceProfile.subject && activeWorkspace
+      ? can(workspaceProfile.subject, null, capabilities.marketingContentCreate)
+      : false;
+  const canEdit =
+    workspaceProfile.subject && activeWorkspace
+      ? can(workspaceProfile.subject, null, capabilities.marketingContentEdit)
+      : false;
+  const canSubmitForReview =
+    workspaceProfile.subject && activeWorkspace
+      ? can(workspaceProfile.subject, null, capabilities.marketingContentSubmitForReview)
+      : false;
+  const canApprove =
+    workspaceProfile.subject && activeWorkspace
+      ? can(workspaceProfile.subject, null, capabilities.marketingContentApprove)
       : false;
   const calendarOptions = useMemo<MarketingContentListOptions>(
     () => ({
@@ -646,6 +1298,30 @@ export function MarketingWorkspace() {
     },
     [pathname, router, searchParams],
   );
+
+  const openCreateEditor = useCallback(
+    (dateKey: string | null = null) => {
+      setEditor({
+        createDate: dateKey,
+        item: null,
+        key: `create:${dateKey ?? "blank"}:${Date.now()}`,
+        mode: "create",
+      });
+      updateUrl(filters, dateKey ?? undefined);
+    },
+    [filters, updateUrl],
+  );
+
+  const closeEditor = useCallback(() => {
+    setEditor(null);
+    updateUrl(filters);
+  }, [filters, updateUrl]);
+
+  const handleSaved = useCallback(() => {
+    setEditor(null);
+    updateUrl(filters);
+    void calendarContent.reload().catch(() => undefined);
+  }, [calendarContent, filters, updateUrl]);
 
   const updateFilters = useCallback(
     (next: Partial<CalendarFilters>) => {
@@ -750,6 +1426,11 @@ export function MarketingWorkspace() {
               <Button onClick={() => moveMonth(1)} size="sm" type="button" variant="secondary">
                 Next
               </Button>
+              {canCreate ? (
+                <Button onClick={() => openCreateEditor()} size="sm" type="button">
+                  Create Content
+                </Button>
+              ) : null}
               <div className="ml-0 flex rounded-md border border-slate-300 p-0.5 md:ml-2">
                 <button
                   aria-pressed={view === "month"}
@@ -785,6 +1466,23 @@ export function MarketingWorkspace() {
             onReset={resetFilters}
           />
 
+          {editor ? (
+            <ContentEditor
+              campaigns={campaignList}
+              canApprove={canApprove}
+              canEdit={canEdit}
+              canSubmitForReview={canSubmitForReview}
+              createDate={editor.createDate}
+              filters={filters}
+              item={editor.item}
+              key={editor.key}
+              mode={editor.mode}
+              onCancel={closeEditor}
+              onSaved={handleSaved}
+              timeZone={timeZone}
+            />
+          ) : null}
+
           {calendarContent.error ? (
             <div
               className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-900"
@@ -817,11 +1515,37 @@ export function MarketingWorkspace() {
               campaigns={campaignList}
               days={currentMonthDays}
               instancesByDay={instancesByDay}
-              onEmptyDayClick={(dateKey) => updateUrl(filters, dateKey)}
+              onEmptyDayClick={(dateKey) => {
+                if (canCreate) {
+                  openCreateEditor(dateKey);
+                } else {
+                  updateUrl(filters, dateKey);
+                }
+              }}
+              onItemClick={(selectedItem) =>
+                setEditor({
+                  createDate: null,
+                  item: selectedItem,
+                  key: `edit:${selectedItem.id}:${selectedItem.updated_at}`,
+                  mode: "edit",
+                })
+              }
               timeZone={timeZone}
             />
           ) : (
-            <CalendarList campaigns={campaignList} instances={scheduleInstances} timeZone={timeZone} />
+            <CalendarList
+              campaigns={campaignList}
+              instances={scheduleInstances}
+              onItemClick={(selectedItem) =>
+                setEditor({
+                  createDate: null,
+                  item: selectedItem,
+                  key: `edit:${selectedItem.id}:${selectedItem.updated_at}`,
+                  mode: "edit",
+                })
+              }
+              timeZone={timeZone}
+            />
           )}
         </section>
       ) : null}

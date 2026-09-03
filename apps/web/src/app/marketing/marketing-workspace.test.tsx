@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -14,6 +14,11 @@ const getParam = vi.fn<(key: string) => string | null>((key) =>
   key === "campaignId" ? "" : null,
 );
 let searchParamString = "";
+const mutationMocks = vi.hoisted(() => ({
+  create: vi.fn(),
+  status: vi.fn(),
+  update: vi.fn(),
+}));
 
 vi.mock("next/navigation", () => ({
   usePathname: () => "/marketing",
@@ -44,6 +49,27 @@ vi.mock("../../lib/marketing-content", async () => {
     );
   return {
     ...actual,
+    useCreateMarketingContentItem: vi.fn(() => ({
+      data: null,
+      error: null,
+      isMutating: false,
+      mutate: mutationMocks.create,
+      reset: vi.fn(),
+    })),
+    useTransitionMarketingContentStatus: vi.fn(() => ({
+      data: null,
+      error: null,
+      isMutating: false,
+      mutate: mutationMocks.status,
+      reset: vi.fn(),
+    })),
+    useUpdateMarketingContentItem: vi.fn(() => ({
+      data: null,
+      error: null,
+      isMutating: false,
+      mutate: mutationMocks.update,
+      reset: vi.fn(),
+    })),
     useWorkspaceCalendarContent: vi.fn(),
   };
 });
@@ -218,6 +244,9 @@ describe("MarketingWorkspace", () => {
     vi.setSystemTime(new Date("2026-09-15T12:00:00Z"));
     searchParamString = "";
     getParam.mockImplementation((key: string) => (key === "campaignId" ? "" : null));
+    mutationMocks.create.mockResolvedValue(item({ status: "draft" }));
+    mutationMocks.update.mockResolvedValue(item({ title: "Updated Teaser" }));
+    mutationMocks.status.mockResolvedValue(item({ status: "in_review" }));
     mockWorkspaceProfile();
     mockCalendar();
     vi.mocked(campaignsLib.useCampaigns).mockReturnValue({
@@ -345,6 +374,7 @@ describe("MarketingWorkspace", () => {
   });
 
   it("sets createDate URL state when an empty day is clicked", () => {
+    mockWorkspaceProfile(["marketing.content.view", "marketing.content.create"]);
     render(<MarketingWorkspace />);
 
     fireEvent.click(screen.getByRole("button", { name: "Create content on 2026-09-15" }));
@@ -352,6 +382,213 @@ describe("MarketingWorkspace", () => {
     expect(replace).toHaveBeenLastCalledWith("/marketing?createDate=2026-09-15", {
       scroll: false,
     });
+    expect(screen.getByDisplayValue("2026-09-15T09:00")).toBeInTheDocument();
+  });
+
+  it("creates a draft with campaign, optional relationships, planned time, and channel override", async () => {
+    vi.useRealTimers();
+    const reload = vi.fn();
+    mockWorkspaceProfile(["marketing.content.view", "marketing.content.create"]);
+    vi.mocked(marketingContent.useWorkspaceCalendarContent).mockReturnValue({
+      data: { marketing_content: [], total: 0, limit: 500, offset: 0 },
+      error: null,
+      isLoading: false,
+      isMutating: false,
+      reload,
+    });
+    render(<MarketingWorkspace />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Create Content" }));
+    const editor = screen.getByRole("region", { name: "Marketing content editor" });
+    fireEvent.change(within(editor).getByLabelText("Title"), { target: { value: "Launch post" } });
+    fireEvent.change(within(editor).getByLabelText("Planned publish time"), {
+      target: { value: "2026-09-20T10:30" },
+    });
+    fireEvent.change(within(editor).getByLabelText("Core Copy / Caption"), {
+      target: { value: "Out now" },
+    });
+    fireEvent.change(within(editor).getByLabelText("Asset references"), {
+      target: { value: '[{"id":"asset_01"}]' },
+    });
+    fireEvent.change(within(editor).getByLabelText("Channel planned publish time"), {
+      target: { value: "2026-09-20T11:00" },
+    });
+    fireEvent.change(within(editor).getByLabelText("Channel copy override"), {
+      target: { value: "IG copy" },
+    });
+    fireEvent.click(within(editor).getByRole("button", { name: "Save draft" }));
+
+    await waitFor(() => expect(mutationMocks.create).toHaveBeenCalled());
+    expect(mutationMocks.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        artist_id: "artist_01",
+        asset_refs: [{ id: "asset_01" }],
+        copy_text: "Out now",
+        release_id: "release_01",
+        title: "Launch post",
+      }),
+    );
+    expect(mutationMocks.create.mock.calls[0]?.[0]).not.toHaveProperty("status");
+    expect(mutationMocks.create.mock.calls[0]?.[0].channels).toEqual([
+      expect.objectContaining({
+        channel: "instagram",
+        copy_text_override: "IG copy",
+        placement: "feed",
+        scheduled_at: expect.stringContaining("2026-09-20T"),
+      }),
+    ]);
+    expect(reload).toHaveBeenCalled();
+  });
+
+  it("requires campaign before creating content", async () => {
+    vi.useRealTimers();
+    mockWorkspaceProfile(["marketing.content.view", "marketing.content.create"]);
+    vi.mocked(campaignsLib.useCampaigns).mockReturnValue({
+      data: { campaigns: [], total: 0, limit: 500, offset: 0 },
+      error: null,
+      isLoading: false,
+      isMutating: false,
+      reload: vi.fn(),
+    });
+    mockCalendar([]);
+    render(<MarketingWorkspace />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Create Content" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save draft" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Campaign is required.");
+    expect(mutationMocks.create).not.toHaveBeenCalled();
+  });
+
+  it("creates content with multiple channels and optional artist/release omitted", async () => {
+    vi.useRealTimers();
+    mockWorkspaceProfile(["marketing.content.view", "marketing.content.create"]);
+    mockCalendar([]);
+    render(<MarketingWorkspace />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Create Content" }));
+    const editor = screen.getByRole("region", { name: "Marketing content editor" });
+    fireEvent.change(within(editor).getByLabelText("Title"), { target: { value: "Two channels" } });
+    fireEvent.change(within(editor).getByLabelText("Artist"), { target: { value: "" } });
+    fireEvent.change(within(editor).getByLabelText("Release"), { target: { value: "" } });
+    fireEvent.click(within(editor).getByRole("button", { name: "Add channel" }));
+    const channelSelects = within(editor).getAllByLabelText("Channel");
+    const placements = within(editor).getAllByLabelText("Placement");
+    fireEvent.change(channelSelects[1]!, { target: { value: "tiktok" } });
+    fireEvent.change(placements[1]!, { target: { value: "clip" } });
+    fireEvent.click(within(editor).getByRole("button", { name: "Save draft" }));
+
+    await waitFor(() => expect(mutationMocks.create).toHaveBeenCalled());
+    expect(mutationMocks.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        artist_id: null,
+        release_id: null,
+        channels: [
+          expect.objectContaining({ channel: "instagram", placement: "feed" }),
+          expect.objectContaining({ channel: "tiktok", placement: "clip" }),
+        ],
+      }),
+    );
+  });
+
+  it("blocks duplicate channel and placement selections before the API call", async () => {
+    vi.useRealTimers();
+    mockWorkspaceProfile(["marketing.content.view", "marketing.content.create"]);
+    mockCalendar([]);
+    render(<MarketingWorkspace />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Create Content" }));
+    const editor = screen.getByRole("region", { name: "Marketing content editor" });
+    fireEvent.change(within(editor).getByLabelText("Title"), { target: { value: "Duplicate" } });
+    fireEvent.click(within(editor).getByRole("button", { name: "Add channel" }));
+    const channelSelects = within(editor).getAllByLabelText("Channel");
+    const placements = within(editor).getAllByLabelText("Placement");
+    fireEvent.change(channelSelects[1]!, { target: { value: "instagram" } });
+    fireEvent.change(placements[1]!, { target: { value: "feed" } });
+    fireEvent.click(within(editor).getByRole("button", { name: "Save draft" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Each channel and placement target can only be selected once.",
+    );
+    expect(mutationMocks.create).not.toHaveBeenCalled();
+  });
+
+  it("edits an existing content item with populated channel values", async () => {
+    vi.useRealTimers();
+    mockWorkspaceProfile(["marketing.content.view", "marketing.content.edit"]);
+    render(<MarketingWorkspace />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Single Teaser/ }));
+    const editor = screen.getByRole("region", { name: "Marketing content editor" });
+    expect(within(editor).getByDisplayValue("Single Teaser")).toBeInTheDocument();
+    expect(within(editor).getByDisplayValue("feed")).toBeInTheDocument();
+    fireEvent.change(within(editor).getByLabelText("Title"), {
+      target: { value: "Updated Teaser" },
+    });
+    fireEvent.click(within(editor).getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => expect(mutationMocks.update).toHaveBeenCalled());
+    expect(mutationMocks.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        channels: [expect.objectContaining({ channel: "instagram", placement: "feed" })],
+        title: "Updated Teaser",
+      }),
+    );
+  });
+
+  it("submits draft content for review through the lifecycle action", async () => {
+    vi.useRealTimers();
+    mockWorkspaceProfile([
+      "marketing.content.view",
+      "marketing.content.edit",
+      "marketing.content.submit_for_review",
+    ]);
+    mockCalendar([item({ status: "draft" })]);
+    render(<MarketingWorkspace />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Single Teaser/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Submit for Review" }));
+
+    await waitFor(() => expect(mutationMocks.status).toHaveBeenCalledWith({ status: "in_review" }));
+  });
+
+  it("shows lifecycle actions based on capabilities", () => {
+    mockWorkspaceProfile(["marketing.content.view"]);
+    const { rerender } = render(<MarketingWorkspace />);
+    expect(screen.queryByRole("button", { name: "Create Content" })).not.toBeInTheDocument();
+
+    mockWorkspaceProfile(["marketing.content.view", "marketing.content.approve"]);
+    mockCalendar([item({ status: "in_review" })]);
+    rerender(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: /Single Teaser/ }));
+    expect(screen.getByRole("button", { name: "Approve" })).toBeInTheDocument();
+
+    mockWorkspaceProfile(["marketing.content.view"]);
+    rerender(<MarketingWorkspace />);
+    expect(screen.queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
+  });
+
+  it("renders API error states from create mutations", async () => {
+    vi.useRealTimers();
+    mutationMocks.create.mockRejectedValueOnce(
+      new marketingContent.MarketingContentApiError(
+        "conflict",
+        "Duplicate channel and placement target",
+        409,
+      ),
+    );
+    mockWorkspaceProfile(["marketing.content.view", "marketing.content.create"]);
+    mockCalendar([]);
+    render(<MarketingWorkspace />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Create Content" }));
+    const editor = screen.getByRole("region", { name: "Marketing content editor" });
+    fireEvent.change(within(editor).getByLabelText("Title"), { target: { value: "API failure" } });
+    fireEvent.click(within(editor).getByRole("button", { name: "Save draft" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Duplicate channel and placement target",
+    );
   });
 
   it("renders no-content and no-results states distinctly", () => {
@@ -385,7 +622,7 @@ describe("MarketingWorkspace", () => {
     render(<MarketingWorkspace />);
     fireEvent.click(screen.getByRole("button", { name: "List" }));
 
-    const rows = screen.getAllByRole("link");
+    const rows = screen.getAllByRole("button", { name: /Planned/ });
     expect(within(rows[0]!).getByText("Morning LA Post")).toBeInTheDocument();
     expect(within(rows[0]!).getByText(/Sep 10, 2026, 9:00 AM/)).toBeInTheDocument();
     expect(within(rows[1]!).getByText("Late LA Post")).toBeInTheDocument();
