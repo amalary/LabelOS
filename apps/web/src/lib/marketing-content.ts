@@ -18,13 +18,7 @@ export class MarketingContentApiError extends Error {
 }
 
 export type MarketingContentItemStatus =
-  | "draft"
-  | "in_review"
-  | "approved"
-  | "scheduled"
-  | "published"
-  | "cancelled"
-  | "archived";
+  "draft" | "in_review" | "approved" | "scheduled" | "published" | "cancelled" | "archived";
 
 export type MarketingContentItemChannel = {
   id: string;
@@ -165,8 +159,7 @@ export const marketingContentQueryKeys = {
     workspaceId: string,
     campaignId: string,
     options?: MarketingContentCampaignListOptions,
-  ) =>
-    `marketing-content:campaign-list:${workspaceId}:${campaignId}:${stableQueryKey(options)}`,
+  ) => `marketing-content:campaign-list:${workspaceId}:${campaignId}:${stableQueryKey(options)}`,
   detail: (workspaceId: string, campaignId: string, contentItemId: string) =>
     `marketing-content:detail:${workspaceId}:${campaignId}:${contentItemId}`,
 };
@@ -263,7 +256,10 @@ async function responseErrorDetail(response: Response): Promise<string | null> {
   }
 }
 
-function toMarketingContentApiError(status: number, detail?: string | null): MarketingContentApiError {
+function toMarketingContentApiError(
+  status: number,
+  detail?: string | null,
+): MarketingContentApiError {
   if (status === 401) {
     return new MarketingContentApiError(
       "unauthorized",

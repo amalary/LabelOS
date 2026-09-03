@@ -19,9 +19,8 @@ vi.mock("../../../lib/workspace-context", () => ({
 }));
 
 vi.mock("../../../lib/campaigns", async () => {
-  const actual = await vi.importActual<typeof import("../../../lib/campaigns")>(
-    "../../../lib/campaigns",
-  );
+  const actual =
+    await vi.importActual<typeof import("../../../lib/campaigns")>("../../../lib/campaigns");
   return {
     ...actual,
     useCampaign: vi.fn(),
@@ -31,10 +30,9 @@ vi.mock("../../../lib/campaigns", async () => {
 });
 
 vi.mock("../../../lib/marketing-content", async () => {
-  const actual =
-    await vi.importActual<typeof import("../../../lib/marketing-content")>(
-      "../../../lib/marketing-content",
-    );
+  const actual = await vi.importActual<typeof import("../../../lib/marketing-content")>(
+    "../../../lib/marketing-content",
+  );
   return {
     ...actual,
     useCampaignMarketingContent: vi.fn(),

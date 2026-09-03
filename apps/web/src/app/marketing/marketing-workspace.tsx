@@ -495,8 +495,7 @@ function Filters({
       ...campaign.releases.map((entry) => entry.release),
     ]),
   ].filter(
-    (release, index, releases) =>
-      releases.findIndex((entry) => entry.id === release.id) === index,
+    (release, index, releases) => releases.findIndex((entry) => entry.id === release.id) === index,
   );
   return (
     <Card className="grid gap-3 p-4">
@@ -649,16 +648,19 @@ function ContentEditor({
         (artist, index, artists) => artists.findIndex((entry) => entry.id === artist.id) === index,
       )
     : [];
-  const releaseOptions = (selectedCampaign
-    ? [
-        ...(selectedCampaign.release ? [selectedCampaign.release] : []),
-        ...selectedCampaign.releases.map((entry) => entry.release),
-      ].filter(
-        (release, index, releases) =>
-          releases.findIndex((entry) => entry.id === release.id) === index,
-      )
-    : []
-  ).filter((release) => !form.artistId || !release.artist_id || release.artist_id === form.artistId);
+  const releaseOptions = (
+    selectedCampaign
+      ? [
+          ...(selectedCampaign.release ? [selectedCampaign.release] : []),
+          ...selectedCampaign.releases.map((entry) => entry.release),
+        ].filter(
+          (release, index, releases) =>
+            releases.findIndex((entry) => entry.id === release.id) === index,
+        )
+      : []
+  ).filter(
+    (release) => !form.artistId || !release.artist_id || release.artist_id === form.artistId,
+  );
   const ownerOptions = selectedCampaign?.members ?? [];
   const duplicateChannels = duplicateChannelTargets(form.channels);
   const mutationError = create.error ?? update.error ?? transition.error;
@@ -772,7 +774,10 @@ function ContentEditor({
       </div>
 
       {clientError || mutationError ? (
-        <div className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-900" role="alert">
+        <div
+          className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-900"
+          role="alert"
+        >
           {clientError ?? mutationError?.message}
         </div>
       ) : null}
@@ -1022,12 +1027,19 @@ function ContentEditor({
           </Button>
         ) : null}
         {item?.status === "in_review" && canApprove ? (
-          <Button disabled={isMutating} onClick={approveForAdminTest} type="button" variant="secondary">
+          <Button
+            disabled={isMutating}
+            onClick={approveForAdminTest}
+            type="button"
+            variant="secondary"
+          >
             Approve
           </Button>
         ) : null}
         {!isEditable ? (
-          <span className="text-sm text-slate-500">You need edit access to change this content.</span>
+          <span className="text-sm text-slate-500">
+            You need edit access to change this content.
+          </span>
         ) : null}
       </div>
     </Card>
@@ -1100,7 +1112,10 @@ function MonthCalendar({
                       {channelSummary(instance.item)}
                     </span>
                     <span className="flex flex-wrap items-center gap-1">
-                      <Badge className="max-w-full truncate" variant={statusVariant(instance.item.status)}>
+                      <Badge
+                        className="max-w-full truncate"
+                        variant={statusVariant(instance.item.status)}
+                      >
                         {humanize(instance.item.status)}
                       </Badge>
                       {instance.hasMultipleChannelTimes ? (
@@ -1234,7 +1249,9 @@ export function MarketingWorkspace() {
     | { key: string; mode: "create"; item: null; createDate: string | null }
     | { key: string; mode: "edit"; item: MarketingContentItem; createDate: null }
     | null
-  >(() => (createDate ? { createDate, item: null, key: `create:${createDate}`, mode: "create" } : null));
+  >(() =>
+    createDate ? { createDate, item: null, key: `create:${createDate}`, mode: "create" } : null,
+  );
   const range = useMemo(() => calendarVisibleRange(monthDate, timeZone), [monthDate, timeZone]);
   const campaigns = useCampaigns(activeWorkspace?.id ?? null, { limit: 500, offset: 0 });
   const canView =
@@ -1269,7 +1286,14 @@ export function MarketingWorkspace() {
       start: range.start,
       status: (filters.status || null) as MarketingContentItemStatus | null,
     }),
-    [filters.artistId, filters.campaignId, filters.channel, filters.releaseId, filters.status, range],
+    [
+      filters.artistId,
+      filters.campaignId,
+      filters.channel,
+      filters.releaseId,
+      filters.status,
+      range,
+    ],
   );
   const calendarContent = useWorkspaceCalendarContent(activeWorkspace?.id ?? null, calendarOptions);
   const items = calendarContent.data?.marketing_content ?? [];
@@ -1412,7 +1436,9 @@ export function MarketingWorkspace() {
         <section className="grid gap-4" aria-label="Marketing content calendar">
           <div className="flex flex-col gap-3 rounded-md border border-slate-200 bg-white p-4 md:flex-row md:items-center md:justify-between">
             <div>
-              <h2 className="text-lg font-semibold text-slate-950">{formatMonthTitle(monthDate)}</h2>
+              <h2 className="text-lg font-semibold text-slate-950">
+                {formatMonthTitle(monthDate)}
+              </h2>
               <p className="text-sm text-slate-500">
                 Showing {formatDateTime(range.start, timeZone)} through{" "}
                 {formatDateTime(range.end, timeZone)}

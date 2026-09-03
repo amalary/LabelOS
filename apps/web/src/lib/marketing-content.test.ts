@@ -101,7 +101,12 @@ describe("marketing content data layer", () => {
   it("reads and mutates campaign-scoped content through proxy routes", async () => {
     vi.mocked(fetch)
       .mockResolvedValueOnce(
-        Response.json({ marketing_content: [marketingContentItem], total: 1, limit: 50, offset: 0 }),
+        Response.json({
+          marketing_content: [marketingContentItem],
+          total: 1,
+          limit: 50,
+          offset: 0,
+        }),
       )
       .mockResolvedValueOnce(Response.json(marketingContentItem))
       .mockResolvedValueOnce(Response.json(marketingContentItem, { status: 201 }))
@@ -109,7 +114,9 @@ describe("marketing content data layer", () => {
       .mockResolvedValueOnce(Response.json({ ...marketingContentItem, status: "archived" }))
       .mockResolvedValueOnce(Response.json({ ...marketingContentItem, status: "in_review" }));
 
-    await expect(listCampaignContent("workspace_01", "campaign_01", { limit: 50 })).resolves.toMatchObject({
+    await expect(
+      listCampaignContent("workspace_01", "campaign_01", { limit: 50 }),
+    ).resolves.toMatchObject({
       total: 1,
     });
     await expect(
@@ -177,19 +184,19 @@ describe("marketing content data layer", () => {
       });
 
     expect(shouldInvalidate("marketing-content:workspace-list:workspace_01:default")).toBe(true);
-    expect(shouldInvalidate("marketing-content:campaign-list:workspace_01:campaign_01:default")).toBe(
+    expect(
+      shouldInvalidate("marketing-content:campaign-list:workspace_01:campaign_01:default"),
+    ).toBe(true);
+    expect(shouldInvalidate("marketing-content:detail:workspace_01:campaign_01:content_01")).toBe(
       true,
     );
-    expect(
-      shouldInvalidate("marketing-content:detail:workspace_01:campaign_01:content_01"),
-    ).toBe(true);
     expect(shouldInvalidate("marketing-content:workspace-list:workspace_02:default")).toBe(false);
-    expect(shouldInvalidate("marketing-content:campaign-list:workspace_01:campaign_02:default")).toBe(
+    expect(
+      shouldInvalidate("marketing-content:campaign-list:workspace_01:campaign_02:default"),
+    ).toBe(false);
+    expect(shouldInvalidate("marketing-content:detail:workspace_01:campaign_01:content_02")).toBe(
       false,
     );
-    expect(
-      shouldInvalidate("marketing-content:detail:workspace_01:campaign_01:content_02"),
-    ).toBe(false);
   });
 
   it("maps failed marketing content responses to typed errors", async () => {

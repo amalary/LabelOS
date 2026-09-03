@@ -426,10 +426,7 @@ function MarketingSection({
           {items.length ? (
             <div className="grid grid-cols-2 gap-2">
               {counts.map(({ count, status }) => (
-                <div
-                  className="rounded-md border border-slate-200 bg-white px-3 py-2"
-                  key={status}
-                >
+                <div className="rounded-md border border-slate-200 bg-white px-3 py-2" key={status}>
                   <p className="text-xs font-semibold uppercase tracking-normal text-slate-500">
                     {humanize(status)}
                   </p>

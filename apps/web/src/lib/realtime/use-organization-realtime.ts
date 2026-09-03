@@ -330,8 +330,7 @@ export function useOrganizationRealtime(organizationId: string | null): Organiza
           const isAnalyticsWorkspaceRefresh =
             pathname.startsWith("/analytics") && event.type.startsWith(analyticsEventPrefix);
           const isMarketingContentWorkspaceRefresh =
-            pathname.startsWith("/marketing") &&
-            event.type.startsWith(marketingContentEventPrefix);
+            pathname.startsWith("/marketing") && event.type.startsWith(marketingContentEventPrefix);
           if (
             !isDashboardActivityRefresh &&
             !isCampaignWorkspaceRefresh &&

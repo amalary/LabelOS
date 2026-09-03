@@ -10,9 +10,7 @@ import type { Campaign } from "../../lib/campaigns";
 import type { MarketingContentItem } from "../../lib/marketing-content";
 
 const replace = vi.fn();
-const getParam = vi.fn<(key: string) => string | null>((key) =>
-  key === "campaignId" ? "" : null,
-);
+const getParam = vi.fn<(key: string) => string | null>((key) => (key === "campaignId" ? "" : null));
 let searchParamString = "";
 const mutationMocks = vi.hoisted(() => ({
   create: vi.fn(),
@@ -43,10 +41,9 @@ vi.mock("../../lib/campaigns", async () => {
 });
 
 vi.mock("../../lib/marketing-content", async () => {
-  const actual =
-    await vi.importActual<typeof import("../../lib/marketing-content")>(
-      "../../lib/marketing-content",
-    );
+  const actual = await vi.importActual<typeof import("../../lib/marketing-content")>(
+    "../../lib/marketing-content",
+  );
   return {
     ...actual,
     useCreateMarketingContentItem: vi.fn(() => ({
