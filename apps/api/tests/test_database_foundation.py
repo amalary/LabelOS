@@ -37,6 +37,9 @@ from labelos_database.models import (
     MembershipDepartmentAccess,
     MembershipProfessionalRole,
     MembershipRole,
+    MarketingContentItem,
+    MarketingContentItemChannel,
+    MarketingContentItemStatus,
     Organization,
     OrganizationMembership,
     ProfessionalRole,
@@ -64,7 +67,7 @@ from labelos_database.roles import (
     DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS,
     DEFAULT_ROLES,
 )
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -96,6 +99,8 @@ def test_foundational_models_are_registered() -> None:
         CampaignArtist.__tablename__,
         CampaignMember.__tablename__,
         CampaignRelease.__tablename__,
+        MarketingContentItem.__tablename__,
+        MarketingContentItemChannel.__tablename__,
         Contract.__tablename__,
         Royalty.__tablename__,
         AnalyticsEvent.__tablename__,
@@ -133,6 +138,8 @@ def test_foundational_models_are_registered() -> None:
         "campaign_artists",
         "campaign_members",
         "campaign_releases",
+        "marketing_content_items",
+        "marketing_content_item_channels",
         "contracts",
         "royalties",
         "analytics_events",
@@ -350,6 +357,326 @@ def test_campaign_domain_defaults_are_safe_for_existing_rows() -> None:
     assert campaign.status is None
     assert Campaign.__table__.c.campaign_type.server_default is not None
     assert Campaign.__table__.c.status.server_default is not None
+
+
+def test_marketing_content_models_define_persistence_contract() -> None:
+    item_table = MarketingContentItem.__table__
+    channel_table = MarketingContentItemChannel.__table__
+    item_index_names = {index.name for index in item_table.indexes}
+    channel_index_names = {index.name for index in channel_table.indexes}
+    item_constraint_names = {constraint.name for constraint in item_table.constraints}
+    channel_constraint_names = {
+        constraint.name for constraint in channel_table.constraints
+    }
+    item_foreign_key_deletions = {
+        foreign_key.parent.name: foreign_key.ondelete
+        for foreign_key in item_table.foreign_keys
+    }
+    channel_foreign_key_deletions = {
+        foreign_key.parent.name: foreign_key.ondelete
+        for foreign_key in channel_table.foreign_keys
+    }
+
+    assert "organization_id" in item_table.columns
+    assert "campaign_id" in item_table.columns
+    assert "artist_id" in item_table.columns
+    assert "release_id" in item_table.columns
+    assert item_table.c.organization_id.nullable is False
+    assert item_table.c.campaign_id.nullable is False
+    assert item_table.c.artist_id.nullable is True
+    assert item_table.c.release_id.nullable is True
+    assert item_table.c.title.nullable is False
+    assert item_table.c.content_type.nullable is False
+    assert item_table.c.copy_text.nullable is True
+    assert "metadata" in item_table.columns
+    assert item_table.c.asset_refs.server_default is not None
+    assert item_table.c.metadata.server_default is not None
+    assert item_table.c.status.server_default is not None
+    assert item_table.c.status.type.name == "marketing_content_item_status"
+    assert item_table.c.created_at.nullable is False
+    assert item_table.c.updated_at.nullable is False
+    assert item_constraint_names
+    assert {
+        "ix_marketing_content_items_organization_id",
+        "ix_marketing_content_items_organization_id_campaign_id",
+        "ix_marketing_content_items_organization_id_status",
+        "ix_marketing_content_items_organization_id_scheduled_at",
+        "ix_marketing_content_items_organization_id_published_at",
+        "ix_marketing_content_items_organization_id_artist_id",
+        "ix_marketing_content_items_organization_id_release_id",
+        "ix_marketing_content_items_org_owner_profile",
+        "ix_marketing_content_items_org_created_user",
+        "ix_marketing_content_items_org_created_profile",
+    } <= item_index_names
+    assert item_foreign_key_deletions == {
+        "organization_id": "CASCADE",
+        "campaign_id": "CASCADE",
+        "artist_id": "SET NULL",
+        "release_id": "SET NULL",
+        "approved_by_profile_id": "SET NULL",
+        "created_by_user_id": "SET NULL",
+        "created_by_profile_id": "SET NULL",
+        "owner_profile_id": "SET NULL",
+    }
+
+    assert channel_table.c.marketing_content_item_id.nullable is False
+    assert channel_table.c.channel.nullable is False
+    assert channel_table.c.placement.nullable is False
+    assert channel_table.c.placement.server_default is not None
+    assert "metadata" in channel_table.columns
+    assert channel_table.c.asset_refs.server_default is not None
+    assert channel_table.c.metadata.server_default is not None
+    assert "uq_marketing_content_item_channels_item_channel_placement" in (
+        channel_constraint_names
+    )
+    assert {
+        "ix_marketing_content_item_channels_marketing_content_item_id",
+        "ix_marketing_content_item_channels_channel",
+        "ix_marketing_content_item_channels_channel_scheduled_at",
+    } <= channel_index_names
+    assert channel_foreign_key_deletions == {"marketing_content_item_id": "CASCADE"}
+
+    assert [status.value for status in MarketingContentItemStatus] == [
+        "draft",
+        "in_review",
+        "approved",
+        "scheduled",
+        "published",
+        "cancelled",
+        "archived",
+    ]
+    assert (
+        MarketingContentItem(status=MarketingContentItemStatus.approved).status
+        == MarketingContentItemStatus.approved
+    )
+
+
+def test_marketing_content_relationships_defaults_and_delete_behavior() -> None:
+    engine = create_engine("sqlite:///:memory:")
+
+    @event.listens_for(engine, "connect")
+    def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record) -> None:
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+    MarketingContentItem.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        organization = Organization(
+            name="Example Label",
+            slug="example-label-marketing-content",
+            owner=User(email="owner@example.com"),
+        )
+        creator = User(email="creator@example.com")
+        creator_profile = UniversalProfile(
+            user=creator,
+            slug="marketing-content-creator",
+        )
+        owner_profile = UniversalProfile(
+            user=User(email="content-owner@example.com"),
+            slug="marketing-content-owner",
+        )
+        approver_profile = UniversalProfile(
+            user=User(email="content-approver@example.com"),
+            slug="marketing-content-approver",
+        )
+        artist = Artist(name="Launch Artist", organization=organization)
+        release = Release(
+            title="Launch Single",
+            artist=artist,
+            organization=organization,
+        )
+        campaign = Campaign(
+            organization=organization,
+            name="Launch Campaign",
+            campaign_type=CampaignType.marketing,
+            status=CampaignStatus.active,
+        )
+        content_item = MarketingContentItem(
+            organization=organization,
+            campaign=campaign,
+            artist=artist,
+            release=release,
+            title="Launch Announcement",
+            content_type="social_post",
+            copy_text="  Out now.  ",
+            status=MarketingContentItemStatus.in_review,
+            created_by_user=creator,
+            created_by_profile=creator_profile,
+            owner_profile=owner_profile,
+            approved_by_profile=approver_profile,
+        )
+        content_item.channels.extend(
+            [
+                MarketingContentItemChannel(
+                    channel="instagram",
+                    placement="feed",
+                    copy_text_override="IG copy",
+                    asset_refs=[{"kind": "image", "id": "asset-1"}],
+                    metadata_json={"locale": "en-US"},
+                ),
+                MarketingContentItemChannel(channel="instagram", placement="story"),
+                MarketingContentItemChannel(channel="threads"),
+            ]
+        )
+        nullable_content_item = MarketingContentItem(
+            organization=organization,
+            campaign=campaign,
+            title="Unassigned Draft",
+            content_type="caption",
+        )
+
+        session.add_all([content_item, nullable_content_item])
+        session.commit()
+        session.refresh(content_item)
+        session.refresh(nullable_content_item)
+
+        assert content_item.copy_text == "Out now."
+        assert content_item.asset_refs == []
+        assert content_item.metadata_json == {}
+        assert content_item.channels[0].asset_refs == [
+            {"kind": "image", "id": "asset-1"}
+        ]
+        assert content_item.channels[0].metadata_json == {"locale": "en-US"}
+        assert content_item.organization == organization
+        assert content_item.campaign == campaign
+        assert content_item.artist == artist
+        assert content_item.release == release
+        assert content_item.created_by_user == creator
+        assert content_item.created_by_profile == creator_profile
+        assert content_item.owner_profile == owner_profile
+        assert content_item.approved_by_profile == approver_profile
+        assert set(organization.marketing_content_items) == {
+            content_item,
+            nullable_content_item,
+        }
+        assert set(campaign.marketing_content_items) == {
+            content_item,
+            nullable_content_item,
+        }
+        assert artist.marketing_content_items == [content_item]
+        assert release.marketing_content_items == [content_item]
+        assert creator.created_marketing_content_items == [content_item]
+        assert creator_profile.created_marketing_content_items == [content_item]
+        assert owner_profile.owned_marketing_content_items == [content_item]
+        assert approver_profile.approved_marketing_content_items == [content_item]
+        assert nullable_content_item.artist is None
+        assert nullable_content_item.release is None
+        assert nullable_content_item.status == MarketingContentItemStatus.draft
+        assert nullable_content_item.asset_refs == []
+        assert nullable_content_item.metadata_json == {}
+        assert nullable_content_item.created_at is not None
+        assert nullable_content_item.updated_at is not None
+        assert len(content_item.channels) == 3
+        assert content_item.channels[2].placement == "default"
+
+        session.add(
+            MarketingContentItemChannel(
+                marketing_content_item=content_item,
+                channel="instagram",
+                placement="feed",
+            )
+        )
+        with pytest.raises(IntegrityError):
+            session.commit()
+        session.rollback()
+
+        content_item_id = content_item.id
+        session.delete(content_item)
+        session.commit()
+
+        assert (
+            session.query(MarketingContentItemChannel)
+            .filter_by(marketing_content_item_id=content_item_id)
+            .count()
+            == 0
+        )
+
+        nullable_content_item_id = nullable_content_item.id
+        session.delete(campaign)
+        session.commit()
+
+        assert session.get(MarketingContentItem, nullable_content_item_id) is None
+    engine.dispose()
+
+
+def test_marketing_content_optional_relationships_set_null_on_delete() -> None:
+    engine = create_engine("sqlite:///:memory:")
+
+    @event.listens_for(engine, "connect")
+    def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record) -> None:
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+    MarketingContentItem.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        organization = Organization(
+            name="Example Label",
+            slug="example-label-marketing-content-null",
+            owner=User(email="owner-null@example.com"),
+        )
+        creator = User(email="creator-null@example.com")
+        creator_profile = UniversalProfile(
+            user=creator,
+            slug="marketing-content-creator-null",
+        )
+        owner_profile = UniversalProfile(
+            user=User(email="content-owner-null@example.com"),
+            slug="marketing-content-owner-null",
+        )
+        approver_profile = UniversalProfile(
+            user=User(email="content-approver-null@example.com"),
+            slug="marketing-content-approver-null",
+        )
+        artist = Artist(name="Nullable Artist", organization=organization)
+        release = Release(
+            title="Nullable Single",
+            artist=artist,
+            organization=organization,
+        )
+        campaign = Campaign(organization=organization, name="Nullable Campaign")
+        content_item = MarketingContentItem(
+            organization=organization,
+            campaign=campaign,
+            artist=artist,
+            release=release,
+            title="Nullable Associations",
+            content_type="caption",
+            created_by_user=creator,
+            created_by_profile=creator_profile,
+            owner_profile=owner_profile,
+            approved_by_profile=approver_profile,
+        )
+        session.add(content_item)
+        session.commit()
+
+        content_item_id = content_item.id
+        session.delete(artist)
+        session.delete(release)
+        session.delete(creator)
+        session.delete(creator_profile)
+        session.delete(owner_profile)
+        session.delete(approver_profile)
+        session.commit()
+        session.expire_all()
+
+        updated = session.get(MarketingContentItem, content_item_id)
+        assert updated is not None
+        assert updated.artist_id is None
+        assert updated.release_id is None
+        assert updated.created_by_user_id is None
+        assert updated.created_by_profile_id is None
+        assert updated.owner_profile_id is None
+        assert updated.approved_by_profile_id is None
+
+        session.delete(organization)
+        session.commit()
+
+        assert session.get(MarketingContentItem, content_item_id) is None
+    engine.dispose()
 
 
 def test_memberships_define_organization_boundary_constraints() -> None:
@@ -1533,6 +1860,7 @@ def test_label_owned_resources_define_organization_boundary() -> None:
         Artist,
         Release,
         Campaign,
+        MarketingContentItem,
         Contract,
         Royalty,
         AnalyticsEvent,
