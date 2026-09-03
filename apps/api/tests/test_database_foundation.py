@@ -34,12 +34,12 @@ from labelos_database.models import (
     CampaignType,
     Contract,
     Department,
-    MembershipDepartmentAccess,
-    MembershipProfessionalRole,
-    MembershipRole,
     MarketingContentItem,
     MarketingContentItemChannel,
     MarketingContentItemStatus,
+    MembershipDepartmentAccess,
+    MembershipProfessionalRole,
+    MembershipRole,
     Organization,
     OrganizationMembership,
     ProfessionalRole,
@@ -1167,6 +1167,13 @@ def test_default_capabilities_are_specific_actions() -> None:
         "finance.payment.view",
         "finance.payment.approve",
         "analytics.view",
+        "analytics.create",
+        "marketing.content.view",
+        "marketing.content.create",
+        "marketing.content.edit",
+        "marketing.content.archive",
+        "marketing.content.submit_for_review",
+        "marketing.content.approve",
     } <= capability_keys
     assert all(capability.system_capability for capability in DEFAULT_CAPABILITIES)
     assert len(capability_keys) == len(DEFAULT_CAPABILITIES)
@@ -1183,6 +1190,36 @@ def test_default_role_capability_mapping_references_configured_registries() -> N
     assert set(DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS["owner"]) == capability_keys
     assert "workspace.update" in DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS["admin"]
     assert "role.assign" in DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS["admin"]
+    assert {
+        "marketing.content.view",
+        "marketing.content.create",
+        "marketing.content.edit",
+        "marketing.content.archive",
+        "marketing.content.submit_for_review",
+        "marketing.content.approve",
+    } <= set(DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS["admin"])
+    assert {
+        "marketing.content.view",
+        "marketing.content.create",
+        "marketing.content.edit",
+        "marketing.content.archive",
+        "marketing.content.submit_for_review",
+        "marketing.content.approve",
+    } <= set(DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS["marketing"])
+    assert {
+        "marketing.content.view",
+        "marketing.content.create",
+        "marketing.content.edit",
+        "marketing.content.archive",
+        "marketing.content.submit_for_review",
+    } <= set(DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS["manager"])
+    assert (
+        "marketing.content.approve"
+        not in DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS["manager"]
+    )
+    assert "marketing.content.view" in DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS["member"]
+    assert "marketing.content.view" in DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS["artist"]
+    assert "marketing.content.view" in DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS["a_and_r"]
     assert (
         "finance.payment.approve" not in DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS["admin"]
     )

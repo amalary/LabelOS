@@ -422,7 +422,7 @@ async def _has_approval_capability(
             session,
             actor=actor,
             workspace_id=workspace_id,
-            capability=Capability.marketing_campaign_approve,
+            capability=Capability.marketing_content_approve,
             campaign_id=campaign_id,
         )
     except MarketingContentAuthorizationError:
@@ -535,6 +535,29 @@ def _assert_can_schedule(item: MarketingContentItem) -> None:
     )
 
 
+async def _load_content_item_for_workspace(
+    session: AsyncSession,
+    workspace_id: UUID,
+    content_item_id: UUID,
+) -> MarketingContentItem:
+    item = await marketing_content.get_item(session, workspace_id, content_item_id)
+    if item is None:
+        raise MarketingContentNotFoundError("Marketing content item not found")
+    return item
+
+
+def _capability_for_status_transition(
+    next_status: MarketingContentItemStatus,
+) -> Capability:
+    if next_status == MarketingContentItemStatus.in_review:
+        return Capability.marketing_content_submit_for_review
+    if next_status == MarketingContentItemStatus.approved:
+        return Capability.marketing_content_approve
+    if next_status == MarketingContentItemStatus.archived:
+        return Capability.marketing_content_archive
+    return Capability.marketing_content_edit
+
+
 async def create_content_item(
     session: AsyncSession,
     workspace_id: UUID,
@@ -546,7 +569,7 @@ async def create_content_item(
         session,
         actor=actor,
         workspace_id=workspace_id,
-        capability=Capability.marketing_campaign_create,
+        capability=Capability.marketing_content_create,
         campaign_id=payload.campaign_id,
     )
     values = _create_values(payload)
@@ -575,7 +598,7 @@ async def get_content_item(
         session,
         actor=actor,
         workspace_id=workspace_id,
-        capability=Capability.marketing_campaign_view,
+        capability=Capability.marketing_content_view,
         campaign_id=item.campaign_id,
     )
     return item
@@ -593,7 +616,7 @@ async def get_campaign_content_item(
         session,
         actor=actor,
         workspace_id=workspace_id,
-        capability=Capability.marketing_campaign_view,
+        capability=Capability.marketing_content_view,
         campaign_id=campaign_id,
     )
     item = await marketing_content.get_item_for_campaign(
@@ -622,7 +645,7 @@ async def list_content_items(
         session,
         actor=actor,
         workspace_id=workspace_id,
-        capability=Capability.marketing_campaign_view,
+        capability=Capability.marketing_content_view,
         campaign_id=normalized_query.campaign_id,
     )
     if (
@@ -766,12 +789,16 @@ async def update_content_item(
     *,
     actor: AuthorizationActorInput | None = None,
 ) -> MarketingContentItem:
-    item = await get_content_item(session, workspace_id, content_item_id, actor=actor)
+    item = await _load_content_item_for_workspace(
+        session,
+        workspace_id,
+        content_item_id,
+    )
     await _require_capability(
         session,
         actor=actor,
         workspace_id=workspace_id,
-        capability=Capability.marketing_campaign_edit,
+        capability=Capability.marketing_content_edit,
         campaign_id=item.campaign_id,
     )
     values = _update_values(payload)
@@ -811,12 +838,16 @@ async def replace_channels(
     *,
     actor: AuthorizationActorInput | None = None,
 ) -> MarketingContentItem:
-    item = await get_content_item(session, workspace_id, content_item_id, actor=actor)
+    item = await _load_content_item_for_workspace(
+        session,
+        workspace_id,
+        content_item_id,
+    )
     await _require_capability(
         session,
         actor=actor,
         workspace_id=workspace_id,
-        capability=Capability.marketing_campaign_edit,
+        capability=Capability.marketing_content_edit,
         campaign_id=item.campaign_id,
     )
     channel_values = [_channel_create_values(channel) for channel in channels]
@@ -839,12 +870,16 @@ async def update_channel(
     *,
     actor: AuthorizationActorInput | None = None,
 ) -> MarketingContentItemChannel:
-    item = await get_content_item(session, workspace_id, content_item_id, actor=actor)
+    item = await _load_content_item_for_workspace(
+        session,
+        workspace_id,
+        content_item_id,
+    )
     await _require_capability(
         session,
         actor=actor,
         workspace_id=workspace_id,
-        capability=Capability.marketing_campaign_edit,
+        capability=Capability.marketing_content_edit,
         campaign_id=item.campaign_id,
     )
     channel = next((row for row in item.channels if row.id == channel_id), None)
@@ -880,17 +915,21 @@ async def transition_status(
     approved_by_profile_id: UUID | None = None,
     assume_approval_capability: bool = False,
 ) -> MarketingContentItem:
-    item = await get_content_item(session, workspace_id, content_item_id, actor=actor)
-    await _require_capability(
+    item = await _load_content_item_for_workspace(
         session,
-        actor=actor,
-        workspace_id=workspace_id,
-        capability=Capability.marketing_campaign_edit,
-        campaign_id=item.campaign_id,
+        workspace_id,
+        content_item_id,
     )
     next_status = _assert_transition_allowed(item.status, status)
     if next_status == item.status:
         return item
+    await _require_capability(
+        session,
+        actor=actor,
+        workspace_id=workspace_id,
+        capability=_capability_for_status_transition(next_status),
+        campaign_id=item.campaign_id,
+    )
     if next_status == MarketingContentItemStatus.approved:
         has_approval = await _has_approval_capability(
             session,

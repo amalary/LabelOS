@@ -5,16 +5,20 @@ from uuid import uuid4
 
 import pytest
 from labelos_database.base import Base
+from labelos_database.capabilities import Capability
 from labelos_database.models import (
     Artist,
     Campaign,
     MarketingContentItem,
     MarketingContentItemStatus,
+    MembershipRole,
     Organization,
+    OrganizationMembership,
     Release,
     UniversalProfile,
     User,
     WorkspaceMembership,
+    WorkspacePermission,
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
@@ -151,6 +155,327 @@ async def _seed_workspace_graph(session: AsyncSession) -> dict[str, object]:
         "other_release": other_release,
         "campaign": campaign,
         "other_campaign": other_campaign,
+    }
+
+
+async def _seed_authorized_actor(
+    session: AsyncSession,
+    *,
+    workspace: Organization,
+    email: str,
+    capability_keys: list[str],
+    department_access: list[str] | None = None,
+) -> User:
+    user = User(email=email)
+    profile = UniversalProfile(user=user, slug=email.split("@", maxsplit=1)[0])
+    membership = OrganizationMembership(
+        organization=workspace,
+        user=user,
+        role=MembershipRole.guest,
+        workspace_permission=WorkspacePermission.guest,
+        department_access=department_access or ["marketing"],
+        capability_permissions=capability_keys,
+    )
+    workspace_membership = WorkspaceMembership(
+        workspace=workspace,
+        profile=profile,
+        organization_membership=membership,
+        status="active",
+    )
+    session.add_all([user, profile, membership, workspace_membership])
+    await session.flush()
+    return user
+
+
+def test_marketing_content_service_authorizes_content_actions_by_capability(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async def run() -> dict[str, bool]:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            other_workspace = data["other_workspace"]
+            campaign = data["campaign"]
+            other_campaign = data["other_campaign"]
+            approver_profile = data["approver_profile"]
+            assert isinstance(workspace, Organization)
+            assert isinstance(other_workspace, Organization)
+            assert isinstance(campaign, Campaign)
+            assert isinstance(other_campaign, Campaign)
+            assert isinstance(approver_profile, UniversalProfile)
+
+            item = await create_content_item(
+                session,
+                workspace.id,
+                MarketingContentItemCreate(
+                    campaign_id=campaign.id,
+                    title="Capability Scoped",
+                    content_type="image",
+                ),
+            )
+            other_item = await create_content_item(
+                session,
+                other_workspace.id,
+                MarketingContentItemCreate(
+                    campaign_id=other_campaign.id,
+                    title="Other Workspace",
+                    content_type="image",
+                ),
+            )
+            actors = {
+                "view": await _seed_authorized_actor(
+                    session,
+                    workspace=workspace,
+                    email="content-view@example.com",
+                    capability_keys=[Capability.marketing_content_view.value],
+                ),
+                "create": await _seed_authorized_actor(
+                    session,
+                    workspace=workspace,
+                    email="content-create@example.com",
+                    capability_keys=[Capability.marketing_content_create.value],
+                ),
+                "edit": await _seed_authorized_actor(
+                    session,
+                    workspace=workspace,
+                    email="content-edit@example.com",
+                    capability_keys=[Capability.marketing_content_edit.value],
+                ),
+                "archive": await _seed_authorized_actor(
+                    session,
+                    workspace=workspace,
+                    email="content-archive@example.com",
+                    capability_keys=[Capability.marketing_content_archive.value],
+                ),
+                "submit": await _seed_authorized_actor(
+                    session,
+                    workspace=workspace,
+                    email="content-submit@example.com",
+                    capability_keys=[
+                        Capability.marketing_content_submit_for_review.value
+                    ],
+                ),
+                "approve": await _seed_authorized_actor(
+                    session,
+                    workspace=workspace,
+                    email="content-approve@example.com",
+                    capability_keys=[Capability.marketing_content_approve.value],
+                ),
+                "none": await _seed_authorized_actor(
+                    session,
+                    workspace=workspace,
+                    email="content-none@example.com",
+                    capability_keys=[],
+                ),
+                "campaign_view": await _seed_authorized_actor(
+                    session,
+                    workspace=workspace,
+                    email="campaign-view-only@example.com",
+                    capability_keys=[Capability.marketing_campaign_view.value],
+                ),
+            }
+
+            result: dict[str, bool] = {}
+            result["allowed_view"] = (
+                await get_content_item(
+                    session,
+                    workspace.id,
+                    item.id,
+                    actor=actors["view"].id,
+                )
+            ).id == item.id
+            try:
+                await get_content_item(
+                    session,
+                    workspace.id,
+                    item.id,
+                    actor=actors["none"].id,
+                )
+            except MarketingContentAuthorizationError:
+                result["denied_view"] = True
+
+            created = await create_content_item(
+                session,
+                workspace.id,
+                MarketingContentItemCreate(
+                    campaign_id=campaign.id,
+                    title="Created With Capability",
+                    content_type="image",
+                ),
+                actor=actors["create"].id,
+            )
+            result["allowed_create"] = created.title == "Created With Capability"
+            try:
+                await create_content_item(
+                    session,
+                    workspace.id,
+                    MarketingContentItemCreate(
+                        campaign_id=campaign.id,
+                        title="Denied Create",
+                        content_type="image",
+                    ),
+                    actor=actors["none"].id,
+                )
+            except MarketingContentAuthorizationError:
+                result["denied_create"] = True
+
+            edited = await update_content_item(
+                session,
+                workspace.id,
+                item.id,
+                MarketingContentItemUpdate(title="Edited With Capability"),
+                actor=actors["edit"].id,
+            )
+            result["allowed_edit"] = edited.title == "Edited With Capability"
+            try:
+                await update_content_item(
+                    session,
+                    workspace.id,
+                    item.id,
+                    MarketingContentItemUpdate(title="Denied Edit"),
+                    actor=actors["none"].id,
+                )
+            except MarketingContentAuthorizationError:
+                result["denied_edit"] = True
+
+            submit_item = await create_content_item(
+                session,
+                workspace.id,
+                MarketingContentItemCreate(
+                    campaign_id=campaign.id,
+                    title="Submit",
+                    content_type="image",
+                ),
+            )
+            submitted = await transition_status(
+                session,
+                workspace.id,
+                submit_item.id,
+                MarketingContentItemStatus.in_review,
+                actor=actors["submit"].id,
+            )
+            result["allowed_submit_for_review"] = (
+                submitted.status == MarketingContentItemStatus.in_review
+            )
+            try:
+                await transition_status(
+                    session,
+                    workspace.id,
+                    item.id,
+                    MarketingContentItemStatus.in_review,
+                    actor=actors["none"].id,
+                )
+            except MarketingContentAuthorizationError:
+                result["denied_submit_for_review"] = True
+
+            approve_item = await create_content_item(
+                session,
+                workspace.id,
+                MarketingContentItemCreate(
+                    campaign_id=campaign.id,
+                    title="Approve",
+                    content_type="image",
+                ),
+            )
+            approved = await transition_status(
+                session,
+                workspace.id,
+                approve_item.id,
+                MarketingContentItemStatus.approved,
+                actor=actors["approve"].id,
+                approved_by_profile_id=approver_profile.id,
+            )
+            result["allowed_approval"] = (
+                approved.status == MarketingContentItemStatus.approved
+            )
+            try:
+                await transition_status(
+                    session,
+                    workspace.id,
+                    item.id,
+                    MarketingContentItemStatus.approved,
+                    actor=actors["none"].id,
+                    approved_by_profile_id=approver_profile.id,
+                )
+            except MarketingContentAuthorizationError:
+                result["denied_approval"] = True
+            try:
+                await transition_status(
+                    session,
+                    workspace.id,
+                    item.id,
+                    MarketingContentItemStatus.approved,
+                    actor=actors["edit"].id,
+                    approved_by_profile_id=approver_profile.id,
+                )
+            except MarketingContentAuthorizationError:
+                result["edit_without_approval_denied"] = True
+
+            archive_item = await create_content_item(
+                session,
+                workspace.id,
+                MarketingContentItemCreate(
+                    campaign_id=campaign.id,
+                    title="Archive",
+                    content_type="image",
+                ),
+            )
+            archived = await archive_content_item(
+                session,
+                workspace.id,
+                archive_item.id,
+                actor=actors["archive"].id,
+            )
+            result["allowed_archive"] = (
+                archived.status == MarketingContentItemStatus.archived
+            )
+            try:
+                await archive_content_item(
+                    session,
+                    workspace.id,
+                    item.id,
+                    actor=actors["none"].id,
+                )
+            except MarketingContentAuthorizationError:
+                result["denied_archive"] = True
+
+            try:
+                await get_content_item(
+                    session,
+                    other_workspace.id,
+                    other_item.id,
+                    actor=actors["view"].id,
+                )
+            except MarketingContentAuthorizationError:
+                result["cross_workspace_denial"] = True
+            try:
+                await get_content_item(
+                    session,
+                    workspace.id,
+                    item.id,
+                    actor=actors["campaign_view"].id,
+                )
+            except MarketingContentAuthorizationError:
+                result["unrelated_capability_denied"] = True
+
+            return result
+
+    assert asyncio.run(run()) == {
+        "allowed_view": True,
+        "denied_view": True,
+        "allowed_create": True,
+        "denied_create": True,
+        "allowed_edit": True,
+        "denied_edit": True,
+        "allowed_submit_for_review": True,
+        "denied_submit_for_review": True,
+        "allowed_approval": True,
+        "denied_approval": True,
+        "edit_without_approval_denied": True,
+        "allowed_archive": True,
+        "denied_archive": True,
+        "cross_workspace_denial": True,
+        "unrelated_capability_denied": True,
     }
 
 

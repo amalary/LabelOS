@@ -13,7 +13,7 @@ from labelos_database.models import (
     UniversalProfile,
     WorkspaceMembership,
 )
-from sqlalchemy import Select, delete, func, select
+from sqlalchemy import Select, and_, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -70,12 +70,27 @@ def _filtered_items_statement(
         )
     if content_type is not None:
         statement = statement.where(MarketingContentItem.content_type == content_type)
+    scheduled_conditions = []
+    channel_scheduled_conditions = []
     if scheduled_start is not None:
-        statement = statement.where(
+        scheduled_conditions.append(
             MarketingContentItem.scheduled_at >= scheduled_start
         )
+        channel_scheduled_conditions.append(
+            MarketingContentItemChannel.scheduled_at >= scheduled_start
+        )
     if scheduled_end is not None:
-        statement = statement.where(MarketingContentItem.scheduled_at <= scheduled_end)
+        scheduled_conditions.append(MarketingContentItem.scheduled_at <= scheduled_end)
+        channel_scheduled_conditions.append(
+            MarketingContentItemChannel.scheduled_at <= scheduled_end
+        )
+    if scheduled_conditions:
+        statement = statement.where(
+            or_(
+                and_(*scheduled_conditions),
+                MarketingContentItem.channels.any(and_(*channel_scheduled_conditions)),
+            )
+        )
     if published_start is not None:
         statement = statement.where(
             MarketingContentItem.published_at >= published_start
