@@ -11,6 +11,7 @@ from labelos_database.models import (
     Campaign,
     CampaignGoal,
     CampaignMilestone,
+    MarketingContentItem,
     Organization,
     UniversalProfile,
     User,
@@ -112,6 +113,10 @@ async def _seed_workspace_graph(session: AsyncSession) -> dict[str, object]:
         stage_name="Beta Artist",
     )
     campaign = Campaign(name="Alpha Campaign", organization=workspace)
+    same_workspace_campaign = Campaign(
+        name="Alpha Side Campaign",
+        organization=workspace,
+    )
     other_campaign = Campaign(name="Beta Campaign", organization=other_workspace)
     campaign_goal = CampaignGoal(campaign=campaign, title="Pre-save Goal")
     campaign_milestone = CampaignMilestone(
@@ -119,6 +124,24 @@ async def _seed_workspace_graph(session: AsyncSession) -> dict[str, object]:
         title="Creative Approved",
     )
     other_campaign_goal = CampaignGoal(campaign=other_campaign, title="Outside Goal")
+    marketing_content_item = MarketingContentItem(
+        campaign=campaign,
+        organization=workspace,
+        title="Launch Teaser",
+        content_type="social_post",
+    )
+    other_campaign_marketing_content_item = MarketingContentItem(
+        campaign=same_workspace_campaign,
+        organization=workspace,
+        title="Side Campaign Teaser",
+        content_type="social_post",
+    )
+    other_workspace_marketing_content_item = MarketingContentItem(
+        campaign=other_campaign,
+        organization=other_workspace,
+        title="Outside Teaser",
+        content_type="social_post",
+    )
     session.add_all(
         [
             artist_profile,
@@ -126,6 +149,9 @@ async def _seed_workspace_graph(session: AsyncSession) -> dict[str, object]:
             campaign_goal,
             campaign_milestone,
             other_campaign_goal,
+            marketing_content_item,
+            other_campaign_marketing_content_item,
+            other_workspace_marketing_content_item,
         ]
     )
     await session.flush()
@@ -135,10 +161,16 @@ async def _seed_workspace_graph(session: AsyncSession) -> dict[str, object]:
         "artist_profile": artist_profile,
         "other_artist_profile": other_artist_profile,
         "campaign": campaign,
+        "same_workspace_campaign": same_workspace_campaign,
         "other_campaign": other_campaign,
         "campaign_goal": campaign_goal,
         "campaign_milestone": campaign_milestone,
         "other_campaign_goal": other_campaign_goal,
+        "marketing_content_item": marketing_content_item,
+        "other_campaign_marketing_content_item": other_campaign_marketing_content_item,
+        "other_workspace_marketing_content_item": (
+            other_workspace_marketing_content_item
+        ),
     }
 
 
@@ -624,6 +656,217 @@ def test_analytics_service_supports_future_campaign_object_targets(
             )
 
     assert asyncio.run(run()) == ("campaign_object", True, Decimal("25.000000"))
+
+
+def test_analytics_service_supports_marketing_content_campaign_object_targets(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async def run() -> tuple[str, str, bool, bool, Decimal | None]:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            campaign = data["campaign"]
+            content_item = data["marketing_content_item"]
+            assert isinstance(workspace, Organization)
+            assert isinstance(campaign, Campaign)
+            assert isinstance(content_item, MarketingContentItem)
+            metric = await _create_streams_metric(session, workspace.id)
+            observation = await create_observation(
+                session,
+                workspace.id,
+                AnalyticsObservationCreate(
+                    metric_definition_id=metric.id,
+                    target_type="campaign_object",
+                    campaign_id=campaign.id,
+                    campaign_object_type="marketing_content_item",
+                    campaign_object_id=content_item.id,
+                    observed_at=datetime(2026, 9, 3, 12, 0, tzinfo=UTC),
+                    value_numeric=25,
+                    dimensions={"channel": "instagram"},
+                ),
+            )
+            return (
+                observation.target_type,
+                observation.campaign_object_type or "",
+                observation.target_id == content_item.id,
+                observation.campaign_object_id == content_item.id,
+                observation.value_numeric,
+            )
+
+    assert asyncio.run(run()) == (
+        "campaign_object",
+        "marketing_content_item",
+        True,
+        True,
+        Decimal("25.000000"),
+    )
+
+
+def test_analytics_service_rejects_unknown_marketing_content_targets(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async def run() -> bool:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            campaign = data["campaign"]
+            assert isinstance(workspace, Organization)
+            assert isinstance(campaign, Campaign)
+            metric = await _create_streams_metric(session, workspace.id)
+            try:
+                await create_observation(
+                    session,
+                    workspace.id,
+                    AnalyticsObservationCreate(
+                        metric_definition_id=metric.id,
+                        target_type="campaign_object",
+                        campaign_id=campaign.id,
+                        campaign_object_type="marketing_content_item",
+                        campaign_object_id=campaign.id,
+                        observed_at=datetime(2026, 9, 3, 12, 0, tzinfo=UTC),
+                        value_numeric=1,
+                    ),
+                )
+            except AnalyticsNotFoundError:
+                return True
+            return False
+
+    assert asyncio.run(run()) is True
+
+
+def test_analytics_service_rejects_marketing_content_from_wrong_campaign(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async def run() -> bool:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            campaign = data["campaign"]
+            content_item = data["other_campaign_marketing_content_item"]
+            assert isinstance(workspace, Organization)
+            assert isinstance(campaign, Campaign)
+            assert isinstance(content_item, MarketingContentItem)
+            metric = await _create_streams_metric(session, workspace.id)
+            try:
+                await create_observation(
+                    session,
+                    workspace.id,
+                    AnalyticsObservationCreate(
+                        metric_definition_id=metric.id,
+                        target_type="campaign_object",
+                        campaign_id=campaign.id,
+                        campaign_object_type="marketing_content_item",
+                        campaign_object_id=content_item.id,
+                        observed_at=datetime(2026, 9, 3, 12, 0, tzinfo=UTC),
+                        value_numeric=1,
+                    ),
+                )
+            except AnalyticsNotFoundError:
+                return True
+            return False
+
+    assert asyncio.run(run()) is True
+
+
+def test_analytics_service_rejects_marketing_content_from_wrong_workspace(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async def run() -> bool:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            campaign = data["campaign"]
+            content_item = data["other_workspace_marketing_content_item"]
+            assert isinstance(workspace, Organization)
+            assert isinstance(campaign, Campaign)
+            assert isinstance(content_item, MarketingContentItem)
+            metric = await _create_streams_metric(session, workspace.id)
+            try:
+                await create_observation(
+                    session,
+                    workspace.id,
+                    AnalyticsObservationCreate(
+                        metric_definition_id=metric.id,
+                        target_type="campaign_object",
+                        campaign_id=campaign.id,
+                        campaign_object_type="marketing_content_item",
+                        campaign_object_id=content_item.id,
+                        observed_at=datetime(2026, 9, 3, 12, 0, tzinfo=UTC),
+                        value_numeric=1,
+                    ),
+                )
+            except AnalyticsNotFoundError:
+                return True
+            return False
+
+    assert asyncio.run(run()) is True
+
+
+def test_analytics_service_campaign_object_type_validation_preserves_existing_types(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async def run() -> tuple[bool, bool, bool]:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            campaign = data["campaign"]
+            goal = data["campaign_goal"]
+            milestone = data["campaign_milestone"]
+            assert isinstance(workspace, Organization)
+            assert isinstance(campaign, Campaign)
+            assert isinstance(goal, CampaignGoal)
+            assert isinstance(milestone, CampaignMilestone)
+            metric = await _create_streams_metric(session, workspace.id)
+            goal_observation = await create_observation(
+                session,
+                workspace.id,
+                AnalyticsObservationCreate(
+                    metric_definition_id=metric.id,
+                    target_type="campaign_object",
+                    campaign_id=campaign.id,
+                    campaign_object_type="goal",
+                    campaign_object_id=goal.id,
+                    observed_at=datetime(2026, 9, 3, 12, 0, tzinfo=UTC),
+                    value_numeric=1,
+                ),
+            )
+            milestone_observation = await create_observation(
+                session,
+                workspace.id,
+                AnalyticsObservationCreate(
+                    metric_definition_id=metric.id,
+                    target_type="campaign_object",
+                    campaign_id=campaign.id,
+                    campaign_object_type="milestone",
+                    campaign_object_id=milestone.id,
+                    observed_at=datetime(2026, 9, 3, 13, 0, tzinfo=UTC),
+                    value_numeric=1,
+                ),
+            )
+            unsupported_failed = False
+            try:
+                await create_observation(
+                    session,
+                    workspace.id,
+                    AnalyticsObservationCreate(
+                        metric_definition_id=metric.id,
+                        target_type="campaign_object",
+                        campaign_id=campaign.id,
+                        campaign_object_type="marketing_content_item_channel",
+                        campaign_object_id=goal.id,
+                        observed_at=datetime(2026, 9, 3, 14, 0, tzinfo=UTC),
+                        value_numeric=1,
+                    ),
+                )
+            except AnalyticsRelationshipError:
+                unsupported_failed = True
+            return (
+                goal_observation.target_id == goal.id,
+                milestone_observation.target_id == milestone.id,
+                unsupported_failed,
+            )
+
+    assert asyncio.run(run()) == (True, True, True)
 
 
 def test_analytics_service_validates_metric_value_type(

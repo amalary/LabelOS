@@ -468,6 +468,7 @@ describe("MarketingWorkspace", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Create Content" }));
     const editor = screen.getByRole("region", { name: "Marketing content editor" });
+    expect(within(editor).getByRole("option", { name: "Threads" })).toHaveValue("threads");
     fireEvent.change(within(editor).getByLabelText("Title"), { target: { value: "Two channels" } });
     fireEvent.change(within(editor).getByLabelText("Artist"), { target: { value: "" } });
     fireEvent.change(within(editor).getByLabelText("Release"), { target: { value: "" } });

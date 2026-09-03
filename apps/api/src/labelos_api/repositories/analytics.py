@@ -13,6 +13,7 @@ from labelos_database.models import (
     Campaign,
     CampaignGoal,
     CampaignMilestone,
+    MarketingContentItem,
 )
 from sqlalchemy import Select, distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -567,6 +568,23 @@ async def campaign_milestone_in_workspace(
             .where(CampaignMilestone.id == milestone_id)
             .where(CampaignMilestone.campaign_id == campaign_id)
             .where(Campaign.organization_id == workspace_id)
+        )
+        is not None
+    )
+
+
+async def marketing_content_item_in_workspace(
+    session: AsyncSession,
+    workspace_id: UUID,
+    campaign_id: UUID,
+    content_item_id: UUID,
+) -> bool:
+    return (
+        await session.scalar(
+            select(MarketingContentItem.id)
+            .where(MarketingContentItem.id == content_item_id)
+            .where(MarketingContentItem.organization_id == workspace_id)
+            .where(MarketingContentItem.campaign_id == campaign_id)
         )
         is not None
     )

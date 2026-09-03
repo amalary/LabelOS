@@ -17,11 +17,23 @@ import {
   useCampaignGoals,
   useCampaignMilestones,
 } from "../../../lib/campaigns";
+import {
+  type MarketingContentItem,
+  type MarketingContentItemStatus,
+  useCampaignMarketingContent,
+} from "../../../lib/marketing-content";
 import { useOrganizationRealtimeContext } from "../../../lib/realtime/use-organization-realtime";
 import { useActiveWorkspace, useActiveWorkspaceProfile } from "../../../lib/workspace-context";
 import { mapActivityEvents } from "../../dashboard/_components/activity-event-map";
 
-const futureSections = ["Marketing", "Assets", "Legal", "Budget", "Agents"];
+const futureSections = ["Assets", "Legal", "Budget", "Agents"];
+const marketingSummaryStatuses: MarketingContentItemStatus[] = [
+  "draft",
+  "in_review",
+  "approved",
+  "scheduled",
+  "published",
+];
 
 function humanize(value: string | null | undefined): string {
   if (!value) {
@@ -368,6 +380,74 @@ function ActivitySection({ campaign }: { campaign: Campaign }) {
   );
 }
 
+function marketingStatusCounts(items: MarketingContentItem[]) {
+  return marketingSummaryStatuses.map((status) => ({
+    count: items.filter((item) => item.status === status).length,
+    status,
+  }));
+}
+
+function MarketingSection({
+  campaignId,
+  items,
+  isLoading,
+  total,
+}: {
+  campaignId: string;
+  items: MarketingContentItem[];
+  isLoading: boolean;
+  total: number | null;
+}) {
+  const counts = marketingStatusCounts(items);
+
+  return (
+    <Card>
+      <SectionHeader
+        action={
+          <Link
+            className="inline-flex h-9 items-center justify-center rounded-md border border-slate-300 bg-white px-3 text-sm font-medium text-slate-950 transition-colors hover:bg-slate-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-700"
+            href={`/marketing?campaignId=${encodeURIComponent(campaignId)}`}
+          >
+            Open Marketing
+          </Link>
+        }
+        title="Marketing"
+      />
+      {isLoading && total === null ? (
+        <LoadingState className="mt-4" label="Loading marketing content" />
+      ) : (
+        <div className="mt-4 grid gap-3">
+          <div className="rounded-md border border-slate-200 bg-slate-50 px-4 py-3">
+            <p className="text-xs font-semibold uppercase tracking-normal text-slate-500">
+              Content items
+            </p>
+            <p className="mt-2 text-2xl font-semibold text-slate-950">{total ?? items.length}</p>
+          </div>
+          {items.length ? (
+            <div className="grid grid-cols-2 gap-2">
+              {counts.map(({ count, status }) => (
+                <div
+                  className="rounded-md border border-slate-200 bg-white px-3 py-2"
+                  key={status}
+                >
+                  <p className="text-xs font-semibold uppercase tracking-normal text-slate-500">
+                    {humanize(status)}
+                  </p>
+                  <p className="mt-1 text-lg font-semibold text-slate-950">{count}</p>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-sm leading-6 text-slate-500">
+              No marketing content is linked to this campaign yet.
+            </p>
+          )}
+        </div>
+      )}
+    </Card>
+  );
+}
+
 function FutureAttachmentPoints() {
   return (
     <Card>
@@ -396,6 +476,10 @@ export function CampaignDetailWorkspace({ campaignId }: { campaignId: string }) 
   const campaign = useCampaign(activeWorkspace?.id ?? null, campaignId);
   const goals = useCampaignGoals(activeWorkspace?.id ?? null, campaignId);
   const milestones = useCampaignMilestones(activeWorkspace?.id ?? null, campaignId);
+  const marketingContent = useCampaignMarketingContent(activeWorkspace?.id ?? null, campaignId, {
+    limit: 500,
+    offset: 0,
+  });
   const canEdit = workspaceProfile.subject
     ? can(workspaceProfile.subject, null, capabilities.marketingCampaignEdit)
     : false;
@@ -532,6 +616,12 @@ export function CampaignDetailWorkspace({ campaignId }: { campaignId: string }) 
           </div>
           <div className="grid content-start gap-5">
             <TeamSection campaign={detail} canEdit={canEdit} />
+            <MarketingSection
+              campaignId={detail.id}
+              isLoading={marketingContent.isLoading}
+              items={marketingContent.data?.marketing_content ?? []}
+              total={marketingContent.data?.total ?? null}
+            />
             <FutureAttachmentPoints />
           </div>
         </div>

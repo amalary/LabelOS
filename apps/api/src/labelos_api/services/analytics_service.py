@@ -54,7 +54,9 @@ MAX_ANALYTICS_REPORTING_OBSERVATIONS = 10_000
 ANALYTICS_TARGET_TYPES = frozenset(
     {"workspace", "artist_profile", "campaign", "campaign_object"}
 )
-SUPPORTED_CAMPAIGN_OBJECT_TYPES = frozenset({"goal", "milestone"})
+SUPPORTED_CAMPAIGN_OBJECT_TYPES = frozenset(
+    {"goal", "marketing_content_item", "milestone"}
+)
 NUMERIC_ANALYTICS_VALUE_TYPES = frozenset(
     {AnalyticsMetricValueType.decimal, AnalyticsMetricValueType.integer}
 )
@@ -827,6 +829,7 @@ async def _validate_target_scope(
     child_type = target_values["campaign_object_type"]
     child_checkers = {
         "goal": analytics.campaign_goal_in_workspace,
+        "marketing_content_item": analytics.marketing_content_item_in_workspace,
         "milestone": analytics.campaign_milestone_in_workspace,
     }
     child_checker = child_checkers.get(str(child_type))

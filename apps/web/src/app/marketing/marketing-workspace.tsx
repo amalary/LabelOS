@@ -55,7 +55,16 @@ const statuses: MarketingContentItemStatus[] = [
   "archived",
 ];
 
-const channelOptions = ["instagram", "tiktok", "youtube", "spotify", "email", "x", "facebook"];
+const channelOptions = [
+  "instagram",
+  "tiktok",
+  "youtube",
+  "facebook",
+  "x",
+  "threads",
+  "spotify",
+  "email",
+];
 const weekdayLabels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const planningFallbackTimeZone = "UTC";
 
