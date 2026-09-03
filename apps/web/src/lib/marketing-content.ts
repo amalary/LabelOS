@@ -17,15 +17,54 @@ export class MarketingContentApiError extends Error {
   }
 }
 
+export type MarketingContentItemStatus =
+  | "draft"
+  | "in_review"
+  | "approved"
+  | "scheduled"
+  | "published"
+  | "cancelled"
+  | "archived";
+
+export type MarketingContentItemChannel = {
+  id: string;
+  marketing_content_item_id: string;
+  channel: string;
+  placement: string | null;
+  scheduled_at: string | null;
+  published_at: string | null;
+  external_post_id: string | null;
+  external_url: string | null;
+  copy_text_override: string | null;
+  asset_refs: unknown[];
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+};
+
 export type MarketingContentItem = {
   id: string;
   workspace_id: string;
   campaign_id: string;
   title: string;
   content_type: string;
-  status: string;
+  copy_text: string | null;
+  asset_refs: unknown[];
+  metadata: Record<string, unknown>;
+  status: MarketingContentItemStatus;
+  artist_id: string | null;
+  release_id: string | null;
+  owner_profile_id: string | null;
+  created_by_user_id: string | null;
+  created_by_profile_id: string | null;
   scheduled_at: string | null;
   published_at: string | null;
+  approval_requested_at: string | null;
+  approved_at: string | null;
+  approved_by_profile_id: string | null;
+  channels: MarketingContentItemChannel[];
+  created_at: string;
+  updated_at: string;
 };
 
 export type MarketingContentList = {
@@ -36,21 +75,69 @@ export type MarketingContentList = {
 };
 
 export type MarketingContentListOptions = {
+  campaign?: string | null;
   campaign_id?: string | null;
+  artist?: string | null;
+  artist_id?: string | null;
+  release?: string | null;
+  release_id?: string | null;
   start?: string | null;
   end?: string | null;
-  status?: string | null;
+  status?: MarketingContentItemStatus | null;
   channel?: string | null;
   content_type?: string | null;
   limit?: number;
   offset?: number;
 };
 
+export type MarketingContentCampaignListOptions = {
+  limit?: number;
+  offset?: number;
+};
+
+export type MarketingContentChannelCreate = {
+  channel: string;
+  placement?: string | null;
+  scheduled_at?: string | null;
+  copy_text_override?: string | null;
+  asset_refs?: unknown[] | null;
+};
+
+export type MarketingContentItemCreate = {
+  title: string;
+  content_type: string;
+  copy_text?: string | null;
+  asset_refs?: unknown[] | null;
+  artist_id?: string | null;
+  release_id?: string | null;
+  owner_profile_id?: string | null;
+  scheduled_at?: string | null;
+  channels?: MarketingContentChannelCreate[];
+};
+
+export type MarketingContentItemUpdate = Partial<MarketingContentItemCreate> & {
+  channels?: MarketingContentChannelCreate[] | null;
+};
+
+export type MarketingContentStatusTransition = {
+  status: MarketingContentItemStatus;
+  approved_by_profile_id?: string | null;
+};
+
 export type MarketingContentResourceState<T> = {
   data: T | null;
   error: MarketingContentApiError | null;
   isLoading: boolean;
+  isMutating: boolean;
   reload: () => Promise<T>;
+};
+
+export type MarketingContentMutationState<TData, TVariables> = {
+  data: TData | null;
+  error: MarketingContentApiError | null;
+  isMutating: boolean;
+  mutate: (variables: TVariables) => Promise<TData>;
+  reset: () => void;
 };
 
 type CacheEntry<T> = {
@@ -64,13 +151,22 @@ type CacheEntry<T> = {
 };
 
 const cache = new Map<string, CacheEntry<unknown>>();
+const mutationListeners = new Set<() => void>();
+let mutationVersion = 0;
+let activeMutationCount = 0;
 
 export const marketingContentQueryKeys = {
   all: "marketing-content",
   workspaceList: (workspaceId: string, options?: MarketingContentListOptions) =>
-    `marketing-content:workspace-list:${workspaceId}:${stableQueryKey(options)}`,
-  campaignList: (workspaceId: string, campaignId: string) =>
-    `marketing-content:campaign-list:${workspaceId}:${campaignId}`,
+    `marketing-content:workspace-list:${workspaceId}:${stableQueryKey(
+      normalizeMarketingContentListOptions(options),
+    )}`,
+  campaignList: (
+    workspaceId: string,
+    campaignId: string,
+    options?: MarketingContentCampaignListOptions,
+  ) =>
+    `marketing-content:campaign-list:${workspaceId}:${campaignId}:${stableQueryKey(options)}`,
   detail: (workspaceId: string, campaignId: string, contentItemId: string) =>
     `marketing-content:detail:${workspaceId}:${campaignId}:${contentItemId}`,
 };
@@ -79,11 +175,34 @@ function stableQueryKey(options?: Record<string, unknown> | null): string {
   if (!options) {
     return "default";
   }
-  return Object.entries(options)
+  const key = Object.entries(options)
     .filter(([, value]) => value !== undefined && value !== null && value !== "")
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([key, value]) => `${key}:${String(value)}`)
     .join("|");
+  return key || "default";
+}
+
+function normalizeMarketingContentListOptions(
+  options?: MarketingContentListOptions,
+): Record<string, string | number | null | undefined> {
+  if (!options) {
+    return {};
+  }
+  const normalized: Record<string, string | number | null | undefined> = { ...options };
+  if (normalized.campaign_id === undefined && options.campaign !== undefined) {
+    normalized.campaign_id = options.campaign;
+  }
+  if (normalized.artist_id === undefined && options.artist !== undefined) {
+    normalized.artist_id = options.artist;
+  }
+  if (normalized.release_id === undefined && options.release !== undefined) {
+    normalized.release_id = options.release;
+  }
+  delete normalized.campaign;
+  delete normalized.artist;
+  delete normalized.release;
+  return normalized;
 }
 
 function entryFor<T>(key: string): CacheEntry<T> {
@@ -106,6 +225,13 @@ function entryFor<T>(key: string): CacheEntry<T> {
 function emit(entry: CacheEntry<unknown>) {
   entry.version += 1;
   for (const listener of entry.listeners) {
+    listener();
+  }
+}
+
+function emitMutationChange() {
+  mutationVersion += 1;
+  for (const listener of mutationListeners) {
     listener();
   }
 }
@@ -173,9 +299,11 @@ async function loadResource<T>(key: string, fetcher: () => Promise<T>): Promise<
   if (entry.promise) {
     return entry.promise;
   }
+
   entry.error = null;
   entry.isLoading = true;
   emit(entry);
+
   entry.promise = fetcher()
     .then((data) => {
       entry.data = data;
@@ -199,13 +327,16 @@ async function loadResource<T>(key: string, fetcher: () => Promise<T>): Promise<
       entry.promise = null;
       emit(entry);
     });
+
   emit(entry);
   return entry.promise;
 }
 
-function marketingContentQuery(options?: MarketingContentListOptions): string {
+function marketingContentQuery(
+  options?: MarketingContentListOptions | MarketingContentCampaignListOptions,
+): string {
   const params = new URLSearchParams();
-  for (const [key, value] of Object.entries(options ?? {})) {
+  for (const [key, value] of Object.entries(normalizeMarketingContentListOptions(options))) {
     if (value === undefined || value === null || value === "") {
       continue;
     }
@@ -232,8 +363,10 @@ function useMarketingContentResource<T>(
     },
     [key],
   );
+
   const getSnapshot = useCallback(() => (key ? entryFor<T>(key).version : 0), [key]);
   useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+
   useEffect(() => {
     if (!key || !fetcher) {
       return;
@@ -244,6 +377,7 @@ function useMarketingContentResource<T>(
       void loadResource(key, fetcher).catch(() => undefined);
     }
   }, [fetcher, key]);
+
   const reload = useCallback(async () => {
     if (!key || !fetcher) {
       throw new MarketingContentApiError(
@@ -253,12 +387,75 @@ function useMarketingContentResource<T>(
     }
     return loadResource(key, fetcher);
   }, [fetcher, key]);
+
   const entry = key ? entryFor<T>(key) : null;
   return {
     data: entry?.data ?? null,
     error: entry?.error ?? null,
     isLoading: entry?.isLoading ?? false,
+    isMutating: activeMutationCount > 0,
     reload,
+  };
+}
+
+function useMarketingContentMutation<TData, TVariables>(
+  key: string,
+  mutation: (variables: TVariables) => Promise<TData>,
+): MarketingContentMutationState<TData, TVariables> {
+  const getVersion = useCallback(() => mutationVersion, []);
+  const subscribe = useCallback((listener: () => void) => {
+    mutationListeners.add(listener);
+    return () => {
+      mutationListeners.delete(listener);
+    };
+  }, []);
+  useSyncExternalStore(subscribe, getVersion, getVersion);
+
+  const entry = entryFor<TData>(key);
+  const mutate = useCallback(
+    async (variables: TVariables) => {
+      activeMutationCount += 1;
+      entry.isLoading = true;
+      entry.error = null;
+      emitMutationChange();
+      try {
+        const data = await mutation(variables);
+        entry.data = data;
+        entry.error = null;
+        return data;
+      } catch (error) {
+        entry.error =
+          error instanceof MarketingContentApiError
+            ? error
+            : new MarketingContentApiError(
+                "network_failure",
+                "Marketing content mutation failed.",
+                undefined,
+                { cause: error },
+              );
+        throw entry.error;
+      } finally {
+        activeMutationCount = Math.max(0, activeMutationCount - 1);
+        entry.isLoading = false;
+        emitMutationChange();
+      }
+    },
+    [entry, mutation],
+  );
+
+  const reset = useCallback(() => {
+    entry.data = null;
+    entry.error = null;
+    entry.isLoading = false;
+    emitMutationChange();
+  }, [entry]);
+
+  return {
+    data: entry.data,
+    error: entry.error,
+    isMutating: entry.isLoading || activeMutationCount > 0,
+    mutate,
+    reset,
   };
 }
 
@@ -291,7 +488,11 @@ export function shouldInvalidateMarketingContentRealtimeCacheKey({
   if (key.startsWith(`marketing-content:workspace-list:${workspaceId}:`)) {
     return true;
   }
-  if (campaignId && key === marketingContentQueryKeys.campaignList(workspaceId, campaignId)) {
+  if (
+    campaignId &&
+    (key === `marketing-content:campaign-list:${workspaceId}:${campaignId}` ||
+      key.startsWith(`marketing-content:campaign-list:${workspaceId}:${campaignId}:`))
+  ) {
     return true;
   }
   if (campaignId && contentItemId) {
@@ -311,8 +512,24 @@ export function invalidateMarketingContentWorkspaceCache(workspaceId: string) {
   );
 }
 
+function invalidateItemCaches(workspaceId: string, campaignId: string, contentItemId?: string) {
+  invalidateMarketingContentCache((key) => {
+    if (key.startsWith(`marketing-content:workspace-list:${workspaceId}:`)) {
+      return true;
+    }
+    if (key.startsWith(`marketing-content:campaign-list:${workspaceId}:${campaignId}:`)) {
+      return true;
+    }
+    return contentItemId
+      ? key === marketingContentQueryKeys.detail(workspaceId, campaignId, contentItemId)
+      : false;
+  });
+}
+
 export function clearMarketingContentCache() {
   cache.clear();
+  activeMutationCount = 0;
+  mutationVersion = 0;
 }
 
 export function listWorkspaceMarketingContent(
@@ -324,14 +541,21 @@ export function listWorkspaceMarketingContent(
   );
 }
 
+export const listWorkspaceCalendarContent = listWorkspaceMarketingContent;
+
 export function listCampaignMarketingContent(
   workspaceId: string,
   campaignId: string,
+  options?: MarketingContentCampaignListOptions,
 ): Promise<MarketingContentList> {
   return marketingContentJson<MarketingContentList>(
-    `/api/workspaces/${workspaceId}/campaigns/${campaignId}/marketing-content`,
+    `/api/workspaces/${workspaceId}/campaigns/${campaignId}/marketing-content${marketingContentQuery(
+      options,
+    )}`,
   );
 }
+
+export const listCampaignContent = listCampaignMarketingContent;
 
 export function getMarketingContentItem(
   workspaceId: string,
@@ -341,6 +565,73 @@ export function getMarketingContentItem(
   return marketingContentJson<MarketingContentItem>(
     `/api/workspaces/${workspaceId}/campaigns/${campaignId}/marketing-content/${contentItemId}`,
   );
+}
+
+export const getMarketingContent = getMarketingContentItem;
+
+export async function createMarketingContentItem(
+  workspaceId: string,
+  campaignId: string,
+  payload: MarketingContentItemCreate,
+): Promise<MarketingContentItem> {
+  const item = await marketingContentJson<MarketingContentItem>(
+    `/api/workspaces/${workspaceId}/campaigns/${campaignId}/marketing-content`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+  invalidateItemCaches(workspaceId, campaignId, item.id);
+  return item;
+}
+
+export async function updateMarketingContentItem(
+  workspaceId: string,
+  campaignId: string,
+  contentItemId: string,
+  payload: MarketingContentItemUpdate,
+): Promise<MarketingContentItem> {
+  const item = await marketingContentJson<MarketingContentItem>(
+    `/api/workspaces/${workspaceId}/campaigns/${campaignId}/marketing-content/${contentItemId}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    },
+  );
+  invalidateItemCaches(workspaceId, campaignId, contentItemId);
+  return item;
+}
+
+export async function archiveMarketingContentItem(
+  workspaceId: string,
+  campaignId: string,
+  contentItemId: string,
+): Promise<MarketingContentItem> {
+  const item = await marketingContentJson<MarketingContentItem>(
+    `/api/workspaces/${workspaceId}/campaigns/${campaignId}/marketing-content/${contentItemId}/archive`,
+    {
+      method: "POST",
+    },
+  );
+  invalidateItemCaches(workspaceId, campaignId, contentItemId);
+  return item;
+}
+
+export async function transitionMarketingContentStatus(
+  workspaceId: string,
+  campaignId: string,
+  contentItemId: string,
+  payload: MarketingContentStatusTransition,
+): Promise<MarketingContentItem> {
+  const item = await marketingContentJson<MarketingContentItem>(
+    `/api/workspaces/${workspaceId}/campaigns/${campaignId}/marketing-content/${contentItemId}/status`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    },
+  );
+  invalidateItemCaches(workspaceId, campaignId, contentItemId);
+  return item;
 }
 
 export function useWorkspaceMarketingContent(
@@ -355,17 +646,121 @@ export function useWorkspaceMarketingContent(
   return useMarketingContentResource(key, workspaceId ? fetcher : null);
 }
 
+export const useWorkspaceCalendarContent = useWorkspaceMarketingContent;
+
 export function useCampaignMarketingContent(
   workspaceId: string | null,
   campaignId: string | null,
+  options?: MarketingContentCampaignListOptions,
 ): MarketingContentResourceState<MarketingContentList> {
   const key =
     workspaceId && campaignId
-      ? marketingContentQueryKeys.campaignList(workspaceId, campaignId)
+      ? marketingContentQueryKeys.campaignList(workspaceId, campaignId, options)
       : null;
   const fetcher = useCallback(
-    () => listCampaignMarketingContent(workspaceId ?? "", campaignId ?? ""),
-    [campaignId, workspaceId],
+    () => listCampaignMarketingContent(workspaceId ?? "", campaignId ?? "", options),
+    [campaignId, options, workspaceId],
   );
   return useMarketingContentResource(key, workspaceId && campaignId ? fetcher : null);
+}
+
+export function useMarketingContentItem(
+  workspaceId: string | null,
+  campaignId: string | null,
+  contentItemId: string | null,
+): MarketingContentResourceState<MarketingContentItem> {
+  const key =
+    workspaceId && campaignId && contentItemId
+      ? marketingContentQueryKeys.detail(workspaceId, campaignId, contentItemId)
+      : null;
+  const fetcher = useCallback(
+    () => getMarketingContentItem(workspaceId ?? "", campaignId ?? "", contentItemId ?? ""),
+    [campaignId, contentItemId, workspaceId],
+  );
+  return useMarketingContentResource(
+    key,
+    workspaceId && campaignId && contentItemId ? fetcher : null,
+  );
+}
+
+export function useCreateMarketingContentItem(
+  workspaceId: string | null,
+  campaignId: string | null,
+): MarketingContentMutationState<MarketingContentItem, MarketingContentItemCreate> {
+  const mutation = useCallback(
+    (payload: MarketingContentItemCreate) => {
+      if (!workspaceId || !campaignId) {
+        throw new MarketingContentApiError("not_found", "A campaign resource key is required.");
+      }
+      return createMarketingContentItem(workspaceId, campaignId, payload);
+    },
+    [campaignId, workspaceId],
+  );
+  return useMarketingContentMutation(
+    `marketing-content:mutation:create:${workspaceId ?? "none"}:${campaignId ?? "none"}`,
+    mutation,
+  );
+}
+
+export function useUpdateMarketingContentItem(
+  workspaceId: string | null,
+  campaignId: string | null,
+  contentItemId: string | null,
+): MarketingContentMutationState<MarketingContentItem, MarketingContentItemUpdate> {
+  const mutation = useCallback(
+    (payload: MarketingContentItemUpdate) => {
+      if (!workspaceId || !campaignId || !contentItemId) {
+        throw new MarketingContentApiError("not_found", "A marketing content key is required.");
+      }
+      return updateMarketingContentItem(workspaceId, campaignId, contentItemId, payload);
+    },
+    [campaignId, contentItemId, workspaceId],
+  );
+  return useMarketingContentMutation(
+    `marketing-content:mutation:update:${workspaceId ?? "none"}:${campaignId ?? "none"}:${
+      contentItemId ?? "none"
+    }`,
+    mutation,
+  );
+}
+
+export function useArchiveMarketingContentItem(
+  workspaceId: string | null,
+  campaignId: string | null,
+  contentItemId: string | null,
+): MarketingContentMutationState<MarketingContentItem, void> {
+  const mutation = useCallback(() => {
+    if (!workspaceId || !campaignId || !contentItemId) {
+      throw new MarketingContentApiError("not_found", "A marketing content key is required.");
+    }
+    return archiveMarketingContentItem(workspaceId, campaignId, contentItemId);
+  }, [campaignId, contentItemId, workspaceId]);
+  return useMarketingContentMutation(
+    `marketing-content:mutation:archive:${workspaceId ?? "none"}:${campaignId ?? "none"}:${
+      contentItemId ?? "none"
+    }`,
+    mutation,
+  );
+}
+
+export function useTransitionMarketingContentStatus(
+  workspaceId: string | null,
+  campaignId: string | null,
+  contentItemId: string | null,
+): MarketingContentMutationState<MarketingContentItem, MarketingContentStatusTransition> {
+  const mutation = useCallback(
+    (payload: MarketingContentStatusTransition) => {
+      if (!workspaceId || !campaignId || !contentItemId) {
+        throw new MarketingContentApiError("not_found", "A marketing content key is required.");
+      }
+      return transitionMarketingContentStatus(workspaceId, campaignId, contentItemId, payload);
+    },
+    [campaignId, contentItemId, workspaceId],
+  );
+  return useMarketingContentMutation(
+    `marketing-content:mutation:status:${workspaceId ?? "none"}:${campaignId ?? "none"}:${
+      contentItemId ?? "none"
+    }`,
+    mutation,
+  );
 }

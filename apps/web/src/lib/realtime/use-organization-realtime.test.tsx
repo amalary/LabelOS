@@ -293,7 +293,7 @@ describe("useOrganizationRealtime", () => {
   });
 
   it("invalidates marketing content cache for workspace scoped content events", async () => {
-    routeState.pathname = "/marketing-content";
+    routeState.pathname = "/marketing";
     vi.mocked(fetch).mockResolvedValue(
       Response.json({
         marketing_content: [],
