@@ -7,6 +7,12 @@ import {
   useAnalyticsHistoricalSeries,
 } from "../analytics";
 import {
+  clearMarketingContentCache,
+  shouldInvalidateMarketingContentRealtimeCacheKey,
+  useWorkspaceMarketingContent,
+} from "../marketing-content";
+import { activityEventTypes, refetchEventTypes } from "./events";
+import {
   shouldInvalidateProfileRealtimeCacheKey,
   useOrganizationRealtime,
 } from "./use-organization-realtime";
@@ -58,6 +64,10 @@ const analyticsSeriesOptions = {
   aggregation: "sum" as const,
   metric_definition_id: "metric_01",
 };
+const marketingContentCalendarOptions = {
+  start: "2026-09-01T00:00:00Z",
+  end: "2026-09-30T23:59:59Z",
+};
 
 function RealtimeProbe() {
   const { connectionState, lastUpdatedBy, presence, recentActivityEvents } =
@@ -84,9 +94,21 @@ function RealtimeAnalyticsProbe() {
   );
 }
 
+function RealtimeMarketingContentProbe() {
+  const { recentActivityEvents } = useOrganizationRealtime("org_01");
+  const content = useWorkspaceMarketingContent("org_01", marketingContentCalendarOptions);
+  return (
+    <div>
+      <span>{content.data?.total ?? "no content"}</span>
+      <span>{recentActivityEvents[0]?.type ?? "no activity"}</span>
+    </div>
+  );
+}
+
 describe("useOrganizationRealtime", () => {
   beforeEach(() => {
     clearAnalyticsCache();
+    clearMarketingContentCache();
     navigation.refresh.mockReset();
     routeState.pathname = "/artists";
     FakeEventSource.instances = [];
@@ -260,6 +282,59 @@ describe("useOrganizationRealtime", () => {
     expect(screen.getByText("no activity")).toBeInTheDocument();
   });
 
+  it("recognizes marketing content events as realtime refetch and activity events", () => {
+    expect(refetchEventTypes.has("marketing.content.created")).toBe(true);
+    expect(refetchEventTypes.has("marketing.content.updated")).toBe(true);
+    expect(refetchEventTypes.has("marketing.content.status_changed")).toBe(true);
+    expect(refetchEventTypes.has("marketing.content.approval_requested")).toBe(true);
+    expect(refetchEventTypes.has("marketing.content.approved")).toBe(true);
+    expect(refetchEventTypes.has("marketing.content.published")).toBe(true);
+    expect(activityEventTypes.has("marketing.content.created")).toBe(true);
+  });
+
+  it("invalidates marketing content cache for workspace scoped content events", async () => {
+    routeState.pathname = "/marketing";
+    vi.mocked(fetch).mockResolvedValue(
+      Response.json({
+        marketing_content: [],
+        total: 1,
+        limit: 100,
+        offset: 0,
+      }),
+    );
+    render(<RealtimeMarketingContentProbe />);
+    const source = FakeEventSource.instances[0]!;
+
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+    act(() => {
+      source.emit("message", {
+        id: "marketing_content_event_01",
+        type: "marketing.content.approval_requested",
+        version: 1,
+        channel: "organization:org_01",
+        organization_id: "org_01",
+        entity_type: "marketing_content_item",
+        entity_id: "content_01",
+        operation_id: "operation_marketing_content_01",
+        actor: { user_id: "user_01", display_name: "Mara Chen" },
+        payload: {
+          contentItemId: "content_01",
+          campaignId: "campaign_01",
+          status: "in_review",
+        },
+        created_at: new Date().toISOString(),
+      });
+    });
+
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+    expect(fetch).toHaveBeenLastCalledWith(
+      "/api/workspaces/org_01/marketing-content?start=2026-09-01T00%3A00%3A00Z&end=2026-09-30T23%3A59%3A59Z",
+      expect.any(Object),
+    );
+    expect(navigation.refresh).not.toHaveBeenCalled();
+    expect(screen.getByText("marketing.content.approval_requested")).toBeInTheDocument();
+  });
+
   it("ignores events for a different organization", () => {
     render(<RealtimeProbe />);
     const source = FakeEventSource.instances[0]!;
@@ -369,5 +444,22 @@ describe("useOrganizationRealtime", () => {
         workspaceId: "org_01",
       }),
     ).toBe(false);
+  });
+
+  it("matches only marketing content cache keys for the event workspace", () => {
+    const shouldInvalidate = (key: string) =>
+      shouldInvalidateMarketingContentRealtimeCacheKey({
+        campaignId: "campaign_01",
+        contentItemId: "content_01",
+        key,
+        workspaceId: "org_01",
+      });
+
+    expect(shouldInvalidate("marketing-content:workspace-list:org_01:default")).toBe(true);
+    expect(shouldInvalidate("marketing-content:campaign-list:org_01:campaign_01")).toBe(true);
+    expect(shouldInvalidate("marketing-content:detail:org_01:campaign_01:content_01")).toBe(true);
+    expect(shouldInvalidate("marketing-content:workspace-list:org_02:default")).toBe(false);
+    expect(shouldInvalidate("marketing-content:campaign-list:org_01:campaign_02")).toBe(false);
+    expect(shouldInvalidate("marketing-content:detail:org_01:campaign_01:content_02")).toBe(false);
   });
 });

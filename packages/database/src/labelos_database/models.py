@@ -104,6 +104,16 @@ class CampaignStatus(StrEnum):
     archived = "archived"
 
 
+class MarketingContentItemStatus(StrEnum):
+    draft = "draft"
+    in_review = "in_review"
+    approved = "approved"
+    scheduled = "scheduled"
+    published = "published"
+    cancelled = "cancelled"
+    archived = "archived"
+
+
 class AnalyticsMetricValueType(StrEnum):
     integer = "integer"
     decimal = "decimal"
@@ -150,6 +160,12 @@ class User(Base, TimestampMixin):
         back_populates="user",
         cascade="all, delete-orphan",
         uselist=False,
+    )
+    created_marketing_content_items: Mapped[list["MarketingContentItem"]] = (
+        relationship(
+            back_populates="created_by_user",
+            foreign_keys="MarketingContentItem.created_by_user_id",
+        )
     )
 
     __table_args__ = (
@@ -223,6 +239,22 @@ class UniversalProfile(Base, TimestampMixin):
     artist_profiles: Mapped[list["ArtistProfile"]] = relationship(
         back_populates="universal_profile",
         cascade="all, delete-orphan",
+    )
+    created_marketing_content_items: Mapped[list["MarketingContentItem"]] = (
+        relationship(
+            back_populates="created_by_profile",
+            foreign_keys="MarketingContentItem.created_by_profile_id",
+        )
+    )
+    owned_marketing_content_items: Mapped[list["MarketingContentItem"]] = relationship(
+        back_populates="owner_profile",
+        foreign_keys="MarketingContentItem.owner_profile_id",
+    )
+    approved_marketing_content_items: Mapped[list["MarketingContentItem"]] = (
+        relationship(
+            back_populates="approved_by_profile",
+            foreign_keys="MarketingContentItem.approved_by_profile_id",
+        )
     )
 
     @property
@@ -575,6 +607,10 @@ class Organization(Base, TimestampMixin):
     )
     roles: Mapped[list["Role"]] = relationship(
         back_populates="workspace",
+        cascade="all, delete-orphan",
+    )
+    marketing_content_items: Mapped[list["MarketingContentItem"]] = relationship(
+        back_populates="organization",
         cascade="all, delete-orphan",
     )
 
@@ -1460,6 +1496,9 @@ class Artist(Base, TimestampMixin, OrganizationOwnedMixin):
         back_populates="artist",
         cascade="all, delete-orphan",
     )
+    marketing_content_items: Mapped[list["MarketingContentItem"]] = relationship(
+        back_populates="artist"
+    )
 
     __table_args__ = (
         UniqueConstraint(
@@ -1597,6 +1636,9 @@ class Release(Base, TimestampMixin, OrganizationOwnedMixin):
     campaign_links: Mapped[list["CampaignRelease"]] = relationship(
         back_populates="release",
         cascade="all, delete-orphan",
+    )
+    marketing_content_items: Mapped[list["MarketingContentItem"]] = relationship(
+        back_populates="release"
     )
 
     __table_args__ = (
@@ -1783,6 +1825,15 @@ class Campaign(Base, TimestampMixin, OrganizationOwnedMixin):
     analytics_observations: Mapped[list["AnalyticsObservation"]] = relationship(
         back_populates="campaign",
     )
+    marketing_content_items: Mapped[list["MarketingContentItem"]] = relationship(
+        back_populates="campaign",
+        cascade="all, delete-orphan",
+        order_by=lambda: (
+            MarketingContentItem.scheduled_at.asc().nulls_last(),
+            MarketingContentItem.created_at.asc(),
+            MarketingContentItem.id.asc(),
+        ),
+    )
 
     @validates("name")
     def _validate_name(self, _key: str, value: str | None) -> str:
@@ -1832,6 +1883,245 @@ class Campaign(Base, TimestampMixin, OrganizationOwnedMixin):
             "ix_campaigns_organization_id_target_end_date",
             "organization_id",
             "target_end_date",
+        ),
+    )
+
+
+class MarketingContentItem(Base, TimestampMixin, OrganizationOwnedMixin):
+    __tablename__ = "marketing_content_items"
+
+    id: Mapped[UUIDPrimaryKey]
+    campaign_id: Mapped[UUID] = mapped_column(
+        ForeignKey("campaigns.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    artist_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("artists.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    release_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("releases.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    title: Mapped[str] = mapped_column(String(240), nullable=False)
+    content_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    copy_text: Mapped[str | None] = mapped_column(String(8000))
+    asset_refs: Mapped[list] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+        server_default="[]",
+    )
+    metadata_json: Mapped[dict] = mapped_column(
+        "metadata",
+        JSON,
+        nullable=False,
+        default=dict,
+        server_default="{}",
+    )
+    status: Mapped[MarketingContentItemStatus] = mapped_column(
+        Enum(MarketingContentItemStatus, name="marketing_content_item_status"),
+        nullable=False,
+        default=MarketingContentItemStatus.draft,
+        server_default=MarketingContentItemStatus.draft.value,
+    )
+    scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    approval_requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    approved_by_profile_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("universal_profiles.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_by_profile_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("universal_profiles.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    owner_profile_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("universal_profiles.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    organization: Mapped[Organization] = relationship(
+        back_populates="marketing_content_items"
+    )
+    campaign: Mapped[Campaign] = relationship(back_populates="marketing_content_items")
+    channels: Mapped[list["MarketingContentItemChannel"]] = relationship(
+        back_populates="marketing_content_item",
+        cascade="all, delete-orphan",
+        order_by=lambda: (
+            MarketingContentItemChannel.channel.asc(),
+            MarketingContentItemChannel.placement.asc(),
+            MarketingContentItemChannel.created_at.asc(),
+        ),
+    )
+    artist: Mapped[Artist | None] = relationship(
+        back_populates="marketing_content_items",
+        foreign_keys=[artist_id],
+    )
+    release: Mapped[Release | None] = relationship(
+        back_populates="marketing_content_items",
+        foreign_keys=[release_id],
+    )
+    approved_by_profile: Mapped[UniversalProfile | None] = relationship(
+        back_populates="approved_marketing_content_items",
+        foreign_keys=[approved_by_profile_id],
+    )
+    created_by_user: Mapped[User | None] = relationship(
+        back_populates="created_marketing_content_items",
+        foreign_keys=[created_by_user_id],
+    )
+    created_by_profile: Mapped[UniversalProfile | None] = relationship(
+        back_populates="created_marketing_content_items",
+        foreign_keys=[created_by_profile_id],
+    )
+    owner_profile: Mapped[UniversalProfile | None] = relationship(
+        back_populates="owned_marketing_content_items",
+        foreign_keys=[owner_profile_id],
+    )
+
+    @validates("title", "content_type")
+    def _validate_required_text(self, key: str, value: str | None) -> str:
+        return _required_text(value, key)
+
+    @validates("copy_text")
+    def _validate_optional_text(self, _key: str, value: str | None) -> str | None:
+        return _optional_text(value)
+
+    @validates("asset_refs")
+    def _validate_asset_refs(self, key: str, value: list | None) -> list:
+        return _json_list(value, key)
+
+    @validates("metadata_json")
+    def _validate_metadata(self, key: str, value: dict | None) -> dict:
+        return _json_object(value, key)
+
+    __table_args__ = (
+        Index("ix_marketing_content_items_organization_id", "organization_id"),
+        Index(
+            "ix_marketing_content_items_organization_id_campaign_id",
+            "organization_id",
+            "campaign_id",
+        ),
+        Index(
+            "ix_marketing_content_items_organization_id_status",
+            "organization_id",
+            "status",
+        ),
+        Index(
+            "ix_marketing_content_items_organization_id_scheduled_at",
+            "organization_id",
+            "scheduled_at",
+        ),
+        Index(
+            "ix_marketing_content_items_organization_id_published_at",
+            "organization_id",
+            "published_at",
+        ),
+        Index(
+            "ix_marketing_content_items_organization_id_artist_id",
+            "organization_id",
+            "artist_id",
+        ),
+        Index(
+            "ix_marketing_content_items_organization_id_release_id",
+            "organization_id",
+            "release_id",
+        ),
+        Index(
+            "ix_marketing_content_items_org_owner_profile",
+            "organization_id",
+            "owner_profile_id",
+        ),
+        Index(
+            "ix_marketing_content_items_org_created_user",
+            "organization_id",
+            "created_by_user_id",
+        ),
+        Index(
+            "ix_marketing_content_items_org_created_profile",
+            "organization_id",
+            "created_by_profile_id",
+        ),
+    )
+
+
+class MarketingContentItemChannel(Base, TimestampMixin):
+    __tablename__ = "marketing_content_item_channels"
+
+    id: Mapped[UUIDPrimaryKey]
+    marketing_content_item_id: Mapped[UUID] = mapped_column(
+        ForeignKey("marketing_content_items.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    channel: Mapped[str] = mapped_column(String(80), nullable=False)
+    placement: Mapped[str] = mapped_column(
+        String(80),
+        nullable=False,
+        default="default",
+        server_default="default",
+    )
+    scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    external_post_id: Mapped[str | None] = mapped_column(String(255))
+    external_url: Mapped[str | None] = mapped_column(String(2048))
+    copy_text_override: Mapped[str | None] = mapped_column(String(8000))
+    asset_refs: Mapped[list] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+        server_default="[]",
+    )
+    metadata_json: Mapped[dict] = mapped_column(
+        "metadata",
+        JSON,
+        nullable=False,
+        default=dict,
+        server_default="{}",
+    )
+
+    marketing_content_item: Mapped[MarketingContentItem] = relationship(
+        back_populates="channels"
+    )
+
+    @validates("channel", "placement")
+    def _validate_required_text(self, key: str, value: str | None) -> str:
+        return _required_text(value, key)
+
+    @validates("external_post_id", "external_url", "copy_text_override")
+    def _validate_optional_text(self, _key: str, value: str | None) -> str | None:
+        return _optional_text(value)
+
+    @validates("asset_refs")
+    def _validate_asset_refs(self, key: str, value: list | None) -> list:
+        return _json_list(value, key)
+
+    @validates("metadata_json")
+    def _validate_metadata(self, key: str, value: dict | None) -> dict:
+        return _json_object(value, key)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "marketing_content_item_id",
+            "channel",
+            "placement",
+            name="uq_marketing_content_item_channels_item_channel_placement",
+        ),
+        Index(
+            "ix_marketing_content_item_channels_marketing_content_item_id",
+            "marketing_content_item_id",
+        ),
+        Index("ix_marketing_content_item_channels_channel", "channel"),
+        Index(
+            "ix_marketing_content_item_channels_channel_scheduled_at",
+            "channel",
+            "scheduled_at",
         ),
     )
 

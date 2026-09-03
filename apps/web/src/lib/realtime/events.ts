@@ -37,6 +37,12 @@ export type RealtimeEventType =
   | "campaign.milestone_completed"
   | "analytics.observation.created"
   | "analytics.observations.ingested"
+  | "marketing.content.created"
+  | "marketing.content.updated"
+  | "marketing.content.status_changed"
+  | "marketing.content.approval_requested"
+  | "marketing.content.approved"
+  | "marketing.content.published"
   | "approval.updated"
   | "agent.started"
   | "agent.completed"
@@ -98,6 +104,12 @@ export const activityEventTypes = new Set<RealtimeEventType>([
   "campaign.milestone_created",
   "campaign.milestone_updated",
   "campaign.milestone_completed",
+  "marketing.content.created",
+  "marketing.content.updated",
+  "marketing.content.status_changed",
+  "marketing.content.approval_requested",
+  "marketing.content.approved",
+  "marketing.content.published",
   "approval.updated",
   "agent.started",
   "agent.completed",
@@ -143,6 +155,12 @@ export const refetchEventTypes = new Set<RealtimeEventType>([
   "campaign.milestone_completed",
   "analytics.observation.created",
   "analytics.observations.ingested",
+  "marketing.content.created",
+  "marketing.content.updated",
+  "marketing.content.status_changed",
+  "marketing.content.approval_requested",
+  "marketing.content.approved",
+  "marketing.content.published",
   "approval.updated",
   "agent.started",
   "agent.completed",

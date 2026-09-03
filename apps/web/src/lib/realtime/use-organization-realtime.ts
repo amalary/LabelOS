@@ -15,6 +15,10 @@ import { usePathname, useRouter } from "next/navigation";
 import { invalidateAnalyticsWorkspaceCache } from "../analytics";
 import { clearOrganizationScopedBrowserCaches } from "../browser-cache";
 import { invalidateCampaignCache, shouldInvalidateCampaignRealtimeCacheKey } from "../campaigns";
+import {
+  invalidateMarketingContentCache,
+  shouldInvalidateMarketingContentRealtimeCacheKey,
+} from "../marketing-content";
 import { invalidateProfileCache } from "../profiles";
 import {
   invalidateWorkspaceCapabilityCache,
@@ -52,6 +56,7 @@ const maxRecentActivityEvents = 25;
 const profileEventPrefix = "profile.";
 const campaignEventPrefix = "campaign.";
 const analyticsEventPrefix = "analytics.";
+const marketingContentEventPrefix = "marketing.content.";
 const artistProfileEventTypes = new Set<string>([
   "profile.artist_updated",
   "profile.artist_profile_created",
@@ -283,6 +288,22 @@ export function useOrganizationRealtime(organizationId: string | null): Organiza
           if (event.type.startsWith(analyticsEventPrefix)) {
             invalidateAnalyticsWorkspaceCache(organizationId);
           }
+          if (event.type.startsWith(marketingContentEventPrefix)) {
+            const campaignId =
+              typeof event.payload.campaignId === "string" ? event.payload.campaignId : null;
+            const contentItemId =
+              typeof event.payload.contentItemId === "string"
+                ? event.payload.contentItemId
+                : event.entity_id;
+            invalidateMarketingContentCache((key) =>
+              shouldInvalidateMarketingContentRealtimeCacheKey({
+                campaignId,
+                contentItemId,
+                key,
+                workspaceId: organizationId,
+              }),
+            );
+          }
           if (
             event.type === "member.updated" ||
             event.type === "member.role_changed" ||
@@ -308,10 +329,13 @@ export function useOrganizationRealtime(organizationId: string | null): Organiza
             pathname.startsWith("/campaigns") && event.type.startsWith(campaignEventPrefix);
           const isAnalyticsWorkspaceRefresh =
             pathname.startsWith("/analytics") && event.type.startsWith(analyticsEventPrefix);
+          const isMarketingContentWorkspaceRefresh =
+            pathname.startsWith("/marketing") && event.type.startsWith(marketingContentEventPrefix);
           if (
             !isDashboardActivityRefresh &&
             !isCampaignWorkspaceRefresh &&
-            !isAnalyticsWorkspaceRefresh
+            !isAnalyticsWorkspaceRefresh &&
+            !isMarketingContentWorkspaceRefresh
           ) {
             clearOrganizationScopedBrowserCaches();
             router.refresh();

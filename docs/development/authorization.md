@@ -280,6 +280,12 @@ Initial capabilities:
 - `marketing.campaign.create`
 - `marketing.campaign.edit`
 - `marketing.campaign.approve`
+- `marketing.content.view`
+- `marketing.content.create`
+- `marketing.content.edit`
+- `marketing.content.archive`
+- `marketing.content.submit_for_review`
+- `marketing.content.approve`
 - `contract.view`
 - `contract.create`
 - `contract.edit`
@@ -295,6 +301,13 @@ Initial capabilities:
 - `finance.payment.view`
 - `finance.payment.approve`
 - `analytics.view`
+
+Deferred marketing capabilities, not declared until their product behavior is
+implemented:
+
+- `marketing.content.schedule`
+- `marketing.content.publish`
+- `marketing.accounts.manage`
 
 Initial baseline capability mapping:
 

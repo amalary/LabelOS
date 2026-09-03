@@ -39,6 +39,12 @@ class Capability(StrEnum):
     marketing_campaign_create = "marketing.campaign.create"
     marketing_campaign_edit = "marketing.campaign.edit"
     marketing_campaign_approve = "marketing.campaign.approve"
+    marketing_content_view = "marketing.content.view"
+    marketing_content_create = "marketing.content.create"
+    marketing_content_edit = "marketing.content.edit"
+    marketing_content_archive = "marketing.content.archive"
+    marketing_content_submit_for_review = "marketing.content.submit_for_review"
+    marketing_content_approve = "marketing.content.approve"
     contract_view = "contract.view"
     contract_create = "contract.create"
     contract_edit = "contract.edit"
@@ -228,6 +234,36 @@ CAPABILITY_REGISTRY: tuple[CapabilityDefinition, ...] = (
         Capability.marketing_campaign_approve,
         "Approve campaigns",
         "Approve marketing campaign plans.",
+    ),
+    _definition(
+        Capability.marketing_content_view,
+        "View marketing content",
+        "View marketing content items in campaign workspaces.",
+    ),
+    _definition(
+        Capability.marketing_content_create,
+        "Create marketing content",
+        "Create marketing content items for campaigns.",
+    ),
+    _definition(
+        Capability.marketing_content_edit,
+        "Edit marketing content",
+        "Edit marketing content item details and channels.",
+    ),
+    _definition(
+        Capability.marketing_content_archive,
+        "Archive marketing content",
+        "Archive marketing content items.",
+    ),
+    _definition(
+        Capability.marketing_content_submit_for_review,
+        "Submit marketing content for review",
+        "Submit draft marketing content items for review.",
+    ),
+    _definition(
+        Capability.marketing_content_approve,
+        "Approve marketing content",
+        "Approve marketing content items submitted for review.",
     ),
     _definition(Capability.contract_view, "View contracts", "View contract records."),
     _definition(
