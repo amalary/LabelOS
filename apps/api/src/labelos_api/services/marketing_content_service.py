@@ -8,6 +8,7 @@ from labelos_database.models import (
     MarketingContentItemChannel,
     MarketingContentItemStatus,
     Release,
+    User,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,6 +19,7 @@ from labelos_api.authorization import (
     ResourceKind,
     authorization_service,
 )
+from labelos_api.realtime import RealtimeEventType, RealtimePublisher
 from labelos_api.repositories import marketing_content
 
 
@@ -328,6 +330,64 @@ def _set_if_not_none(values: dict[str, object], key: str, value: object | None) 
         values[key] = value
 
 
+def _actor_user(actor: AuthorizationActorInput | None) -> User | None:
+    if isinstance(actor, User):
+        return actor
+    user = getattr(actor, "user", None)
+    return user if isinstance(user, User) else None
+
+
+def _status_value(status: MarketingContentItemStatus | str) -> str:
+    return (
+        status.value if isinstance(status, MarketingContentItemStatus) else str(status)
+    )
+
+
+def _content_event_payload(
+    item: MarketingContentItem,
+    *,
+    status: MarketingContentItemStatus | str | None = None,
+) -> dict[str, str]:
+    payload = {
+        "contentItemId": str(item.id),
+        "campaignId": str(item.campaign_id),
+    }
+    if status is not None:
+        payload["status"] = _status_value(status)
+    return payload
+
+
+async def _publish_content_event(
+    session: AsyncSession,
+    *,
+    workspace_id: UUID,
+    event_type: RealtimeEventType,
+    actor: AuthorizationActorInput | None,
+    item: MarketingContentItem,
+    status: MarketingContentItemStatus | str | None = None,
+) -> None:
+    await RealtimePublisher(session).publish(
+        organization_id=workspace_id,
+        event_type=event_type,
+        actor=_actor_user(actor),
+        entity_type="marketing_content_item",
+        entity_id=item.id,
+        payload=_content_event_payload(item, status=status),
+    )
+
+
+def _event_type_for_status(
+    status: MarketingContentItemStatus,
+) -> RealtimeEventType:
+    if status == MarketingContentItemStatus.in_review:
+        return RealtimeEventType.marketing_content_approval_requested
+    if status == MarketingContentItemStatus.approved:
+        return RealtimeEventType.marketing_content_approved
+    if status == MarketingContentItemStatus.published:
+        return RealtimeEventType.marketing_content_published
+    return RealtimeEventType.marketing_content_status_changed
+
+
 def _create_values(payload: MarketingContentItemCreate) -> dict[str, object]:
     values: dict[str, object] = {
         "campaign_id": payload.campaign_id,
@@ -580,6 +640,14 @@ async def create_content_item(
     if channel_values:
         await marketing_content.create_channels(session, item.id, channel_values)
         session.expire(item, ["channels"])
+    await _publish_content_event(
+        session,
+        workspace_id=workspace_id,
+        event_type=RealtimeEventType.marketing_content_created,
+        actor=actor,
+        item=item,
+        status=item.status,
+    )
     await session.commit()
     return await get_content_item(session, workspace_id, item.id)
 
@@ -802,6 +870,8 @@ async def update_content_item(
         campaign_id=item.campaign_id,
     )
     values = _update_values(payload)
+    if not values:
+        return item
     relationship_values = dict(values)
     relationship_values.setdefault("campaign_id", item.campaign_id)
     if "artist_id" not in relationship_values and item.artist_id is not None:
@@ -826,6 +896,14 @@ async def update_content_item(
     )
     if updated is None:
         raise MarketingContentNotFoundError("Marketing content item not found")
+    await _publish_content_event(
+        session,
+        workspace_id=workspace_id,
+        event_type=RealtimeEventType.marketing_content_updated,
+        actor=actor,
+        item=updated,
+        status=updated.status,
+    )
     await session.commit()
     return updated
 
@@ -857,6 +935,14 @@ async def replace_channels(
     if item.status in APPROVAL_CLEARING_STATUSES:
         item.status = MarketingContentItemStatus.draft
         _clear_approval_fields(item)
+    await _publish_content_event(
+        session,
+        workspace_id=workspace_id,
+        event_type=RealtimeEventType.marketing_content_updated,
+        actor=actor,
+        item=item,
+        status=item.status,
+    )
     await session.commit()
     return await get_content_item(session, workspace_id, item.id)
 
@@ -886,6 +972,8 @@ async def update_channel(
     if channel is None:
         raise MarketingContentNotFoundError("Marketing content channel not found")
     values = _channel_update_values(payload)
+    if not values:
+        return channel
     prospective = []
     for row in item.channels:
         prospective.append(
@@ -901,6 +989,14 @@ async def update_channel(
     if item.status in APPROVAL_CLEARING_STATUSES and values:
         item.status = MarketingContentItemStatus.draft
         _clear_approval_fields(item)
+    await _publish_content_event(
+        session,
+        workspace_id=workspace_id,
+        event_type=RealtimeEventType.marketing_content_updated,
+        actor=actor,
+        item=item,
+        status=item.status,
+    )
     await session.commit()
     return updated
 
@@ -968,6 +1064,14 @@ async def transition_status(
     ):
         _clear_approval_fields(item)
     item.status = next_status
+    await _publish_content_event(
+        session,
+        workspace_id=workspace_id,
+        event_type=_event_type_for_status(next_status),
+        actor=actor,
+        item=item,
+        status=next_status,
+    )
     await session.commit()
     return item
 

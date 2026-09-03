@@ -14,6 +14,7 @@ from labelos_database.models import (
     MembershipRole,
     Organization,
     OrganizationMembership,
+    RealtimeEvent,
     Release,
     UniversalProfile,
     User,
@@ -32,6 +33,7 @@ from labelos_api.auth import (
     get_session,
 )
 from labelos_api.main import create_app
+from labelos_api.realtime import RealtimeEventType, realtime_channel
 
 
 @dataclass(frozen=True)
@@ -279,6 +281,19 @@ def _base(seeded: SeededMarketingContentApi, campaign_id: UUID | None = None) ->
     )
 
 
+async def _realtime_events(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    organization_id: UUID,
+) -> list[RealtimeEvent]:
+    async with sessionmaker() as session:
+        rows = await session.scalars(
+            select(RealtimeEvent)
+            .where(RealtimeEvent.organization_id == organization_id)
+            .order_by(RealtimeEvent.created_at.asc(), RealtimeEvent.id.asc())
+        )
+        return list(rows.all())
+
+
 def _draft_payload(
     seeded: SeededMarketingContentApi,
     *,
@@ -398,6 +413,121 @@ def test_marketing_content_campaign_crud_and_lifecycle(
     archived = client.post(f"{base}/{created['id']}/archive")
     assert archived.status_code == 200
     assert archived.json()["status"] == "archived"
+
+
+def test_marketing_content_mutations_publish_workspace_scoped_realtime_events(
+    marketing_content_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededMarketingContentApi,
+    ],
+) -> None:
+    client, sessionmaker, seeded = marketing_content_client
+    _set_context(client, seeded)
+    base = _base(seeded)
+    scheduled_at = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+
+    created_response = client.post(base, json=_draft_payload(seeded))
+    assert created_response.status_code == 201
+    content_id = created_response.json()["id"]
+
+    updated_response = client.patch(
+        f"{base}/{content_id}",
+        json={"title": "Realtime Caption Final"},
+    )
+    in_review_response = client.patch(
+        f"{base}/{content_id}/status",
+        json={"status": "in_review"},
+    )
+    approved_response = client.patch(
+        f"{base}/{content_id}/status",
+        json={"status": "approved"},
+    )
+
+    assert updated_response.status_code == 200
+    assert in_review_response.status_code == 200
+    assert approved_response.status_code == 200
+
+    events = asyncio.run(_realtime_events(sessionmaker, seeded.workspace_id))
+    assert [event.event_type for event in events] == [
+        RealtimeEventType.marketing_content_created.value,
+        RealtimeEventType.marketing_content_updated.value,
+        RealtimeEventType.marketing_content_approval_requested.value,
+        RealtimeEventType.marketing_content_approved.value,
+    ]
+    assert all(event.organization_id == seeded.workspace_id for event in events)
+    assert all(
+        event.channel == realtime_channel(seeded.workspace_id) for event in events
+    )
+    assert all(event.entity_type == "marketing_content_item" for event in events)
+    assert all(event.entity_id == content_id for event in events)
+    assert all(event.actor_user_id == seeded.owner_user_id for event in events)
+    for event in events:
+        assert event.payload["contentItemId"] == content_id
+        assert event.payload["campaignId"] == str(seeded.campaign_id)
+    assert events[0].payload["status"] == "draft"
+    assert events[2].payload["status"] == "in_review"
+    assert events[3].payload["status"] == "approved"
+
+    schedulable = client.post(
+        base,
+        json={
+            **_draft_payload(seeded, title="Publishable"),
+            "scheduled_at": scheduled_at.isoformat(),
+        },
+    ).json()
+    assert (
+        client.patch(
+            f"{base}/{schedulable['id']}/status",
+            json={"status": "approved"},
+        ).status_code
+        == 200
+    )
+    scheduled = client.patch(
+        f"{base}/{schedulable['id']}/status",
+        json={"status": "scheduled"},
+    )
+    published = client.patch(
+        f"{base}/{schedulable['id']}/status",
+        json={"status": "published"},
+    )
+    assert scheduled.status_code == 200
+    assert published.status_code == 200
+    publish_events = asyncio.run(_realtime_events(sessionmaker, seeded.workspace_id))[
+        -2:
+    ]
+    assert [event.event_type for event in publish_events] == [
+        RealtimeEventType.marketing_content_status_changed.value,
+        RealtimeEventType.marketing_content_published.value,
+    ]
+    assert publish_events[0].payload["status"] == "scheduled"
+    assert publish_events[1].payload["status"] == "published"
+
+    assert (
+        asyncio.run(_realtime_events(sessionmaker, seeded.outside_workspace_id)) == []
+    )
+
+
+def test_marketing_content_does_not_publish_realtime_event_on_failed_mutation(
+    marketing_content_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededMarketingContentApi,
+    ],
+) -> None:
+    client, sessionmaker, seeded = marketing_content_client
+    _set_context(client, seeded)
+
+    response = client.post(
+        _base(seeded),
+        json={
+            **_draft_payload(seeded, title="Invalid Relationship"),
+            "artist_id": str(seeded.outside_artist_id),
+        },
+    )
+
+    assert response.status_code == 400
+    assert asyncio.run(_realtime_events(sessionmaker, seeded.workspace_id)) == []
 
 
 def test_marketing_content_workspace_calendar_filters(
