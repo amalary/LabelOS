@@ -203,7 +203,9 @@ describe("approvals data layer", () => {
     vi.mocked(fetch)
       .mockResolvedValueOnce(Response.json({ ...approvalDetail, channels: undefined }))
       .mockResolvedValueOnce(Response.json(approvalDetail))
-      .mockResolvedValueOnce(Response.json({ ...approvalDetail, stage_assignment: { profile_id: "profile_02" } }))
+      .mockResolvedValueOnce(
+        Response.json({ ...approvalDetail, stage_assignment: { profile_id: "profile_02" } }),
+      )
       .mockResolvedValueOnce(Response.json({ ...approvalDetail, status: "approved" }))
       .mockResolvedValueOnce(Response.json({ ...approvalDetail, status: "rejected" }))
       .mockResolvedValueOnce(Response.json({ ...approvalDetail, status: "changes_requested" }));
@@ -212,7 +214,9 @@ describe("approvals data layer", () => {
       available_actions: ["approved", "rejected", "changes_requested", "cancelled"],
       channels: [],
     });
-    await expect(listApprovalDecisionHistory("workspace_01", "approval_01")).resolves.toHaveLength(1);
+    await expect(listApprovalDecisionHistory("workspace_01", "approval_01")).resolves.toHaveLength(
+      1,
+    );
     await expect(
       assignApprovalReviewer("workspace_01", "approval_01", { assigned_profile_id: "profile_02" }),
     ).resolves.toMatchObject({ stage_assignment: { profile_id: "profile_02" } });
@@ -261,10 +265,14 @@ describe("approvals data layer", () => {
 
   it("invalidates approval list and targeted marketing content caches after approval mutations", async () => {
     vi.mocked(fetch)
-      .mockResolvedValueOnce(Response.json({ approvals: [approvalSummary], total: 1, limit: 25, offset: 0 }))
+      .mockResolvedValueOnce(
+        Response.json({ approvals: [approvalSummary], total: 1, limit: 25, offset: 0 }),
+      )
       .mockResolvedValueOnce(Response.json(marketingContentItem))
       .mockResolvedValueOnce(Response.json(approvalDetail))
-      .mockResolvedValueOnce(Response.json({ approvals: [approvalSummary], total: 1, limit: 25, offset: 0 }))
+      .mockResolvedValueOnce(
+        Response.json({ approvals: [approvalSummary], total: 1, limit: 25, offset: 0 }),
+      )
       .mockResolvedValueOnce(Response.json(marketingContentItem));
 
     render(
@@ -292,9 +300,13 @@ describe("approvals data layer", () => {
 
   it("invalidates approval and marketing content caches for approval.updated realtime events", async () => {
     vi.mocked(fetch)
-      .mockResolvedValueOnce(Response.json({ approvals: [approvalSummary], total: 1, limit: 25, offset: 0 }))
+      .mockResolvedValueOnce(
+        Response.json({ approvals: [approvalSummary], total: 1, limit: 25, offset: 0 }),
+      )
       .mockResolvedValueOnce(Response.json(marketingContentItem))
-      .mockResolvedValueOnce(Response.json({ approvals: [approvalSummary], total: 1, limit: 25, offset: 0 }))
+      .mockResolvedValueOnce(
+        Response.json({ approvals: [approvalSummary], total: 1, limit: 25, offset: 0 }),
+      )
       .mockResolvedValueOnce(Response.json(marketingContentItem));
 
     render(

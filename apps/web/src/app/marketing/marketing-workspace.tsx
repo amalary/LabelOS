@@ -331,16 +331,16 @@ function approvalStateLabel(item: MarketingContentItem): string {
 function approvedRevisionIsCurrent(item: MarketingContentItem): boolean {
   return Boolean(
     item.approval_state?.approved_revision_is_current ??
-      (item.approved_revision !== null &&
-        item.approved_revision !== undefined &&
-        item.approved_revision === item.content_revision),
+    (item.approved_revision !== null &&
+      item.approved_revision !== undefined &&
+      item.approved_revision === item.content_revision),
   );
 }
 
 function canScheduleApprovedRevision(item: MarketingContentItem): boolean {
   return Boolean(
     item.approval_state?.can_schedule ??
-      (item.status === "approved" && approvedRevisionIsCurrent(item)),
+    (item.status === "approved" && approvedRevisionIsCurrent(item)),
   );
 }
 
@@ -1100,16 +1100,12 @@ function ContentEditor({
         <Button disabled={!isEditable || isMutating} onClick={saveDraft} type="button">
           {mode === "create" ? "Save draft" : "Save changes"}
         </Button>
-        {item?.status === "draft" &&
-        approvalState !== "changes_requested" &&
-        canSubmitForReview ? (
+        {item?.status === "draft" && approvalState !== "changes_requested" && canSubmitForReview ? (
           <Button disabled={isMutating} onClick={submitForReview} type="button" variant="secondary">
             Submit for approval
           </Button>
         ) : null}
-        {item?.status === "draft" &&
-        approvalState === "changes_requested" &&
-        canSubmitForReview ? (
+        {item?.status === "draft" && approvalState === "changes_requested" && canSubmitForReview ? (
           <Button disabled={isMutating} onClick={submitForReview} type="button" variant="secondary">
             Resubmit for approval
           </Button>

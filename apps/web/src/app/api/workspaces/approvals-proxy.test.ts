@@ -38,7 +38,9 @@ describe("approval proxy routes", () => {
 
   it("constructs approval list URLs with query filters", async () => {
     await listApprovals(
-      new Request("http://localhost/api/workspaces/workspace_01/approvals?status=in_review&limit=25"),
+      new Request(
+        "http://localhost/api/workspaces/workspace_01/approvals?status=in_review&limit=25",
+      ),
       workspaceContext,
     );
 

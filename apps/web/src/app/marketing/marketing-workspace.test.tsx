@@ -868,9 +868,7 @@ describe("MarketingWorkspace", () => {
     fireEvent.click(screen.getByRole("button", { name: /Single Teaser/ }));
     fireEvent.click(screen.getByRole("button", { name: "Schedule" }));
 
-    await waitFor(() =>
-      expect(mutationMocks.status).toHaveBeenCalledWith({ status: "scheduled" }),
-    );
+    await waitFor(() => expect(mutationMocks.status).toHaveBeenCalledWith({ status: "scheduled" }));
 
     mockCalendar([
       item({
@@ -898,7 +896,10 @@ describe("MarketingWorkspace", () => {
 
   it("warns before material edits to currently approved content", async () => {
     vi.useRealTimers();
-    const confirm = vi.spyOn(window, "confirm").mockReturnValueOnce(false).mockReturnValueOnce(true);
+    const confirm = vi
+      .spyOn(window, "confirm")
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(true);
     mockWorkspaceProfile(["marketing.content.view", "marketing.content.edit"]);
     mockCalendar([
       item({
