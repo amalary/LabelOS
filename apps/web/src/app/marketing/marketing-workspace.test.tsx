@@ -92,6 +92,7 @@ vi.mock("../../lib/marketing-content", async () => {
       reset: vi.fn(),
     })),
     useWorkspaceCalendarContent: vi.fn(),
+    useWorkspaceMarketingContent: vi.fn(),
   };
 });
 
@@ -433,6 +434,21 @@ function mockCalendar(items: MarketingContentItem[] = [item()]) {
   });
 }
 
+function mockDrafts(items: MarketingContentItem[] = [item({ status: "draft" })]) {
+  vi.mocked(marketingContent.useWorkspaceMarketingContent).mockReturnValue({
+    data: {
+      marketing_content: items,
+      total: items.length,
+      limit: 500,
+      offset: 0,
+    },
+    error: null,
+    isLoading: false,
+    isMutating: false,
+    reload: vi.fn(),
+  });
+}
+
 describe("MarketingWorkspace", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -468,6 +484,7 @@ describe("MarketingWorkspace", () => {
     mutationMocks.status.mockResolvedValue(item({ status: "in_review" }));
     mockWorkspaceProfile();
     mockCalendar();
+    mockDrafts();
     vi.mocked(campaignsLib.useCampaigns).mockReturnValue({
       data: { campaigns: [campaign], total: 1, limit: 500, offset: 0 },
       error: null,
@@ -1328,12 +1345,62 @@ describe("MarketingWorkspace", () => {
     expect(screen.getByText(/Realtime refresh: approval.updated/)).toBeInTheDocument();
   });
 
+  it("enables the drafts tab and renders draft posts from marketing content", () => {
+    mockDrafts([
+      item({ id: "content_draft_01", status: "draft", title: "Draft Caption" }),
+      item({ id: "content_scheduled_01", status: "scheduled", title: "Scheduled Caption" }),
+    ]);
+
+    render(<MarketingWorkspace />);
+
+    const draftsTab = screen.getByRole("button", { name: "Drafts" });
+    expect(draftsTab).toBeEnabled();
+
+    fireEvent.click(draftsTab);
+
+    expect(screen.getByRole("region", { name: "Draft posts" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Draft Posts" })).toBeInTheDocument();
+    expect(screen.getByText("Draft Caption")).toBeInTheDocument();
+    expect(screen.queryByText("Scheduled Caption")).not.toBeInTheDocument();
+    expect(marketingContent.useWorkspaceMarketingContent).toHaveBeenLastCalledWith(
+      "workspace_01",
+      expect.objectContaining({ limit: 500, offset: 0, status: "draft" }),
+    );
+  });
+
+  it("opens the drafts surface directly from navigation query params", () => {
+    getParam.mockImplementation((key: string) => (key === "tab" ? "drafts" : null));
+    mockDrafts([item({ id: "content_draft_01", status: "draft", title: "Draft Caption" })]);
+
+    render(<MarketingWorkspace />);
+
+    expect(screen.getByRole("heading", { name: "Draft Posts" })).toBeInTheDocument();
+    expect(screen.getByText("Draft Caption")).toBeInTheDocument();
+  });
+
+  it("keeps calendar and approval queue navigation working after visiting drafts", () => {
+    mockApprovalQueue([]);
+
+    render(<MarketingWorkspace />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+    expect(screen.getByRole("heading", { name: "Draft Posts" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Calendar" }));
+    expect(screen.getByRole("region", { name: "Marketing content calendar" })).toBeInTheDocument();
+    expect(screen.getByText("Single Teaser")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Approvals" }));
+    expect(screen.getByRole("heading", { name: "Approval Queue" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "No approvals in this queue" })).toBeInTheDocument();
+  });
+
   it("keeps disabled upcoming tabs as lightweight placeholders", () => {
     render(<MarketingWorkspace />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Drafts Upcoming" }));
+    fireEvent.click(screen.getByRole("button", { name: "Accounts Upcoming" }));
 
-    expect(screen.getByRole("heading", { name: "Drafts upcoming" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Accounts upcoming" })).toBeInTheDocument();
     expect(screen.queryByText("Single Teaser")).not.toBeInTheDocument();
   });
 

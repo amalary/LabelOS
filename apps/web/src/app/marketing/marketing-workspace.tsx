@@ -40,6 +40,7 @@ import {
   useCreateMarketingContentItem,
   useTransitionMarketingContentStatus,
   useUpdateMarketingContentItem,
+  useWorkspaceMarketingContent,
   useWorkspaceCalendarContent,
 } from "../../lib/marketing-content";
 import { useOrganizationRealtimeContext } from "../../lib/realtime/use-organization-realtime";
@@ -57,7 +58,7 @@ export type MarketingScheduleInstance = {
 
 const tabs: Array<{ id: MarketingTab; label: string; enabled: boolean }> = [
   { id: "calendar", label: "Calendar", enabled: true },
-  { id: "drafts", label: "Drafts", enabled: false },
+  { id: "drafts", label: "Drafts", enabled: true },
   { id: "approvals", label: "Approvals", enabled: true },
   { id: "accounts", label: "Accounts", enabled: false },
 ];
@@ -1164,6 +1165,109 @@ function CalendarList({
   );
 }
 
+function DraftsTab({
+  campaigns,
+  onItemClick,
+  workspaceId,
+}: {
+  campaigns: Campaign[];
+  onItemClick: (item: MarketingContentItem) => void;
+  workspaceId: string;
+}) {
+  const draftOptions = useMemo<MarketingContentListOptions>(
+    () => ({
+      limit: 500,
+      offset: 0,
+      status: "draft",
+    }),
+    [],
+  );
+  const drafts = useWorkspaceMarketingContent(workspaceId, draftOptions);
+  const draftItems = (drafts.data?.marketing_content ?? []).filter(
+    (draft) => draft.status === "draft",
+  );
+
+  return (
+    <section className="grid gap-4" aria-label="Draft posts">
+      <Card className="grid gap-1">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-semibold text-slate-950">Draft Posts</h2>
+            <p className="text-sm text-slate-500">
+              Unsubmitted marketing content where status is draft.
+            </p>
+          </div>
+          <Badge>{draftItems.length} drafts</Badge>
+        </div>
+      </Card>
+
+      {drafts.error ? (
+        <div
+          className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-900"
+          role="alert"
+        >
+          {drafts.error.code === "forbidden"
+            ? "Marketing content access was denied for drafts."
+            : "Draft posts could not be loaded."}
+        </div>
+      ) : null}
+
+      {drafts.isLoading && !drafts.data ? (
+        <Card className="grid gap-3">
+          <LoadingState label="Loading draft posts" />
+          {Array.from({ length: 3 }, (_, index) => (
+            <div className="h-14 rounded-md bg-slate-100 auth-shimmer" key={index} />
+          ))}
+        </Card>
+      ) : draftItems.length === 0 ? (
+        <EmptyState
+          description="Draft posts appear here before they are submitted for approval or scheduled."
+          title="No draft posts"
+        />
+      ) : (
+        <Card className="overflow-hidden p-0">
+          <div className="divide-y divide-slate-100">
+            {draftItems.map((draft) => (
+              <button
+                className="grid gap-3 px-4 py-4 text-left transition hover:bg-slate-50 md:grid-cols-[minmax(0,1fr)_170px_170px]"
+                key={draft.id}
+                onClick={() => onItemClick(draft)}
+                type="button"
+              >
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h3 className="truncate text-sm font-semibold text-slate-950">
+                      {draft.title}
+                    </h3>
+                    <Badge variant={approvalStateVariant(draft)}>
+                      {approvalStateLabel(draft)}
+                    </Badge>
+                  </div>
+                  <p className="mt-1 text-sm text-slate-500">
+                    {humanize(draft.content_type)} - {channelSummary(draft)}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-xs font-semibold uppercase text-slate-500">Campaign</p>
+                  <p className="mt-1 truncate text-sm font-medium text-slate-800">
+                    {campaignName(campaigns, draft.campaign_id)}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-xs font-semibold uppercase text-slate-500">Updated</p>
+                  <p className="mt-1 truncate text-sm font-medium text-slate-800">
+                    {draft.updated_at.slice(0, 10)}
+                  </p>
+                </div>
+              </button>
+            ))}
+          </div>
+        </Card>
+      )}
+    </section>
+  );
+}
+
 function actorName(actor: ApprovalActor | null | undefined): string {
   return actor?.display_name ?? actor?.profile_id ?? actor?.user_id ?? "Unassigned";
 }
@@ -1785,7 +1889,8 @@ export function MarketingWorkspace() {
   const { activeWorkspace } = useActiveWorkspace();
   const workspaceProfile = useActiveWorkspaceProfile();
   const tabParam = searchParams.get("tab");
-  const initialTab: MarketingTab = tabParam === "approvals" ? "approvals" : "calendar";
+  const initialTab: MarketingTab =
+    tabParam === "approvals" || tabParam === "drafts" ? tabParam : "calendar";
   const [activeTab, setActiveTab] = useState<MarketingTab>(initialTab);
   const [view, setView] = useState<CalendarView>("month");
   const initialCampaignId = searchParams.get("campaignId") ?? "";
@@ -2171,7 +2276,44 @@ export function MarketingWorkspace() {
         />
       ) : null}
 
-      {activeTab !== "calendar" && activeTab !== "approvals" ? (
+      {activeTab === "drafts" && canView ? (
+        <>
+          <DraftsTab
+            campaigns={campaignList}
+            onItemClick={(selectedItem) =>
+              setEditor({
+                createDate: null,
+                item: selectedItem,
+                key: `edit:${selectedItem.id}:${selectedItem.updated_at}`,
+                mode: "edit",
+              })
+            }
+            workspaceId={activeWorkspace.id}
+          />
+          {editor ? (
+            <ContentEditor
+              campaigns={campaignList}
+              canEdit={canEdit}
+              canSubmitForReview={canSubmitForReview}
+              createDate={editor.createDate}
+              filters={filters}
+              item={editor.item}
+              key={editor.key}
+              mode={editor.mode}
+              onCancel={closeEditor}
+              onOpenApprovalReview={(approvalRequestId) => {
+                setFocusedApprovalId(approvalRequestId);
+                setActiveTab("approvals");
+                setEditor(null);
+              }}
+              onSaved={handleSaved}
+              timeZone={timeZone}
+            />
+          ) : null}
+        </>
+      ) : null}
+
+      {activeTab !== "calendar" && activeTab !== "approvals" && activeTab !== "drafts" ? (
         <UpcomingTab label={tabs.find((tab) => tab.id === activeTab)?.label ?? "Section"} />
       ) : null}
     </div>
