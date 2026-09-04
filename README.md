@@ -6,7 +6,25 @@ The product vision is to give labels one connected workspace for artist discover
 
 ## Project Status
 
-This repository is in foundation setup. It contains the planned monorepo structure, documentation starters, repository hygiene files, a minimal Next.js frontend shell, a starter FastAPI backend, the initial PostgreSQL database foundation, authentication foundations, and a non-production AI agent service scaffold. Production agent workflows are intentionally not present yet.
+This repository has moved beyond foundation setup into the first production
+application slices. It now contains:
+
+- A protected Next.js workspace app with WorkOS AuthKit authentication.
+- A FastAPI backend with workspace-scoped authorization, roles, departments, and
+  capability checks.
+- PostgreSQL data models and Alembic migrations for identity, profiles,
+  workspaces, campaigns, marketing content, approvals, analytics, realtime
+  events, and role/capability administration.
+- A dashboard with organization context, KPI cards, analytics surfaces, release
+  pipeline summaries, and realtime recent activity.
+- Campaign planning primitives, relationship management, goals, milestones,
+  Campaign Calendar projections, and Marketing Hub content scheduling.
+- Approval Queue workflows for marketing content review, decision history,
+  reviewer assignment, stale revision handling, and scheduling eligibility.
+- A non-production AI agent service scaffold with deterministic mock agents.
+
+Production AI model workflows and external provider integrations are
+intentionally not present yet.
 
 ## Prerequisites
 
@@ -37,8 +55,8 @@ pnpm install
 
 ```text
 apps/
-  web/       Minimal Next.js frontend application.
-  api/       Starter FastAPI backend service.
+  web/       Next.js workspace app, API proxies, AuthKit routes, and UI surfaces.
+  api/       FastAPI backend service and domain APIs.
   agents/    Future AI agent runtimes and workers.
 
 packages/
@@ -113,12 +131,25 @@ pnpm lint
 pnpm typecheck
 ```
 
-The starter frontend currently provides:
+The frontend currently provides:
 
-- `/` - frontend starter placeholder.
-- `/dashboard` - protected Dashboard V1 with organization-aware header, four
+- `/` - starter landing placeholder.
+- `/dashboard` - protected Dashboard V1 with organization-aware header,
   permission-aware KPI cards, label performance, release pipeline, and realtime
   recent activity.
+- `/analytics` and `/workspace/analytics` - analytics read/configuration
+  surfaces.
+- `/artists` and `/artists/[artistProfileId]` - artist profile workspace and
+  editor surfaces.
+- `/campaigns` and `/campaigns/[campaignId]` - campaign list and detail
+  workspace surfaces.
+- `/marketing` - Marketing Hub with the content-specific operational calendar,
+  drafts, Approval Queue, and account placeholders.
+- `/campaign-calendar` - read-only cross-campaign operational timeline built
+  from canonical Campaign, Marketing Content, Approval, Artist/Profile, and
+  Release data.
+- `/profile`, `/workspace/people`, and `/workspace/settings` - profile, people,
+  invite, role, and access management surfaces.
 - `/login` - starts the server-side WorkOS AuthKit flow.
 
 The `/dashboard` route is protected by AuthKit middleware. Users without a valid
@@ -167,13 +198,29 @@ Or run it directly from `apps/api`:
 python scripts/dev.py
 ```
 
-Starter endpoints:
+Core endpoints:
 
 - `/` - API metadata.
 - `/health` - health check.
 - `/health/database` - database connectivity check.
 - `/api/v1/status` - versioned API status.
 - `/api/v1/me` - protected current user and organization memberships.
+- `/api/v1/workspaces/{workspace_id}/profiles...` - workspace people and
+  profile APIs.
+- `/api/v1/workspaces/{workspace_id}/artist-profiles...` - artist profile APIs.
+- `/api/v1/workspaces/{workspace_id}/campaigns...` - campaign records,
+  lifecycle, relationships, members, goals, milestones, and planning APIs.
+- `/api/v1/workspaces/{workspace_id}/marketing-content...` - marketing content
+  list, create, update, archive, status, channel schedule, and publish APIs.
+- `/api/v1/workspaces/{workspace_id}/approvals...` - Approval Queue list,
+  detail, assignment, decision, and history APIs.
+- `/api/v1/workspaces/{workspace_id}/campaign-calendar` - read-only Campaign
+  Calendar projection API.
+- `/api/v1/workspaces/{workspace_id}/analytics...` - analytics providers,
+  metric definitions, observations, series, summary, comparison, and latest
+  observation APIs.
+- `/api/v1/workspaces/{workspace_id}/roles...` and member role APIs - workspace
+  capability and role administration.
 - `/api/v1/dashboard/summary` - organization-scoped dashboard summary with
   permission-filtered card and section availability.
 - `/api/v1/dashboard/performance` - protected label performance series for
@@ -227,12 +274,22 @@ pnpm db:rollback
 isolated temporary Docker config directory, avoiding local credential-store
 permission warnings from user-level Docker config files.
 
-The initial migration creates only foundational identity and organization tables:
+The migration chain now covers these major model families:
 
-- `users`
-- `auth_identities`
-- `organizations`
-- `organization_memberships`
+- Identity and authentication: `users`, `auth_identities`, WorkOS webhook event
+  tracking, organizations, and organization memberships.
+- Universal profiles, artist profiles, profile metadata, preferences, and
+  workspace memberships.
+- Departments, roles, role capabilities, role assignments, capability
+  permissions, and workspace invite roles.
+- Campaign records, campaign members, campaign artist/release links, goals, and
+  milestones.
+- Analytics providers, metric definitions, observations, and idempotency
+  fingerprints.
+- Marketing content items, channels, content revisions, scheduled/published
+  timestamps, and approval projection fields.
+- Approval requests, approval request stages, and approval decisions.
+- Realtime event storage.
 
 `auth_identities` links an external provider subject to the local `users` table.
 Organization memberships separate administrative workspace permission from
@@ -251,6 +308,99 @@ helpers only hide or disable unavailable actions. See
 role-to-permission mapping and guard examples.
 
 Do not commit real credentials. Keep personal values in `.env`; `.env.example` should remain a safe template.
+
+## Implemented Product Domains
+
+### Workspace Authorization
+
+Label OS uses backend-enforced capability checks as the authoritative access
+control layer. WorkOS session role and permission claims are compatibility
+inputs, while local workspace memberships, departments, roles, and capability
+grants determine effective access.
+
+Frontend helpers hide unavailable navigation and controls, but FastAPI
+dependencies and service-level authorization checks remain the enforcement
+point. Workspace-scoped queries include the resolved local workspace ID and
+avoid cross-workspace reads.
+
+### Campaigns
+
+Campaigns are workspace-scoped operational containers for artists, releases,
+team members, goals, milestones, and downstream workflow attachments. The
+canonical Campaign model owns:
+
+- campaign name, description, type, status, owner, creator, start date, and
+  target end date;
+- campaign members linked to workspace memberships;
+- artist and release relationships;
+- lightweight campaign goals and milestones;
+- realtime events for campaign lifecycle and relationship changes.
+
+Campaign API operations use `marketing.campaign.*` capabilities. See
+[Campaign Domain Contract](docs/development/campaign-domain-contract.md) for
+the deeper model and integration boundaries.
+
+### Marketing Hub
+
+The Marketing Hub at `/marketing` is the content-specific operational surface.
+It supports marketing content records, drafts, owner/creator context, schedule
+and publish timestamps, channel-level schedule/publish times, content revision
+tracking, archive/status updates, and approval submission entry points.
+
+The Marketing Content Calendar remains distinct from Campaign Calendar:
+
+- Marketing Content Calendar: content-specific operational scheduling and
+  editing surface.
+- Campaign Calendar: read-only cross-campaign projection/timeline.
+
+### Approval Queue
+
+Approval Queue is the owner of approval lifecycle state. Approval requests track
+resource type, resource ID, resource revision, status, requester context, stage
+assignment, submitted/resolved timestamps, decision history, and immutable
+decision metadata.
+
+Marketing content integrates with Approval Queue through canonical approval
+requests and resource adapters. The system tracks whether an approved revision
+is still current and whether content can be scheduled from the current canonical
+approval state.
+
+### Campaign Calendar
+
+Campaign Calendar at `/campaign-calendar` is a read-only projection service. It
+does not create a `calendar_events` table, does not own domain state, and does
+not add a separate `marketing.calendar.view` capability. Access requires the
+existing `marketing.campaign.view` and `marketing.content.view` capabilities.
+
+The projection currently emits:
+
+- `campaign.start`
+- `campaign.target_end`
+- `campaign.milestone.target`
+- `marketing.content.scheduled`
+- `marketing.content.channel_scheduled`
+- `marketing.content.published`
+- `marketing.content.channel_published`
+- `marketing.content.approval_requested`
+- `marketing.content.approved`
+
+The projection intentionally does not emit release target events, campaign goal
+target events, or approval deadline/SLA events until canonical date fields exist
+for those domains.
+
+### Analytics
+
+Analytics Objects provide workspace-scoped providers, metric definitions,
+observations, latest-value lookups, series, comparisons, and dashboard summary
+data. Campaign-level observations can attach to campaign IDs, and child
+campaign observations use typed campaign object references.
+
+### Realtime
+
+Realtime events are organization/workspace-scoped and feed recent activity,
+local cache invalidation, and page refresh behavior. Campaign, marketing
+content, approval, profile/artist, release, analytics, member, and role changes
+invalidate only the relevant workspace-scoped frontend caches where possible.
 
 ## Agent Service Setup
 
@@ -324,11 +474,11 @@ In the WorkOS dashboard:
 2. Enable AuthKit and copy the Client ID and API Key into local or production
    secret storage.
 3. Configure RBAC roles with these initial slugs: `owner`, `admin`, `member`,
-   and `guest`.
-4. Configure permission slugs to match the application permissions documented in
-   [Authorization](docs/development/authorization.md), including
-   `organization:manage`, `members:manage`, `artists:view`, `artists:manage`,
-   `settings:manage`, and the other resource permissions listed there.
+   `artist`, `viewer`, and `guest`.
+4. Configure permission/capability slugs to match the application authorization
+   model documented in [Authorization](docs/development/authorization.md),
+   including workspace, profile, artist, release, marketing campaign, marketing
+   content, contract, royalty, finance, and analytics capabilities.
 5. Configure the webhook endpoint and copy the signing secret into
    `WORKOS_WEBHOOK_SECRET`.
 
@@ -428,10 +578,12 @@ uses the explicit `ALLOWED_FRONTEND_ORIGINS` allowlist. Error responses use
 generic authentication, authorization, validation, webhook, and internal-error
 messages and do not include raw tokens or provider secrets.
 
-### Role, Permission, and Organization Model
+### Role, Capability, Permission, And Organization Model
 
-WorkOS is the source of session role and permission claims. FastAPI route
-dependencies are the enforcement point:
+WorkOS is the source of session role and permission claims. Local Label OS
+workspace memberships, role assignments, department grants, and capability rows
+are the source of application authorization. FastAPI route dependencies and
+service checks are the enforcement point:
 
 - Missing or invalid bearer token: `401`.
 - Authenticated user without an active organization: `403`.
@@ -440,9 +592,8 @@ dependencies are the enforcement point:
   ID resolved from the WorkOS `org_id` claim.
 
 The initial workspace permission hierarchy is `owner` > `admin` > `member` >
-`guest`.
-Permission checks use WorkOS permission slugs, and frontend helpers only hide or
-disable unavailable actions.
+`guest`, with `artist` and `viewer` mapped into constrained workspace access.
+Frontend helpers only hide or disable unavailable actions.
 
 ### WorkOS Webhooks
 
