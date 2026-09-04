@@ -206,12 +206,55 @@ function channelSummary(item: MarketingContentItem): string {
   return channels.length ? channels.map(humanize).join(" / ") : "No channel";
 }
 
+function channelPlacementSummary(item: MarketingContentItem): string {
+  const placements = [
+    ...new Set(
+      item.channels.map((channel) =>
+        channel.placement
+          ? `${humanize(channel.channel)} / ${humanize(channel.placement)}`
+          : humanize(channel.channel),
+      ),
+    ),
+  ].sort();
+  return placements.length ? placements.join(", ") : "No placements";
+}
+
 function campaignName(campaigns: Campaign[], campaignId: string): string {
   return campaigns.find((campaign) => campaign.id === campaignId)?.name ?? campaignId;
 }
 
 function relationshipLabel(value: string | null): string {
   return value ? value : "Not linked";
+}
+
+function copyPreview(item: MarketingContentItem): string {
+  const copy = item.copy_text?.trim();
+  if (copy) {
+    return copy;
+  }
+  const channelCopy = item.channels
+    .map((channel) => channel.copy_text_override?.trim())
+    .find((value): value is string => Boolean(value));
+  return channelCopy ?? "No caption yet";
+}
+
+function ownerCreatorLabel(item: MarketingContentItem): string {
+  if (item.owner_profile_id) {
+    return `Owner ${item.owner_profile_id}`;
+  }
+  if (item.created_by_profile_id) {
+    return `Creator ${item.created_by_profile_id}`;
+  }
+  if (item.created_by_user_id) {
+    return `Creator ${item.created_by_user_id}`;
+  }
+  return "Unassigned";
+}
+
+function revisionLabel(item: MarketingContentItem): string {
+  return item.approved_revision === null || item.approved_revision === undefined
+    ? `Revision ${item.content_revision}`
+    : `Revision ${item.content_revision} / approved ${item.approved_revision}`;
 }
 
 function filtersActive(filters: CalendarFilters): boolean {
@@ -1166,11 +1209,15 @@ function CalendarList({
 }
 
 function DraftsTab({
+  canCreate,
   campaigns,
+  onCreate,
   onItemClick,
   workspaceId,
 }: {
+  canCreate: boolean;
   campaigns: Campaign[];
+  onCreate: () => void;
   onItemClick: (item: MarketingContentItem) => void;
   workspaceId: string;
 }) {
@@ -1222,6 +1269,13 @@ function DraftsTab({
       ) : draftItems.length === 0 ? (
         <EmptyState
           description="Draft posts appear here before they are submitted for approval or scheduled."
+          action={
+            canCreate ? (
+              <Button onClick={onCreate} type="button">
+                Create Draft
+              </Button>
+            ) : null
+          }
           title="No draft posts"
         />
       ) : (
@@ -1229,7 +1283,8 @@ function DraftsTab({
           <div className="divide-y divide-slate-100">
             {draftItems.map((draft) => (
               <button
-                className="grid gap-3 px-4 py-4 text-left transition hover:bg-slate-50 md:grid-cols-[minmax(0,1fr)_170px_170px]"
+                aria-label={`Open draft ${draft.title}`}
+                className="grid gap-4 px-4 py-4 text-left transition hover:bg-slate-50 md:grid-cols-[minmax(0,1.4fr)_minmax(160px,0.8fr)_minmax(150px,0.7fr)_minmax(150px,0.7fr)]"
                 key={draft.id}
                 onClick={() => onItemClick(draft)}
                 type="button"
@@ -1242,8 +1297,12 @@ function DraftsTab({
                     <Badge variant={approvalStateVariant(draft)}>
                       {approvalStateLabel(draft)}
                     </Badge>
+                    <Badge>{revisionLabel(draft)}</Badge>
                   </div>
-                  <p className="mt-1 text-sm text-slate-500">
+                  <p className="mt-2 line-clamp-2 text-sm text-slate-600">
+                    {copyPreview(draft)}
+                  </p>
+                  <p className="mt-2 truncate text-xs text-slate-500">
                     {humanize(draft.content_type)} - {channelSummary(draft)}
                   </p>
                 </div>
@@ -1252,11 +1311,26 @@ function DraftsTab({
                   <p className="mt-1 truncate text-sm font-medium text-slate-800">
                     {campaignName(campaigns, draft.campaign_id)}
                   </p>
+                  <p className="mt-1 truncate text-xs text-slate-500">
+                    Artist: {relationshipLabel(draft.artist_id)}
+                  </p>
+                  <p className="truncate text-xs text-slate-500">
+                    Release: {relationshipLabel(draft.release_id)}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-xs font-semibold uppercase text-slate-500">Placements</p>
+                  <p className="mt-1 line-clamp-2 text-sm font-medium text-slate-800">
+                    {channelPlacementSummary(draft)}
+                  </p>
                 </div>
                 <div>
                   <p className="text-xs font-semibold uppercase text-slate-500">Updated</p>
                   <p className="mt-1 truncate text-sm font-medium text-slate-800">
                     {draft.updated_at.slice(0, 10)}
+                  </p>
+                  <p className="mt-1 truncate text-xs text-slate-500">
+                    {ownerCreatorLabel(draft)}
                   </p>
                 </div>
               </button>
@@ -2279,7 +2353,9 @@ export function MarketingWorkspace() {
       {activeTab === "drafts" && canView ? (
         <>
           <DraftsTab
+            canCreate={canCreate}
             campaigns={campaignList}
+            onCreate={() => openCreateEditor()}
             onItemClick={(selectedItem) =>
               setEditor({
                 createDate: null,

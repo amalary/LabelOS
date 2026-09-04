@@ -449,6 +449,26 @@ function mockDrafts(items: MarketingContentItem[] = [item({ status: "draft" })])
   });
 }
 
+function mockDraftsLoading() {
+  vi.mocked(marketingContent.useWorkspaceMarketingContent).mockReturnValue({
+    data: null,
+    error: null,
+    isLoading: true,
+    isMutating: false,
+    reload: vi.fn(),
+  });
+}
+
+function mockDraftsError(error = new marketingContent.MarketingContentApiError("network_failure", "Failed")) {
+  vi.mocked(marketingContent.useWorkspaceMarketingContent).mockReturnValue({
+    data: null,
+    error,
+    isLoading: false,
+    isMutating: false,
+    reload: vi.fn(),
+  });
+}
+
 describe("MarketingWorkspace", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -1366,6 +1386,102 @@ describe("MarketingWorkspace", () => {
       "workspace_01",
       expect.objectContaining({ limit: 500, offset: 0, status: "draft" }),
     );
+  });
+
+  it("shows the drafts empty state with a create action", () => {
+    mockWorkspaceProfile(["marketing.content.view", "marketing.content.create"]);
+    mockDrafts([]);
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+
+    expect(screen.getByRole("heading", { name: "No draft posts" })).toBeInTheDocument();
+    expect(
+      screen.getByText("Draft posts appear here before they are submitted for approval or scheduled."),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Create Draft" }));
+    expect(screen.getByRole("region", { name: "Marketing content editor" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Create content draft" })).toBeInTheDocument();
+  });
+
+  it("shows the drafts loading state", () => {
+    mockDraftsLoading();
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+
+    expect(screen.getByRole("status")).toHaveTextContent("Loading draft posts");
+  });
+
+  it("shows the drafts error state", () => {
+    mockDraftsError();
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+
+    expect(screen.getByRole("alert")).toHaveTextContent("Draft posts could not be loaded.");
+  });
+
+  it("shows the drafts forbidden error state", () => {
+    mockDraftsError(
+      new marketingContent.MarketingContentApiError(
+        "forbidden",
+        "You do not have access to draft posts.",
+      ),
+    );
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Marketing content access was denied for drafts.",
+    );
+  });
+
+  it("renders populated draft rows with existing marketing content metadata", () => {
+    mockDrafts([
+      item({
+        approval_state: {
+          approval_request_id: "approval_02",
+          approved_revision: 1,
+          approved_revision_is_current: false,
+          can_schedule: false,
+          current_revision: 3,
+          label: "Changes requested",
+          state: "changes_requested",
+        },
+        approved_revision: 1,
+        channels: [
+          channel({ channel: "instagram", placement: "reels" }),
+          channel({ channel: "tiktok", placement: "video" }),
+        ],
+        content_revision: 3,
+        content_type: "short_video",
+        copy_text: "Behind the scenes clip for release week.",
+        created_by_profile_id: "profile_creator",
+        id: "content_draft_01",
+        owner_profile_id: "profile_owner",
+        status: "draft",
+        title: "BTS Draft",
+        updated_at: "2026-09-12T10:30:00Z",
+      }),
+    ]);
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+
+    expect(screen.getByText("BTS Draft")).toBeInTheDocument();
+    expect(screen.getByText("Behind the scenes clip for release week.")).toBeInTheDocument();
+    expect(screen.getByText("Short Video - Instagram / Tiktok")).toBeInTheDocument();
+    expect(screen.getByText("Single Rollout")).toBeInTheDocument();
+    expect(screen.getByText("Artist: artist_01")).toBeInTheDocument();
+    expect(screen.getByText("Release: release_01")).toBeInTheDocument();
+    expect(screen.getByText("Instagram / Reels, Tiktok / Video")).toBeInTheDocument();
+    expect(screen.getByText("Revision 3 / approved 1")).toBeInTheDocument();
+    expect(screen.getByText("Changes requested")).toBeInTheDocument();
+    expect(screen.getByText("2026-09-12")).toBeInTheDocument();
+    expect(screen.getByText("Owner profile_owner")).toBeInTheDocument();
   });
 
   it("opens the drafts surface directly from navigation query params", () => {
