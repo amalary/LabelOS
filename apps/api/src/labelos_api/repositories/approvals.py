@@ -159,6 +159,8 @@ async def list_requests(
     assigned_to_current_profile: bool = False,
     campaign_id: UUID | None = None,
     artist_id: UUID | None = None,
+    submitted_start: datetime | None = None,
+    submitted_end: datetime | None = None,
     limit: int,
     offset: int,
 ) -> ApprovalRequestListPage:
@@ -176,6 +178,8 @@ async def list_requests(
         assigned_to_current_profile=assigned_to_current_profile,
         campaign_id=campaign_id,
         artist_id=artist_id,
+        submitted_start=submitted_start,
+        submitted_end=submitted_end,
     )
     total = await session.scalar(select(func.count()).select_from(statement.subquery()))
     rows = await session.scalars(
@@ -344,6 +348,8 @@ def _filtered_requests_statement(
     assigned_to_current_profile: bool,
     campaign_id: UUID | None,
     artist_id: UUID | None,
+    submitted_start: datetime | None,
+    submitted_end: datetime | None,
 ) -> Select[tuple[ApprovalRequest]]:
     statement = select(ApprovalRequest).where(
         ApprovalRequest.organization_id == organization_id
@@ -389,6 +395,10 @@ def _filtered_requests_statement(
                 ApprovalRequestStage.assigned_profile_id == reviewer_profile_id
             )
         )
+    if submitted_start is not None:
+        statement = statement.where(ApprovalRequest.submitted_at >= submitted_start)
+    if submitted_end is not None:
+        statement = statement.where(ApprovalRequest.submitted_at <= submitted_end)
     if adapter is not None:
         resource_filter = adapter.queue_filter(
             organization_id=organization_id,

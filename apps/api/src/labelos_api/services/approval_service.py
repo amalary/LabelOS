@@ -108,6 +108,8 @@ class ApprovalRequestQuery:
     assigned_to_current_profile: bool = False
     campaign_id: UUID | None = None
     artist_id: UUID | None = None
+    submitted_start: datetime | None = None
+    submitted_end: datetime | None = None
 
 
 def _now() -> datetime:
@@ -718,9 +720,88 @@ async def list_approval_requests(
         assigned_to_current_profile=normalized.assigned_to_current_profile,
         campaign_id=normalized.campaign_id,
         artist_id=normalized.artist_id,
+        submitted_start=normalized.submitted_start,
+        submitted_end=normalized.submitted_end,
         limit=limit,
         offset=offset,
     )
+
+
+async def available_actions_for_request(
+    session: AsyncSession,
+    workspace_id: UUID,
+    request: ApprovalRequest,
+    *,
+    actor: AuthorizationActorInput | None = None,
+) -> tuple[ApprovalDecisionValue, ...]:
+    if request.status in TERMINAL_STATUSES or request.status not in ACTIVE_STATUSES:
+        return ()
+
+    adapter, resource = await _load_resource(
+        session,
+        workspace_id=workspace_id,
+        resource_type=request.resource_type,
+        resource_id=request.resource_id,
+    )
+    current_revision = adapter.current_revision(resource)
+    actor_user_id = _actor_user_id(actor)
+    actor_profile_id = await _actor_profile_id(
+        session,
+        actor=actor,
+        workspace_id=workspace_id,
+    )
+    actor_key = _actor_key(actor)
+
+    actions: list[ApprovalDecisionValue] = []
+    stage = _current_stage(request)
+    if (
+        _actor_kind(actor) != ActorKind.ai_agent.value
+        and current_revision == request.resource_revision
+    ):
+        try:
+            _assert_not_self_approval(
+                request,
+                actor_user_id=actor_user_id,
+                actor_profile_id=actor_profile_id,
+                actor_key=actor_key,
+            )
+        except ApprovalSelfApprovalError:
+            pass
+        else:
+            decision = await authorization_service.decide_capability(
+                session,
+                actor=actor,
+                workspace=workspace_id,
+                capability=stage.required_capability,
+                resource=_resource_context(
+                    adapter=adapter,
+                    resource=resource,
+                    workspace_id=workspace_id,
+                ),
+            )
+            if decision.allowed:
+                actions.extend(
+                    [
+                        ApprovalDecisionValue.approved,
+                        ApprovalDecisionValue.rejected,
+                        ApprovalDecisionValue.changes_requested,
+                    ]
+                )
+
+    submit_decision = await authorization_service.decide_capability(
+        session,
+        actor=actor,
+        workspace=workspace_id,
+        capability=adapter.capabilities.submit,
+        resource=_resource_context(
+            adapter=adapter,
+            resource=resource,
+            workspace_id=workspace_id,
+        ),
+    )
+    if submit_decision.allowed:
+        actions.append(ApprovalDecisionValue.cancelled)
+    return tuple(actions)
 
 
 async def _list_authorization_resource(
@@ -1176,3 +1257,64 @@ async def get_approval_history(
     if decisions is None:
         raise ApprovalRequestNotFoundError("Approval request not found")
     return decisions
+
+
+async def record_current_approval_invalidated(
+    session: AsyncSession,
+    workspace_id: UUID,
+    approval_request_id: UUID,
+    *,
+    actor: AuthorizationActorInput | None = None,
+    reason: str | None = None,
+) -> ApprovalRequest:
+    request = await _load_request(
+        session,
+        workspace_id=workspace_id,
+        approval_request_id=approval_request_id,
+    )
+    if request.status != ApprovalRequestStatus.approved:
+        raise ApprovalInvalidTransitionError(
+            "Only approved requests can be invalidated"
+        )
+    adapter, resource = await _load_resource(
+        session,
+        workspace_id=workspace_id,
+        resource_type=request.resource_type,
+        resource_id=request.resource_id,
+    )
+    await _require_capability(
+        session,
+        actor=actor,
+        workspace_id=workspace_id,
+        capability=adapter.capabilities.edit,
+        adapter=adapter,
+        resource=resource,
+    )
+    actor_user_id = _actor_user_id(actor)
+    actor_profile_id = await _actor_profile_id(
+        session,
+        actor=actor,
+        workspace_id=workspace_id,
+    )
+    stage = _current_stage(request)
+    await _append_decision(
+        session,
+        workspace_id=workspace_id,
+        request=request,
+        stage=stage,
+        decision=ApprovalDecisionValue.invalidated,
+        actor=actor,
+        actor_user_id=actor_user_id,
+        actor_profile_id=actor_profile_id,
+        reason=reason,
+        payload={"resourceRevision": request.resource_revision},
+    )
+    await _publish_approval_event(
+        session,
+        workspace_id=workspace_id,
+        request=request,
+        stage=stage,
+        actor=actor,
+        resource=resource,
+    )
+    return request

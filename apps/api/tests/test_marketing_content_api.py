@@ -40,6 +40,7 @@ from labelos_api.realtime import RealtimeEventType, realtime_channel
 class SeededMarketingContentApi:
     owner_user_id: UUID
     viewer_user_id: UUID
+    approver_user_id: UUID
     workspace_id: UUID
     outside_workspace_id: UUID
     owner_profile_id: UUID
@@ -125,6 +126,17 @@ def marketing_content_client(
                 slug="marketing-approver",
                 display_name="Marketing Approver",
             )
+            approver_membership = OrganizationMembership(
+                organization=workspace,
+                user=approver_profile.user,
+                role=MembershipRole.guest,
+                workspace_permission=WorkspacePermission.guest,
+                department_access=["marketing"],
+                capability_permissions=[
+                    Capability.marketing_content_view.value,
+                    Capability.marketing_content_approve.value,
+                ],
+            )
             outside_profile = UniversalProfile(
                 user=outside_owner,
                 slug="marketing-outside",
@@ -145,6 +157,7 @@ def marketing_content_client(
             WorkspaceMembership(
                 workspace=workspace,
                 profile=approver_profile,
+                organization_membership=approver_membership,
                 status="active",
             )
             WorkspaceMembership(
@@ -174,6 +187,7 @@ def marketing_content_client(
             session.add_all(
                 [
                     viewer_membership,
+                    approver_membership,
                     release,
                     outside_release,
                     campaign,
@@ -185,6 +199,7 @@ def marketing_content_client(
             return SeededMarketingContentApi(
                 owner_user_id=owner.id,
                 viewer_user_id=viewer.id,
+                approver_user_id=approver_profile.user_id,
                 workspace_id=workspace.id,
                 outside_workspace_id=outside_workspace.id,
                 owner_profile_id=owner_profile.id,
@@ -279,6 +294,18 @@ def _base(seeded: SeededMarketingContentApi, campaign_id: UUID | None = None) ->
         f"/api/v1/workspaces/{seeded.workspace_id}/campaigns/"
         f"{resolved_campaign_id}/marketing-content"
     )
+
+
+def _approvals_base(seeded: SeededMarketingContentApi) -> str:
+    return f"/api/v1/workspaces/{seeded.workspace_id}/approvals"
+
+
+def _approval_submit_base(
+    seeded: SeededMarketingContentApi,
+    content_id: str,
+    campaign_id: UUID | None = None,
+) -> str:
+    return f"{_base(seeded, campaign_id)}/{content_id}/approval-requests"
 
 
 async def _realtime_events(
@@ -382,12 +409,24 @@ def test_marketing_content_campaign_crud_and_lifecycle(
     assert submitted.status_code == 200
     assert submitted.json()["approval_requested_at"] is not None
 
+    _set_context(
+        client,
+        seeded,
+        user_id=seeded.approver_user_id,
+        email="marketing-approver-profile@example.com",
+        capability_permissions=(
+            Capability.marketing_content_view.value,
+            Capability.marketing_content_approve.value,
+        ),
+        department_access=("marketing",),
+    )
     approved = client.patch(
         f"{base}/{created['id']}/status",
         json={"status": "approved"},
     )
     assert approved.status_code == 200
-    assert approved.json()["approved_by_profile_id"] == str(seeded.owner_profile_id)
+    assert approved.json()["approved_by_profile_id"] == str(seeded.approver_profile_id)
+    _set_context(client, seeded)
 
     cannot_schedule = client.patch(
         f"{base}/{created['id']}/status",
@@ -395,6 +434,21 @@ def test_marketing_content_campaign_crud_and_lifecycle(
     )
     assert cannot_schedule.status_code == 409
 
+    client.patch(
+        f"{base}/{multi_channel['id']}/status",
+        json={"status": "in_review"},
+    )
+    _set_context(
+        client,
+        seeded,
+        user_id=seeded.approver_user_id,
+        email="marketing-approver-profile@example.com",
+        capability_permissions=(
+            Capability.marketing_content_view.value,
+            Capability.marketing_content_approve.value,
+        ),
+        department_access=("marketing",),
+    )
     approved_multi = client.patch(
         f"{base}/{multi_channel['id']}/status",
         json={
@@ -403,6 +457,7 @@ def test_marketing_content_campaign_crud_and_lifecycle(
         },
     )
     assert approved_multi.status_code == 200
+    _set_context(client, seeded)
     scheduled = client.patch(
         f"{base}/{multi_channel['id']}/status",
         json={"status": "scheduled"},
@@ -439,6 +494,17 @@ def test_marketing_content_mutations_publish_workspace_scoped_realtime_events(
         f"{base}/{content_id}/status",
         json={"status": "in_review"},
     )
+    _set_context(
+        client,
+        seeded,
+        user_id=seeded.approver_user_id,
+        email="marketing-approver-profile@example.com",
+        capability_permissions=(
+            Capability.marketing_content_view.value,
+            Capability.marketing_content_approve.value,
+        ),
+        department_access=("marketing",),
+    )
     approved_response = client.patch(
         f"{base}/{content_id}/status",
         json={"status": "approved"},
@@ -452,16 +518,26 @@ def test_marketing_content_mutations_publish_workspace_scoped_realtime_events(
     assert [event.event_type for event in events] == [
         RealtimeEventType.marketing_content_created.value,
         RealtimeEventType.marketing_content_updated.value,
-        RealtimeEventType.marketing_content_approval_requested.value,
-        RealtimeEventType.marketing_content_approved.value,
+        RealtimeEventType.approval_updated.value,
+        RealtimeEventType.approval_updated.value,
     ]
     assert all(event.organization_id == seeded.workspace_id for event in events)
     assert all(
         event.channel == realtime_channel(seeded.workspace_id) for event in events
     )
-    assert all(event.entity_type == "marketing_content_item" for event in events)
-    assert all(event.entity_id == content_id for event in events)
-    assert all(event.actor_user_id == seeded.owner_user_id for event in events)
+    assert [event.entity_type for event in events] == [
+        "marketing_content_item",
+        "marketing_content_item",
+        "approval_request",
+        "approval_request",
+    ]
+    assert [event.entity_id for event in events[:2]] == [content_id, content_id]
+    assert [event.actor_user_id for event in events] == [
+        seeded.owner_user_id,
+        seeded.owner_user_id,
+        seeded.owner_user_id,
+        seeded.approver_user_id,
+    ]
     for event in events:
         assert event.payload["contentItemId"] == content_id
         assert event.payload["campaignId"] == str(seeded.campaign_id)
@@ -469,6 +545,7 @@ def test_marketing_content_mutations_publish_workspace_scoped_realtime_events(
     assert events[2].payload["status"] == "in_review"
     assert events[3].payload["status"] == "approved"
 
+    _set_context(client, seeded)
     schedulable = client.post(
         base,
         json={
@@ -479,10 +556,29 @@ def test_marketing_content_mutations_publish_workspace_scoped_realtime_events(
     assert (
         client.patch(
             f"{base}/{schedulable['id']}/status",
+            json={"status": "in_review"},
+        ).status_code
+        == 200
+    )
+    _set_context(
+        client,
+        seeded,
+        user_id=seeded.approver_user_id,
+        email="marketing-approver-profile@example.com",
+        capability_permissions=(
+            Capability.marketing_content_view.value,
+            Capability.marketing_content_approve.value,
+        ),
+        department_access=("marketing",),
+    )
+    assert (
+        client.patch(
+            f"{base}/{schedulable['id']}/status",
             json={"status": "approved"},
         ).status_code
         == 200
     )
+    _set_context(client, seeded)
     scheduled = client.patch(
         f"{base}/{schedulable['id']}/status",
         json={"status": "scheduled"},
@@ -775,4 +871,439 @@ def test_marketing_content_openapi_contract_exposes_stable_routes(
         "channels",
     }
     assert "approved_at" in schemas["MarketingContentResponse"]["properties"]
+    assert "approval_request_id" in schemas["MarketingContentResponse"]["properties"]
     assert "published_at" in schemas["MarketingContentResponse"]["properties"]
+
+
+def test_approval_queue_routes_require_authentication(client: TestClient) -> None:
+    response = client.get(f"/api/v1/workspaces/{uuid4()}/approvals")
+    assert response.status_code == 401
+
+
+def test_approval_queue_submission_listing_filters_pagination_and_detail(
+    marketing_content_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededMarketingContentApi,
+    ],
+) -> None:
+    client, _sessionmaker, seeded = marketing_content_client
+    _set_context(client, seeded)
+    first = client.post(
+        _base(seeded), json=_draft_payload(seeded, title="First")
+    ).json()
+    second = client.post(
+        _base(seeded, seeded.second_campaign_id),
+        json={
+            **_draft_payload(seeded, title="Second"),
+            "artist_id": None,
+            "release_id": None,
+        },
+    ).json()
+
+    submitted = client.post(
+        _approval_submit_base(seeded, first["id"]),
+        json={"summary": "Ready", "metadata": {"source": "api-test"}},
+    )
+    assert submitted.status_code == 201
+    approval_id = submitted.json()["id"]
+    assert submitted.json()["resource_type"] == "marketing_content_item"
+    assert submitted.json()["marketing_content_preview"]["title"] == "First"
+    assert submitted.json()["submitted_revision"] == 1
+    assert submitted.json()["is_stale"] is False
+
+    client.post(
+        _approval_submit_base(seeded, second["id"], seeded.second_campaign_id),
+        json={},
+    )
+    _set_context(
+        client,
+        seeded,
+        user_id=seeded.approver_user_id,
+        email="marketing-approver-profile@example.com",
+        capability_permissions=(
+            Capability.marketing_content_view.value,
+            Capability.marketing_content_approve.value,
+        ),
+        department_access=("marketing",),
+    )
+    assigned = client.post(
+        f"{_approvals_base(seeded)}/{approval_id}/assign",
+        json={"assigned_profile_id": str(seeded.approver_profile_id)},
+    )
+    assert assigned.status_code == 200
+    assert assigned.json()["stage_assignment"]["profile_id"] == str(
+        seeded.approver_profile_id
+    )
+
+    list_response = client.get(
+        _approvals_base(seeded),
+        params={
+            "status": "in_review",
+            "resource_type": "marketing_content_item",
+            "campaign_id": str(seeded.campaign_id),
+            "artist_id": str(seeded.artist_id),
+            "submitter_profile_id": str(seeded.owner_profile_id),
+            "assigned_reviewer_profile_id": str(seeded.approver_profile_id),
+            "assigned_to_me": "true",
+            "limit": "1",
+            "offset": "0",
+        },
+    )
+    assert list_response.status_code == 200
+    assert list_response.json()["total"] == 1
+    assert list_response.json()["approvals"][0]["id"] == approval_id
+
+    second_page = client.get(
+        _approvals_base(seeded),
+        params={"limit": "1", "offset": "1"},
+    )
+    assert second_page.status_code == 200
+    assert second_page.json()["total"] == 2
+    assert len(second_page.json()["approvals"]) == 1
+
+    detail = client.get(f"{_approvals_base(seeded)}/{approval_id}")
+    assert detail.status_code == 200
+    body = detail.json()
+    assert body["campaign"] == {
+        "id": str(seeded.campaign_id),
+        "name": "Alpha Campaign",
+    }
+    assert body["artist"] == {"id": str(seeded.artist_id), "name": "Alpha Artist"}
+    assert body["release"] == {"id": str(seeded.release_id), "name": "Alpha Single"}
+    assert body["current_resource_revision"] == 1
+    assert body["decision_history"][0]["decision"] == "submitted"
+    assert body["available_actions"] == [
+        "approved",
+        "rejected",
+        "changes_requested",
+    ]
+
+    _set_context(client, seeded)
+    submitted_by_me = client.get(
+        _approvals_base(seeded),
+        params={"submitted_by_me": "true"},
+    )
+    assert submitted_by_me.status_code == 200
+    assert submitted_by_me.json()["total"] == 2
+
+    outside_scope = client.get(
+        f"/api/v1/workspaces/{seeded.outside_workspace_id}/approvals/{approval_id}"
+    )
+    assert outside_scope.status_code in {403, 404}
+
+
+def test_approval_queue_capabilities_and_error_mapping(
+    marketing_content_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededMarketingContentApi,
+    ],
+) -> None:
+    client, sessionmaker, seeded = marketing_content_client
+    _set_context(client, seeded)
+    created = client.post(_base(seeded), json=_draft_payload(seeded)).json()
+    submitted = client.post(_approval_submit_base(seeded, created["id"]), json={})
+    assert submitted.status_code == 201
+    approval_id = submitted.json()["id"]
+
+    asyncio.run(_set_viewer_capabilities(sessionmaker, seeded, ()))
+    _set_context(
+        client,
+        seeded,
+        user_id=seeded.viewer_user_id,
+        email="marketing-viewer@example.com",
+        workspace_permission=WorkspacePermission.guest,
+        capability_permissions=(),
+        department_access=("marketing",),
+    )
+    assert client.get(_approvals_base(seeded)).status_code == 403
+
+    asyncio.run(
+        _set_viewer_capabilities(
+            sessionmaker,
+            seeded,
+            (Capability.marketing_content_view.value,),
+        )
+    )
+    _set_context(
+        client,
+        seeded,
+        user_id=seeded.viewer_user_id,
+        email="marketing-viewer@example.com",
+        workspace_permission=WorkspacePermission.guest,
+        capability_permissions=(Capability.marketing_content_view.value,),
+        department_access=("marketing",),
+    )
+    detail = client.get(f"{_approvals_base(seeded)}/{approval_id}")
+    assert detail.status_code == 200
+    assert detail.json()["available_actions"] == []
+    assert (
+        client.post(
+            f"{_approvals_base(seeded)}/{approval_id}/decisions",
+            json={"action": "approved"},
+        ).status_code
+        == 403
+    )
+    assert (
+        client.get(
+            _approvals_base(seeded), params={"resource_type": "unsupported"}
+        ).status_code
+        == 400
+    )
+
+
+def test_approval_queue_decisions_and_idempotency(
+    marketing_content_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededMarketingContentApi,
+    ],
+) -> None:
+    client, _sessionmaker, seeded = marketing_content_client
+
+    def submit(title: str) -> str:
+        _set_context(client, seeded)
+        created = client.post(
+            _base(seeded),
+            json=_draft_payload(seeded, title=title),
+        ).json()
+        response = client.post(_approval_submit_base(seeded, created["id"]), json={})
+        assert response.status_code == 201
+        return response.json()["id"]
+
+    def reviewer() -> None:
+        _set_context(
+            client,
+            seeded,
+            user_id=seeded.approver_user_id,
+            email="marketing-approver-profile@example.com",
+            capability_permissions=(
+                Capability.marketing_content_view.value,
+                Capability.marketing_content_approve.value,
+            ),
+            department_access=("marketing",),
+        )
+
+    approved_id = submit("Approve")
+    reviewer()
+    approved = client.post(
+        f"{_approvals_base(seeded)}/{approved_id}/decisions",
+        json={"action": "approved", "idempotency_key": "approve-once"},
+    )
+    repeated = client.post(
+        f"{_approvals_base(seeded)}/{approved_id}/decisions",
+        json={"action": "approved", "idempotency_key": "approve-once"},
+    )
+    duplicate_action = client.post(
+        f"{_approvals_base(seeded)}/{approved_id}/decisions",
+        json={"action": "rejected", "reason": "No", "idempotency_key": "other-key"},
+    )
+    assert approved.status_code == 200
+    assert repeated.status_code == 200
+    assert duplicate_action.status_code == 409
+
+    rejected_id = submit("Reject")
+    reviewer()
+    rejected = client.post(
+        f"{_approvals_base(seeded)}/{rejected_id}/decisions",
+        json={"action": "rejected", "reason": "Off brief"},
+    )
+    assert rejected.status_code == 200
+    assert rejected.json()["status"] == "rejected"
+
+    changes_id = submit("Changes")
+    reviewer()
+    changes = client.post(
+        f"{_approvals_base(seeded)}/{changes_id}/decisions",
+        json={"action": "changes_requested", "reason": "Revise copy"},
+    )
+    assert changes.status_code == 200
+    assert changes.json()["status"] == "changes_requested"
+
+    cancelled_id = submit("Cancel")
+    _set_context(client, seeded)
+    cancelled = client.post(
+        f"{_approvals_base(seeded)}/{cancelled_id}/decisions",
+        json={"action": "cancelled", "reason": "Submitted by mistake"},
+    )
+    assert cancelled.status_code == 200
+    assert cancelled.json()["status"] == "cancelled"
+
+    missing_reason = submit("Reason")
+    reviewer()
+    assert (
+        client.post(
+            f"{_approvals_base(seeded)}/{missing_reason}/decisions",
+            json={"action": "rejected"},
+        ).status_code
+        == 422
+    )
+
+
+def test_approval_queue_self_agent_stale_duplicate_and_legacy_status_compatibility(
+    marketing_content_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededMarketingContentApi,
+    ],
+) -> None:
+    client, _sessionmaker, seeded = marketing_content_client
+    _set_context(client, seeded)
+    created = client.post(_base(seeded), json=_draft_payload(seeded)).json()
+    approval_id = client.post(
+        _approval_submit_base(seeded, created["id"]),
+        json={},
+    ).json()["id"]
+
+    self_approval = client.post(
+        f"{_approvals_base(seeded)}/{approval_id}/decisions",
+        json={"action": "approved"},
+    )
+    assert self_approval.status_code == 409
+
+    class AgentContext(CurrentUserContext):
+        @property
+        def authorization_actor(self):
+            from labelos_api.authorization import ActorKind, AuthorizationActor
+
+            return AuthorizationActor(
+                kind=ActorKind.ai_agent,
+                subject=f"agent_{self.user.id}",
+                user_id=self.user.id,
+            )
+
+    async def override_agent_context() -> AgentContext:
+        return AgentContext(
+            user=User(id=seeded.approver_user_id, email="agent@example.com"),
+            principal=AuthenticatedPrincipal(
+                provider="workos",
+                subject=f"user_{seeded.approver_user_id}",
+                session_id="session_SECRET",
+                email="agent@example.com",
+                organization_id="org_ALPHA_MARKETING_CONTENT",
+                role=WorkspacePermission.guest.value,
+                roles=(WorkspacePermission.guest.value,),
+            ),
+            memberships=(
+                MembershipContext(
+                    organization_id=seeded.workspace_id,
+                    organization_name="Alpha Label",
+                    organization_slug="alpha-marketing-content-api",
+                    workos_organization_id="org_ALPHA_MARKETING_CONTENT",
+                    workspace_permission=WorkspacePermission.guest,
+                    department_access=("marketing",),
+                    capability_permissions=(
+                        Capability.marketing_content_view.value,
+                        Capability.marketing_content_approve.value,
+                    ),
+                ),
+            ),
+        )
+
+    client.app.dependency_overrides[get_current_user_context] = override_agent_context
+    agent_denial = client.post(
+        f"{_approvals_base(seeded)}/{approval_id}/decisions",
+        json={"action": "approved"},
+    )
+    assert agent_denial.status_code == 409
+
+    _set_context(client, seeded)
+    stale_content = client.post(
+        _base(seeded),
+        json=_draft_payload(seeded, title="Stale"),
+    ).json()
+    stale_id = client.post(
+        _approval_submit_base(seeded, stale_content["id"]),
+        json={},
+    ).json()["id"]
+    client.patch(
+        f"{_base(seeded)}/{stale_content['id']}",
+        json={"title": "Stale Edited"},
+    )
+    _set_context(
+        client,
+        seeded,
+        user_id=seeded.approver_user_id,
+        email="marketing-approver-profile@example.com",
+        capability_permissions=(
+            Capability.marketing_content_view.value,
+            Capability.marketing_content_approve.value,
+        ),
+        department_access=("marketing",),
+    )
+    stale_decision = client.post(
+        f"{_approvals_base(seeded)}/{stale_id}/decisions",
+        json={"action": "approved"},
+    )
+    assert stale_decision.status_code == 409
+    assert (
+        client.get(f"{_approvals_base(seeded)}/{stale_id}").json()["is_stale"] is True
+    )
+
+    _set_context(client, seeded)
+    duplicate_content = client.post(
+        _base(seeded),
+        json=_draft_payload(seeded, title="Duplicate"),
+    ).json()
+    assert (
+        client.post(
+            _approval_submit_base(seeded, duplicate_content["id"]), json={}
+        ).status_code
+        == 201
+    )
+    assert (
+        client.post(
+            _approval_submit_base(seeded, duplicate_content["id"]), json={}
+        ).status_code
+        == 409
+    )
+
+    legacy_content = client.post(
+        _base(seeded),
+        json=_draft_payload(seeded, title="Legacy"),
+    ).json()
+    legacy_submit = client.patch(
+        f"{_base(seeded)}/{legacy_content['id']}/status",
+        json={"status": "in_review"},
+    )
+    assert legacy_submit.status_code == 200
+    legacy_request_id = legacy_submit.json()["approval_request_id"]
+    legacy_detail = client.get(f"{_approvals_base(seeded)}/{legacy_request_id}")
+    assert legacy_detail.status_code == 200
+    assert legacy_detail.json()["resource_id"] == legacy_content["id"]
+
+
+def test_approval_queue_openapi_contract_exposes_stable_routes(
+    marketing_content_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededMarketingContentApi,
+    ],
+) -> None:
+    client, _sessionmaker, _seeded = marketing_content_client
+    schema = client.get("/openapi.json").json()
+    paths = schema["paths"]
+    schemas = schema["components"]["schemas"]
+
+    assert "/api/v1/workspaces/{workspace_id}/approvals" in paths
+    assert "/api/v1/workspaces/{workspace_id}/approvals/{approval_request_id}" in paths
+    assert (
+        "/api/v1/workspaces/{workspace_id}/approvals/{approval_request_id}/decisions"
+        in paths
+    )
+    assert (
+        "/api/v1/workspaces/{workspace_id}/approvals/{approval_request_id}/assign"
+        in paths
+    )
+    assert (
+        "/api/v1/workspaces/{workspace_id}/campaigns/{campaign_id}/marketing-content/{content_id}/approval-requests"
+        in paths
+    )
+    assert set(schemas["ApprovalDecisionAction"]["enum"]) == {
+        "approved",
+        "rejected",
+        "changes_requested",
+        "cancelled",
+    }
+    assert "available_actions" in schemas["ApprovalRequestDetailResponse"]["properties"]

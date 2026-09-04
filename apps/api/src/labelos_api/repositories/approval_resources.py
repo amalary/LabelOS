@@ -140,13 +140,16 @@ class MarketingContentItemApprovalResourceAdapter:
 
     def context(self, resource: object) -> ApprovalResourceContext:
         item = self._item(resource)
+        campaign = item.__dict__.get("campaign")
+        artist = item.__dict__.get("artist")
+        release = item.__dict__.get("release")
         return ApprovalResourceContext(
             campaign_id=item.campaign_id,
-            campaign_name=item.campaign.name if item.campaign is not None else None,
+            campaign_name=campaign.name if campaign is not None else None,
             artist_id=item.artist_id,
-            artist_name=item.artist.name if item.artist is not None else None,
+            artist_name=artist.name if artist is not None else None,
             release_id=item.release_id,
-            release_title=item.release.title if item.release is not None else None,
+            release_title=release.title if release is not None else None,
         )
 
     def channels(self, resource: object) -> tuple[ApprovalResourceChannelSummary, ...]:

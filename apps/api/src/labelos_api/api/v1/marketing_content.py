@@ -128,6 +128,7 @@ class MarketingContentResponse(BaseModel):
     scheduled_at: datetime | None
     published_at: datetime | None
     approval_requested_at: datetime | None
+    approval_request_id: UUID | None
     approved_at: datetime | None
     approved_by_profile_id: UUID | None
     channels: list[MarketingContentChannelResponse]
@@ -284,6 +285,7 @@ def _content_response(item: MarketingContentItem) -> MarketingContentResponse:
         scheduled_at=item.scheduled_at,
         published_at=item.published_at,
         approval_requested_at=item.approval_requested_at,
+        approval_request_id=item.approval_request_id,
         approved_at=item.approved_at,
         approved_by_profile_id=item.approved_by_profile_id,
         channels=[_channel_response(channel) for channel in item.channels],
