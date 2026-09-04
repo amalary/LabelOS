@@ -37,6 +37,21 @@ describe("workspace navigation visibility", () => {
     );
   });
 
+  it("only shows Campaign Calendar when campaign and content view capabilities are both available", () => {
+    expect(labelsFor([capabilities.marketingCampaignView], ["marketing"])).not.toContain(
+      "Campaign Calendar",
+    );
+    expect(labelsFor([capabilities.marketingContentView], ["marketing"])).not.toContain(
+      "Campaign Calendar",
+    );
+    expect(
+      labelsFor(
+        [capabilities.marketingCampaignView, capabilities.marketingContentView],
+        ["marketing"],
+      ),
+    ).toContain("Campaign Calendar");
+  });
+
   it("shows legal product areas from contract capabilities", () => {
     const labels = labelsFor([capabilities.contractView, capabilities.contractApprove], ["legal"]);
 

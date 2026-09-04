@@ -12,6 +12,7 @@ import {
   shouldInvalidateMarketingContentRealtimeCacheKey,
   useWorkspaceMarketingContent,
 } from "../marketing-content";
+import { clearCampaignCalendarCache, useCampaignCalendar } from "../campaign-calendar";
 import { activityEventTypes, refetchEventTypes } from "./events";
 import {
   shouldInvalidateProfileRealtimeCacheKey,
@@ -69,6 +70,11 @@ const marketingContentCalendarOptions = {
   start: "2026-09-01T00:00:00Z",
   end: "2026-09-30T23:59:59Z",
 };
+const campaignCalendarOptions = {
+  start: "2026-09-01T00:00:00Z",
+  end: "2026-09-30T23:59:59Z",
+  timezone: "America/Los_Angeles",
+};
 
 function RealtimeProbe() {
   const { connectionState, lastUpdatedBy, presence, recentActivityEvents } =
@@ -119,10 +125,59 @@ function RealtimeApprovalProbe() {
   );
 }
 
+function RealtimeCampaignCalendarProbe() {
+  const { recentActivityEvents } = useOrganizationRealtime("org_01");
+  const workspaceCalendar = useCampaignCalendar("org_01", campaignCalendarOptions);
+  const otherWorkspaceCalendar = useCampaignCalendar("org_02", campaignCalendarOptions);
+  return (
+    <div>
+      <span>{workspaceCalendar.data?.total ?? "no calendar"}</span>
+      <span>{otherWorkspaceCalendar.data?.total ?? "no other calendar"}</span>
+      <span>{recentActivityEvents[0]?.type ?? "no activity"}</span>
+    </div>
+  );
+}
+
+function campaignCalendarResponse(workspaceId: string, total: number) {
+  return {
+    workspace_id: workspaceId,
+    start: campaignCalendarOptions.start,
+    end: campaignCalendarOptions.end,
+    timezone: campaignCalendarOptions.timezone,
+    events: [],
+    total,
+    limit: 100,
+    offset: 0,
+  };
+}
+
+function realtimeEvent(type: string, organizationId = "org_01") {
+  return {
+    id: `event_${type}_${organizationId}`.replaceAll(".", "_"),
+    type,
+    version: 1,
+    channel: `organization:${organizationId}`,
+    organization_id: organizationId,
+    entity_type: "campaign",
+    entity_id: "campaign_01",
+    operation_id: `operation_${type}`.replaceAll(".", "_"),
+    actor: { user_id: "user_01", display_name: "Mara Chen" },
+    payload: {
+      approvalRequestId: "approval_01",
+      artistProfileId: "artist_profile_01",
+      campaignId: "campaign_01",
+      contentItemId: "content_01",
+      releaseId: "release_01",
+    },
+    created_at: new Date().toISOString(),
+  };
+}
+
 describe("useOrganizationRealtime", () => {
   beforeEach(() => {
     clearApprovalCache();
     clearAnalyticsCache();
+    clearCampaignCalendarCache();
     clearMarketingContentCache();
     navigation.refresh.mockReset();
     routeState.pathname = "/artists";
@@ -423,6 +478,65 @@ describe("useOrganizationRealtime", () => {
     );
     expect(navigation.refresh).not.toHaveBeenCalled();
     expect(screen.getByText("approval.updated")).toBeInTheDocument();
+  });
+
+  it.each([
+    ["campaign date changes", "campaign.updated"],
+    ["milestone changes", "campaign.milestone_updated"],
+    ["content schedule changes", "marketing.content.updated"],
+    ["approvals", "approval.updated"],
+    ["published state", "marketing.content.published"],
+    ["artist label changes", "artist.updated"],
+    ["artist profile label changes", "profile.artist_profile_updated"],
+    ["release label changes", "release.updated"],
+  ])("invalidates campaign calendar workspace queries for %s", async (_label, eventType) => {
+    routeState.pathname = "/campaign-calendar";
+    const workspaceFetchCounts = new Map<string, number>();
+    vi.mocked(fetch).mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      const workspaceId = url.includes("/workspaces/org_02/") ? "org_02" : "org_01";
+      const count = (workspaceFetchCounts.get(workspaceId) ?? 0) + 1;
+      workspaceFetchCounts.set(workspaceId, count);
+      return Promise.resolve(Response.json(campaignCalendarResponse(workspaceId, count)));
+    });
+
+    render(<RealtimeCampaignCalendarProbe />);
+    const source = FakeEventSource.instances[0]!;
+
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+    act(() => {
+      source.emit("message", realtimeEvent(eventType));
+    });
+
+    await waitFor(() => expect(workspaceFetchCounts.get("org_01")).toBe(2));
+    expect(workspaceFetchCounts.get("org_02")).toBe(1);
+    expect(navigation.refresh).not.toHaveBeenCalled();
+    expect(screen.getByText(eventType)).toBeInTheDocument();
+  });
+
+  it("does not invalidate campaign calendar workspace queries for unrelated events or other organizations", async () => {
+    routeState.pathname = "/campaign-calendar";
+    const workspaceFetchCounts = new Map<string, number>();
+    vi.mocked(fetch).mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      const workspaceId = url.includes("/workspaces/org_02/") ? "org_02" : "org_01";
+      const count = (workspaceFetchCounts.get(workspaceId) ?? 0) + 1;
+      workspaceFetchCounts.set(workspaceId, count);
+      return Promise.resolve(Response.json(campaignCalendarResponse(workspaceId, count)));
+    });
+
+    render(<RealtimeCampaignCalendarProbe />);
+    const source = FakeEventSource.instances[0]!;
+
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+    act(() => {
+      source.emit("message", realtimeEvent("campaign.goal_completed"));
+      source.emit("message", realtimeEvent("campaign.updated", "org_02"));
+    });
+
+    await waitFor(() => expect(screen.getByText("campaign.goal_completed")).toBeInTheDocument());
+    expect(workspaceFetchCounts.get("org_01")).toBe(1);
+    expect(workspaceFetchCounts.get("org_02")).toBe(1);
   });
 
   it("refreshes marketing calendar data locally for approval updates with content context", async () => {

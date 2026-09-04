@@ -152,4 +152,47 @@ describe("WorkspaceNavigation", () => {
     );
     expect(screen.getByRole("link", { name: "Roles" })).toHaveAttribute("href", "/workspace/roles");
   });
+
+  it("only renders Campaign Calendar for workspaces with campaign and content view access", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(Response.json(profile))
+      .mockResolvedValueOnce(
+        Response.json(membership("workspace_member", ["marketing.campaign.view"], ["marketing"])),
+      )
+      .mockResolvedValueOnce(
+        Response.json(
+          membership(
+            "workspace_admin",
+            ["marketing.campaign.view", "marketing.content.view"],
+            ["marketing"],
+          ),
+        ),
+      );
+    let currentSelection = selection("workspace_member");
+
+    const { rerender } = render(
+      <ActiveWorkspaceProvider selection={currentSelection}>
+        <WorkspaceNavigation />
+      </ActiveWorkspaceProvider>,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByRole("link", { name: "Campaigns" })).toHaveAttribute("href", "/campaigns"),
+    );
+    expect(screen.queryByRole("link", { name: "Campaign Calendar" })).not.toBeInTheDocument();
+
+    currentSelection = selection("workspace_admin");
+    rerender(
+      <ActiveWorkspaceProvider selection={currentSelection}>
+        <WorkspaceNavigation />
+      </ActiveWorkspaceProvider>,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByRole("link", { name: "Campaign Calendar" })).toHaveAttribute(
+        "href",
+        "/campaign-calendar",
+      ),
+    );
+  });
 });

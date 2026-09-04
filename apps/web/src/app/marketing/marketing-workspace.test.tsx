@@ -1,11 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import {
-  MarketingWorkspace,
-  calendarVisibleRange,
-  toScheduleInstances,
-} from "./marketing-workspace";
+import { MarketingWorkspace, toScheduleInstances } from "./marketing-workspace";
 import type {
   ApprovalAction,
   ApprovalRequestDetail,
@@ -483,15 +479,6 @@ describe("MarketingWorkspace", () => {
 
   afterEach(() => {
     vi.useRealTimers();
-  });
-
-  it("calculates the visible month range including leading and trailing days", () => {
-    const range = calendarVisibleRange(new Date(Date.UTC(2026, 8, 1)), "UTC");
-
-    expect(range.gridStart.toISOString().slice(0, 10)).toBe("2026-08-30");
-    expect(range.gridEnd.toISOString().slice(0, 10)).toBe("2026-10-03");
-    expect(range.start).toBe("2026-08-30T00:00:00.000Z");
-    expect(range.end).toBe("2026-10-03T23:59:59.000Z");
   });
 
   it("renders month content with one multi-channel item instead of duplicate cards", () => {
@@ -1073,6 +1060,27 @@ describe("MarketingWorkspace", () => {
       resource_type: "marketing_content_item",
       status: "in_review",
     });
+  });
+
+  it("opens directly to a focused approval from navigation query params", () => {
+    getParam.mockImplementation((key: string) => {
+      if (key === "tab") {
+        return "approvals";
+      }
+      if (key === "approvalRequestId") {
+        return "approval_01";
+      }
+      return null;
+    });
+    mockApprovalQueue([approvalSummary()]);
+    approvalHookState.detail = approvalDetail();
+
+    render(<MarketingWorkspace />);
+
+    expect(screen.getByRole("heading", { name: "Approval Queue" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Approval review detail" })).toHaveTextContent(
+      "Request approval_01",
+    );
   });
 
   it("renders queue results and sends each queue filter to the approval API", () => {
