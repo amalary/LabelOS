@@ -15,6 +15,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { invalidateAnalyticsWorkspaceCache } from "../analytics";
 import { handleApprovalRealtimeInvalidation } from "../approvals";
 import { clearOrganizationScopedBrowserCaches } from "../browser-cache";
+import { invalidateCampaignCalendarWorkspaceCache } from "../campaign-calendar";
 import { invalidateCampaignCache, shouldInvalidateCampaignRealtimeCacheKey } from "../campaigns";
 import {
   invalidateMarketingContentCache,
@@ -25,7 +26,12 @@ import {
   invalidateWorkspaceCapabilityCache,
   shouldInvalidateWorkspaceCapabilityRealtimeCacheKey,
 } from "../workspace-capabilities";
-import { activityEventTypes, refetchEventTypes, type RealtimeEventEnvelope } from "./events";
+import {
+  activityEventTypes,
+  refetchEventTypes,
+  type RealtimeEventEnvelope,
+  type RealtimeEventType,
+} from "./events";
 import type {
   ActivityEvent,
   ActivityEventPayload,
@@ -59,6 +65,28 @@ const campaignEventPrefix = "campaign.";
 const analyticsEventPrefix = "analytics.";
 const marketingContentEventPrefix = "marketing.content.";
 const approvalEventPrefix = "approval.";
+const campaignCalendarEventTypes = new Set<RealtimeEventType>([
+  "campaign.created",
+  "campaign.updated",
+  "campaign.status_changed",
+  "campaign.artist_associated",
+  "campaign.artist_removed",
+  "campaign.release_associated",
+  "campaign.release_removed",
+  "campaign.milestone_created",
+  "campaign.milestone_updated",
+  "campaign.milestone_completed",
+  "marketing.content.created",
+  "marketing.content.updated",
+  "marketing.content.status_changed",
+  "marketing.content.approval_requested",
+  "marketing.content.approved",
+  "marketing.content.published",
+  "approval.updated",
+  "artist.updated",
+  "profile.artist_profile_updated",
+  "release.updated",
+]);
 const artistProfileEventTypes = new Set<string>([
   "profile.artist_updated",
   "profile.artist_profile_created",
@@ -321,6 +349,9 @@ export function useOrganizationRealtime(organizationId: string | null): Organiza
               workspaceId: organizationId,
             });
           }
+          if (campaignCalendarEventTypes.has(event.type)) {
+            invalidateCampaignCalendarWorkspaceCache(organizationId);
+          }
           if (
             event.type === "member.updated" ||
             event.type === "member.role_changed" ||
@@ -354,12 +385,15 @@ export function useOrganizationRealtime(organizationId: string | null): Organiza
                   typeof event.payload.contentItemId === "string")));
           const isApprovalWorkspaceRefresh =
             pathname.startsWith("/approvals") && event.type.startsWith(approvalEventPrefix);
+          const isCampaignCalendarWorkspaceRefresh =
+            pathname.startsWith("/campaign-calendar") && campaignCalendarEventTypes.has(event.type);
           if (
             !isDashboardActivityRefresh &&
             !isCampaignWorkspaceRefresh &&
             !isAnalyticsWorkspaceRefresh &&
             !isMarketingContentWorkspaceRefresh &&
-            !isApprovalWorkspaceRefresh
+            !isApprovalWorkspaceRefresh &&
+            !isCampaignCalendarWorkspaceRefresh
           ) {
             clearOrganizationScopedBrowserCaches();
             router.refresh();
