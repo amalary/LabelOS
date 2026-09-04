@@ -13,6 +13,7 @@ import {
 import { usePathname, useRouter } from "next/navigation";
 
 import { invalidateAnalyticsWorkspaceCache } from "../analytics";
+import { handleApprovalRealtimeInvalidation } from "../approvals";
 import { clearOrganizationScopedBrowserCaches } from "../browser-cache";
 import { invalidateCampaignCache, shouldInvalidateCampaignRealtimeCacheKey } from "../campaigns";
 import {
@@ -57,6 +58,7 @@ const profileEventPrefix = "profile.";
 const campaignEventPrefix = "campaign.";
 const analyticsEventPrefix = "analytics.";
 const marketingContentEventPrefix = "marketing.content.";
+const approvalEventPrefix = "approval.";
 const artistProfileEventTypes = new Set<string>([
   "profile.artist_updated",
   "profile.artist_profile_created",
@@ -304,6 +306,19 @@ export function useOrganizationRealtime(organizationId: string | null): Organiza
               }),
             );
           }
+          if (event.type.startsWith(approvalEventPrefix)) {
+            handleApprovalRealtimeInvalidation({
+              approvalRequestId:
+                typeof event.payload.approvalRequestId === "string"
+                  ? event.payload.approvalRequestId
+                  : event.entity_id,
+              campaignId:
+                typeof event.payload.campaignId === "string" ? event.payload.campaignId : null,
+              contentItemId:
+                typeof event.payload.contentItemId === "string" ? event.payload.contentItemId : null,
+              workspaceId: organizationId,
+            });
+          }
           if (
             event.type === "member.updated" ||
             event.type === "member.role_changed" ||
@@ -331,11 +346,14 @@ export function useOrganizationRealtime(organizationId: string | null): Organiza
             pathname.startsWith("/analytics") && event.type.startsWith(analyticsEventPrefix);
           const isMarketingContentWorkspaceRefresh =
             pathname.startsWith("/marketing") && event.type.startsWith(marketingContentEventPrefix);
+          const isApprovalWorkspaceRefresh =
+            pathname.startsWith("/approvals") && event.type.startsWith(approvalEventPrefix);
           if (
             !isDashboardActivityRefresh &&
             !isCampaignWorkspaceRefresh &&
             !isAnalyticsWorkspaceRefresh &&
-            !isMarketingContentWorkspaceRefresh
+            !isMarketingContentWorkspaceRefresh &&
+            !isApprovalWorkspaceRefresh
           ) {
             clearOrganizationScopedBrowserCaches();
             router.refresh();
