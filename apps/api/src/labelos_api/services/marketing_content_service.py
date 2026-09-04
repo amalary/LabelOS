@@ -879,15 +879,13 @@ async def update_content_item(
     if "release_id" not in relationship_values and item.release_id is not None:
         relationship_values["release_id"] = item.release_id
     await _validate_item_relationships(session, workspace_id, relationship_values)
-    if (
-        item.status in APPROVAL_CLEARING_STATUSES
-        and payload.material_change
-        and any(field in MATERIAL_FIELDS for field in values)
-    ):
-        values["status"] = MarketingContentItemStatus.draft
-        values["approval_requested_at"] = None
-        values["approved_at"] = None
-        values["approved_by_profile_id"] = None
+    if payload.material_change and any(field in MATERIAL_FIELDS for field in values):
+        values["content_revision"] = item.content_revision + 1
+        if item.status in APPROVAL_CLEARING_STATUSES:
+            values["status"] = MarketingContentItemStatus.draft
+            values["approval_requested_at"] = None
+            values["approved_at"] = None
+            values["approved_by_profile_id"] = None
     updated = await marketing_content.update_item(
         session,
         workspace_id,
@@ -932,6 +930,7 @@ async def replace_channels(
     _assert_unique_channel_targets(channel_values)
     await marketing_content.replace_channels(session, item.id, channel_values)
     session.expire(item, ["channels"])
+    item.content_revision += 1
     if item.status in APPROVAL_CLEARING_STATUSES:
         item.status = MarketingContentItemStatus.draft
         _clear_approval_fields(item)
@@ -986,6 +985,7 @@ async def update_channel(
     updated = await marketing_content.update_channel(session, channel_id, values)
     if updated is None:
         raise MarketingContentNotFoundError("Marketing content channel not found")
+    item.content_revision += 1
     if item.status in APPROVAL_CLEARING_STATUSES and values:
         item.status = MarketingContentItemStatus.draft
         _clear_approval_fields(item)
