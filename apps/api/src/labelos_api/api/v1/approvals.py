@@ -17,7 +17,6 @@ from labelos_database.models import (
 )
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import select
-from sqlalchemy.orm.attributes import flag_modified
 
 from labelos_api.auth import CurrentUserContext, SessionDep, get_current_user_context
 from labelos_api.repositories.approval_resources import (
@@ -606,6 +605,11 @@ async def submit_approval_decision(
         )
         if idempotent is not None:
             return idempotent
+        decision_payload = (
+            {"idempotency_key": payload.idempotency_key}
+            if payload.idempotency_key is not None
+            else None
+        )
         if payload.action == ApprovalDecisionAction.approved:
             request = await approval_service.approve_request(
                 session,
@@ -613,6 +617,7 @@ async def submit_approval_decision(
                 approval_request_id,
                 actor=context,
                 comment=payload.reason,
+                decision_payload=decision_payload,
             )
         elif payload.action == ApprovalDecisionAction.rejected:
             request = await approval_service.reject_request(
@@ -621,6 +626,7 @@ async def submit_approval_decision(
                 approval_request_id,
                 actor=context,
                 comment=payload.reason,
+                decision_payload=decision_payload,
             )
         elif payload.action == ApprovalDecisionAction.changes_requested:
             request = await approval_service.request_changes(
@@ -629,6 +635,7 @@ async def submit_approval_decision(
                 approval_request_id,
                 actor=context,
                 comment=payload.reason,
+                decision_payload=decision_payload,
             )
         else:
             request = await approval_service.cancel_request(
@@ -637,29 +644,7 @@ async def submit_approval_decision(
                 approval_request_id,
                 actor=context,
                 reason=payload.reason,
-            )
-        if payload.idempotency_key is not None:
-            last_decision = await session.scalar(
-                select(ApprovalDecision)
-                .where(ApprovalDecision.organization_id == workspace_id)
-                .where(ApprovalDecision.approval_request_id == approval_request_id)
-                .order_by(
-                    ApprovalDecision.created_at.desc(), ApprovalDecision.id.desc()
-                )
-            )
-            if last_decision is None:
-                raise _conflict("Approval decision was not recorded")
-            last_decision.payload = {
-                **dict(last_decision.payload),
-                "idempotency_key": payload.idempotency_key,
-            }
-            flag_modified(last_decision, "payload")
-            await session.commit()
-            request = await approval_service.get_approval_request(
-                session,
-                workspace_id,
-                approval_request_id,
-                actor=context,
+                decision_payload=decision_payload,
             )
     except ApprovalServiceError as exc:
         _service_error(exc)

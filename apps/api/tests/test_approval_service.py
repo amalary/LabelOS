@@ -54,9 +54,9 @@ from labelos_api.services.approval_service import (
     submit_resource_for_approval,
 )
 from labelos_api.services.marketing_content_service import (
-    MarketingContentLifecycleError,
     MarketingContentItemCreate,
     MarketingContentItemUpdate,
+    MarketingContentLifecycleError,
     create_content_item,
     transition_status,
     update_content_item,

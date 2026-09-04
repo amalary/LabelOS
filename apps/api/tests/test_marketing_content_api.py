@@ -1103,6 +1103,9 @@ def test_approval_queue_decisions_and_idempotency(
         json={"action": "rejected", "reason": "No", "idempotency_key": "other-key"},
     )
     assert approved.status_code == 200
+    assert approved.json()["decision_history"][-1]["payload"] == {
+        "idempotency_key": "approve-once"
+    }
     assert repeated.status_code == 200
     assert duplicate_action.status_code == 409
 

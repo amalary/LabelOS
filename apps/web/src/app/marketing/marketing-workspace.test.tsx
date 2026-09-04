@@ -518,7 +518,7 @@ describe("MarketingWorkspace", () => {
     render(<MarketingWorkspace />);
 
     expect(screen.getAllByText("Single Teaser")).toHaveLength(1);
-    expect(screen.getByText("Instagram • Tiktok • Youtube")).toBeInTheDocument();
+    expect(screen.getByText("Instagram / Tiktok / Youtube")).toBeInTheDocument();
     expect(screen.getByText("Multi-time")).toBeInTheDocument();
     expect(screen.getAllByText("Single Rollout").length).toBeGreaterThanOrEqual(1);
   });

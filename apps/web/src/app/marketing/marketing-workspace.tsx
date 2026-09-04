@@ -350,7 +350,7 @@ function channelNames(item: MarketingContentItem): string[] {
 
 function channelSummary(item: MarketingContentItem): string {
   const channels = channelNames(item);
-  return channels.length ? channels.map(humanize).join(" • ") : "No channel";
+  return channels.length ? channels.map(humanize).join(" / ") : "No channel";
 }
 
 function campaignName(campaigns: Campaign[], campaignId: string): string {

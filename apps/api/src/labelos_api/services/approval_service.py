@@ -463,6 +463,17 @@ async def _append_decision(
     return appended
 
 
+def _attach_appended_decision(
+    request: ApprovalRequest,
+    stage: ApprovalRequestStage | None,
+    decision: ApprovalDecision,
+) -> None:
+    if decision not in request.decisions:
+        request.decisions.append(decision)
+    if stage is not None and decision not in stage.decisions:
+        stage.decisions.append(decision)
+
+
 async def _publish_approval_event(
     session: AsyncSession,
     *,
@@ -909,6 +920,7 @@ async def approve_request(
     *,
     actor: AuthorizationActorInput | None = None,
     comment: str | None = None,
+    decision_payload: dict | None = None,
 ) -> ApprovalRequest:
     return await _human_stage_decision(
         session,
@@ -916,6 +928,7 @@ async def approve_request(
         approval_request_id=approval_request_id,
         actor=actor,
         comment=comment,
+        decision_payload=decision_payload,
         decision=ApprovalDecisionValue.approved,
         request_status=ApprovalRequestStatus.approved,
         stage_status=ApprovalStageStatus.approved,
@@ -929,6 +942,7 @@ async def request_changes(
     *,
     actor: AuthorizationActorInput | None = None,
     comment: str | None = None,
+    decision_payload: dict | None = None,
 ) -> ApprovalRequest:
     return await _human_stage_decision(
         session,
@@ -936,6 +950,7 @@ async def request_changes(
         approval_request_id=approval_request_id,
         actor=actor,
         comment=comment,
+        decision_payload=decision_payload,
         decision=ApprovalDecisionValue.changes_requested,
         request_status=ApprovalRequestStatus.changes_requested,
         stage_status=ApprovalStageStatus.changes_requested,
@@ -949,6 +964,7 @@ async def reject_request(
     *,
     actor: AuthorizationActorInput | None = None,
     comment: str | None = None,
+    decision_payload: dict | None = None,
 ) -> ApprovalRequest:
     return await _human_stage_decision(
         session,
@@ -956,6 +972,7 @@ async def reject_request(
         approval_request_id=approval_request_id,
         actor=actor,
         comment=comment,
+        decision_payload=decision_payload,
         decision=ApprovalDecisionValue.rejected,
         request_status=ApprovalRequestStatus.rejected,
         stage_status=ApprovalStageStatus.rejected,
@@ -969,6 +986,7 @@ async def _human_stage_decision(
     approval_request_id: UUID,
     actor: AuthorizationActorInput | None,
     comment: str | None,
+    decision_payload: dict | None,
     decision: ApprovalDecisionValue,
     request_status: ApprovalRequestStatus,
     stage_status: ApprovalStageStatus,
@@ -1027,7 +1045,7 @@ async def _human_stage_decision(
             {ApprovalStageStatus.pending, ApprovalStageStatus.in_review}
         ),
     )
-    await _append_decision(
+    appended_decision = await _append_decision(
         session,
         workspace_id=workspace_id,
         request=request,
@@ -1037,7 +1055,9 @@ async def _human_stage_decision(
         actor_user_id=actor_user_id,
         actor_profile_id=actor_profile_id,
         reason=comment,
+        payload=decision_payload,
     )
+    _attach_appended_decision(request, stage, appended_decision)
     _decision_projection(
         request,
         resource,
@@ -1069,6 +1089,7 @@ async def cancel_request(
     *,
     actor: AuthorizationActorInput | None = None,
     reason: str | None = None,
+    decision_payload: dict | None = None,
 ) -> ApprovalRequest:
     return await _system_or_submitter_resolution(
         session,
@@ -1076,6 +1097,7 @@ async def cancel_request(
         approval_request_id=approval_request_id,
         actor=actor,
         reason=reason,
+        decision_payload=decision_payload,
         decision=ApprovalDecisionValue.cancelled,
         request_status=ApprovalRequestStatus.cancelled,
         stage_status=ApprovalStageStatus.cancelled,
@@ -1089,6 +1111,7 @@ async def invalidate_request(
     *,
     actor: AuthorizationActorInput | None = None,
     reason: str | None = None,
+    decision_payload: dict | None = None,
 ) -> ApprovalRequest:
     return await _system_or_submitter_resolution(
         session,
@@ -1096,6 +1119,7 @@ async def invalidate_request(
         approval_request_id=approval_request_id,
         actor=actor,
         reason=reason,
+        decision_payload=decision_payload,
         decision=ApprovalDecisionValue.invalidated,
         request_status=ApprovalRequestStatus.cancelled,
         stage_status=ApprovalStageStatus.invalidated,
@@ -1109,6 +1133,7 @@ async def _system_or_submitter_resolution(
     approval_request_id: UUID,
     actor: AuthorizationActorInput | None,
     reason: str | None,
+    decision_payload: dict | None,
     decision: ApprovalDecisionValue,
     request_status: ApprovalRequestStatus,
     stage_status: ApprovalStageStatus,
@@ -1157,7 +1182,7 @@ async def _system_or_submitter_resolution(
             }
         ),
     )
-    await _append_decision(
+    appended_decision = await _append_decision(
         session,
         workspace_id=workspace_id,
         request=request,
@@ -1167,7 +1192,9 @@ async def _system_or_submitter_resolution(
         actor_user_id=actor_user_id,
         actor_profile_id=actor_profile_id,
         reason=reason,
+        payload=decision_payload,
     )
+    _attach_appended_decision(request, stage, appended_decision)
     _decision_projection(
         request,
         resource,
