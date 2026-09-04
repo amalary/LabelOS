@@ -19,6 +19,18 @@ import {
 } from "../../lib/approvals";
 import { type Campaign, useCampaigns } from "../../lib/campaigns";
 import {
+  addCalendarMonths,
+  calendarFallbackTimeZone,
+  calendarVisibleRange,
+  currentCalendarMonthDate,
+  dateKeyInTimeZone,
+  formatCalendarDateTime,
+  formatCalendarListDate,
+  formatCalendarMonthTitle,
+  monthDays,
+  type CalendarDay,
+} from "../../lib/calendar-dates";
+import {
   type MarketingContentChannelCreate,
   type MarketingContentItem,
   type MarketingContentItemCreate,
@@ -35,14 +47,6 @@ import { useActiveWorkspace, useActiveWorkspaceProfile } from "../../lib/workspa
 
 type MarketingTab = "calendar" | "drafts" | "approvals" | "accounts";
 type CalendarView = "month" | "list";
-
-type CalendarDay = {
-  dateKey: string;
-  day: number;
-  inMonth: boolean;
-  isToday: boolean;
-  rangeDate: Date;
-};
 
 export type MarketingScheduleInstance = {
   item: MarketingContentItem;
@@ -92,105 +96,13 @@ const channelOptions = [
   "email",
 ];
 const weekdayLabels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-const planningFallbackTimeZone = "UTC";
+const planningFallbackTimeZone = calendarFallbackTimeZone;
 
 function humanize(value: string | null | undefined): string {
   if (!value) {
     return "Not set";
   }
   return value.replace(/_/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
-}
-
-function datePartsInTimeZone(value: Date, timeZone: string) {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    day: "2-digit",
-    hour: "2-digit",
-    hour12: false,
-    minute: "2-digit",
-    month: "2-digit",
-    second: "2-digit",
-    timeZone,
-    year: "numeric",
-  }).formatToParts(value);
-  const part = (type: Intl.DateTimeFormatPartTypes) =>
-    Number(parts.find((entry) => entry.type === type)?.value ?? 0);
-  const hour = part("hour");
-  return {
-    year: part("year"),
-    month: part("month"),
-    day: part("day"),
-    hour: hour === 24 ? 0 : hour,
-    minute: part("minute"),
-    second: part("second"),
-  };
-}
-
-function zonedDateTimeToUtc(
-  year: number,
-  monthIndex: number,
-  day: number,
-  hour: number,
-  minute: number,
-  second: number,
-  timeZone: string,
-): Date {
-  const utcGuess = new Date(Date.UTC(year, monthIndex, day, hour, minute, second));
-  const actualParts = datePartsInTimeZone(utcGuess, timeZone);
-  const desiredAsUtc = Date.UTC(year, monthIndex, day, hour, minute, second);
-  const actualAsUtc = Date.UTC(
-    actualParts.year,
-    actualParts.month - 1,
-    actualParts.day,
-    actualParts.hour,
-    actualParts.minute,
-    actualParts.second,
-  );
-  return new Date(utcGuess.getTime() + desiredAsUtc - actualAsUtc);
-}
-
-export function calendarVisibleRange(monthDate: Date, timeZone = planningFallbackTimeZone) {
-  const year = monthDate.getUTCFullYear();
-  const month = monthDate.getUTCMonth();
-  const firstOfMonth = new Date(Date.UTC(year, month, 1));
-  const lastOfMonth = new Date(Date.UTC(year, month + 1, 0));
-  const gridStart = new Date(firstOfMonth);
-  gridStart.setUTCDate(firstOfMonth.getUTCDate() - firstOfMonth.getUTCDay());
-  const gridEnd = new Date(lastOfMonth);
-  gridEnd.setUTCDate(lastOfMonth.getUTCDate() + (6 - lastOfMonth.getUTCDay()));
-  return {
-    end: zonedDateTimeToUtc(
-      gridEnd.getUTCFullYear(),
-      gridEnd.getUTCMonth(),
-      gridEnd.getUTCDate(),
-      23,
-      59,
-      59,
-      timeZone,
-    ).toISOString(),
-    gridEnd,
-    gridStart,
-    start: zonedDateTimeToUtc(
-      gridStart.getUTCFullYear(),
-      gridStart.getUTCMonth(),
-      gridStart.getUTCDate(),
-      0,
-      0,
-      0,
-      timeZone,
-    ).toISOString(),
-  };
-}
-
-function dateKeyFromDate(value: Date): string {
-  return value.toISOString().slice(0, 10);
-}
-
-function dateKeyInTimeZone(value: string, timeZone: string): string {
-  const parts = datePartsInTimeZone(new Date(value), timeZone);
-  return `${parts.year}-${String(parts.month).padStart(2, "0")}-${String(parts.day).padStart(
-    2,
-    "0",
-  )}`;
 }
 
 function isWithinRange(value: string, rangeStart: string, rangeEnd: string): boolean {
@@ -241,66 +153,6 @@ export function toScheduleInstances(
       const rightTime = right.scheduledAt ? new Date(right.scheduledAt).getTime() : Infinity;
       return leftTime - rightTime || left.item.title.localeCompare(right.item.title);
     });
-}
-
-function monthDays(monthDate: Date, timeZone: string): CalendarDay[] {
-  const range = calendarVisibleRange(monthDate, timeZone);
-  const days: CalendarDay[] = [];
-  const todayKey = dateKeyInTimeZone(new Date().toISOString(), timeZone);
-  const cursor = new Date(range.gridStart);
-  while (cursor <= range.gridEnd) {
-    const rangeDate = new Date(cursor);
-    const dateKey = dateKeyFromDate(rangeDate);
-    days.push({
-      dateKey,
-      day: rangeDate.getUTCDate(),
-      inMonth: rangeDate.getUTCMonth() === monthDate.getUTCMonth(),
-      isToday: dateKey === todayKey,
-      rangeDate,
-    });
-    cursor.setUTCDate(cursor.getUTCDate() + 1);
-  }
-  return days;
-}
-
-function formatMonthTitle(value: Date): string {
-  return new Intl.DateTimeFormat("en", { month: "long", timeZone: "UTC", year: "numeric" }).format(
-    value,
-  );
-}
-
-function currentMonthDate(timeZone: string): Date {
-  const nowParts = datePartsInTimeZone(new Date(), timeZone);
-  return new Date(Date.UTC(nowParts.year, nowParts.month - 1, 1));
-}
-
-function formatDateTime(value: string | null, timeZone: string): string {
-  if (!value) {
-    return "Unscheduled";
-  }
-  return new Intl.DateTimeFormat("en", {
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-    month: "short",
-    timeZone,
-    timeZoneName: "short",
-  }).format(new Date(value));
-}
-
-function formatListDate(value: string | null, timeZone: string): string {
-  if (!value) {
-    return "Unscheduled";
-  }
-  return new Intl.DateTimeFormat("en", {
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-    month: "short",
-    timeZone,
-    weekday: "short",
-    year: "numeric",
-  }).format(new Date(value));
 }
 
 function statusVariant(status: MarketingContentItemStatus) {
@@ -1221,7 +1073,7 @@ function MonthCalendar({
                         {approvalStateLabel(instance.item)}
                       </Badge>
                       {instance.hasMultipleChannelTimes ? (
-                        <Badge title={formatDateTime(instance.scheduledAt, timeZone)}>
+                        <Badge title={formatCalendarDateTime(instance.scheduledAt, timeZone)}>
                           Multi-time
                         </Badge>
                       ) : null}
@@ -1275,7 +1127,7 @@ function CalendarList({
             <div>
               <p className="text-xs font-semibold uppercase text-slate-500">Planned</p>
               <p className="mt-1 text-sm font-medium text-slate-900">
-                {formatListDate(instance.scheduledAt, timeZone)}
+                {formatCalendarListDate(instance.scheduledAt, timeZone)}
               </p>
               {instance.hasMultipleChannelTimes ? (
                 <p className="mt-1 text-xs text-slate-500">Multiple channel times</p>
@@ -1446,7 +1298,7 @@ function ApprovalQueue({
           {latestApprovalEvent ? (
             <span aria-live="polite">
               Realtime refresh: {latestApprovalEvent.type} at{" "}
-              {formatDateTime(latestApprovalEvent.createdAt, timeZone)}
+              {formatCalendarDateTime(latestApprovalEvent.createdAt, timeZone)}
             </span>
           ) : null}
         </div>
@@ -1541,11 +1393,11 @@ function ApprovalQueue({
                   <div>
                     <p className="text-xs font-semibold uppercase text-slate-500">Submitted</p>
                     <p className="mt-1 text-sm font-medium text-slate-800">
-                      {formatDateTime(approval.submitted_at, timeZone)}
+                      {formatCalendarDateTime(approval.submitted_at, timeZone)}
                     </p>
                     {approval.resolved_at ? (
                       <p className="text-xs text-slate-500">
-                        Resolved {formatDateTime(approval.resolved_at, timeZone)}
+                        Resolved {formatCalendarDateTime(approval.resolved_at, timeZone)}
                       </p>
                     ) : null}
                   </div>
@@ -1750,7 +1602,7 @@ function ApprovalReviewDetail({
                             {humanize(decision.decision)}
                           </p>
                           <p className="text-xs text-slate-500">
-                            {formatDateTime(decision.created_at, timeZone)}
+                            {formatCalendarDateTime(decision.created_at, timeZone)}
                           </p>
                         </div>
                         <p className="mt-1 text-xs text-slate-500">
@@ -1951,7 +1803,7 @@ export function MarketingWorkspace() {
     releaseId: "",
     status: "",
   });
-  const [monthDate, setMonthDate] = useState(() => currentMonthDate(timeZone));
+  const [monthDate, setMonthDate] = useState(() => currentCalendarMonthDate(timeZone));
   const [editor, setEditor] = useState<
     | { key: string; mode: "create"; item: null; createDate: string | null }
     | { key: string; mode: "edit"; item: MarketingContentItem; createDate: null }
@@ -2078,9 +1930,7 @@ export function MarketingWorkspace() {
   }, [updateUrl]);
 
   const moveMonth = useCallback((amount: number) => {
-    setMonthDate(
-      (current) => new Date(Date.UTC(current.getUTCFullYear(), current.getUTCMonth() + amount, 1)),
-    );
+    setMonthDate((current) => addCalendarMonths(current, amount));
   }, []);
 
   const showNoResults = items.length === 0 && filtersActive(filters);
@@ -2141,11 +1991,11 @@ export function MarketingWorkspace() {
           <div className="flex flex-col gap-3 rounded-md border border-slate-200 bg-white p-4 md:flex-row md:items-center md:justify-between">
             <div>
               <h2 className="text-lg font-semibold text-slate-950">
-                {formatMonthTitle(monthDate)}
+                {formatCalendarMonthTitle(monthDate)}
               </h2>
               <p className="text-sm text-slate-500">
-                Showing {formatDateTime(range.start, timeZone)} through{" "}
-                {formatDateTime(range.end, timeZone)}
+                Showing {formatCalendarDateTime(range.start, timeZone)} through{" "}
+                {formatCalendarDateTime(range.end, timeZone)}
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
@@ -2154,7 +2004,7 @@ export function MarketingWorkspace() {
               </Button>
               <Button
                 onClick={() => {
-                  setMonthDate(currentMonthDate(timeZone));
+                  setMonthDate(currentCalendarMonthDate(timeZone));
                 }}
                 size="sm"
                 type="button"
