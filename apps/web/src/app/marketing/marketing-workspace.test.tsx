@@ -181,7 +181,7 @@ const campaign: Campaign = {
 };
 
 function item(overrides: Partial<MarketingContentItem> = {}): MarketingContentItem {
-  return {
+  const base: MarketingContentItem = {
     id: "content_01",
     workspace_id: "workspace_01",
     campaign_id: "campaign_01",
@@ -199,6 +199,18 @@ function item(overrides: Partial<MarketingContentItem> = {}): MarketingContentIt
     scheduled_at: "2026-09-10T12:00:00Z",
     published_at: null,
     approval_requested_at: null,
+    approval_request_id: null,
+    approval_state: {
+      approval_request_id: null,
+      approved_revision: null,
+      approved_revision_is_current: false,
+      can_schedule: false,
+      current_revision: 1,
+      label: "Scheduled",
+      state: "scheduled",
+    },
+    content_revision: 1,
+    approved_revision: null,
     approved_at: null,
     approved_by_profile_id: null,
     channels: [
@@ -220,8 +232,28 @@ function item(overrides: Partial<MarketingContentItem> = {}): MarketingContentIt
     ],
     created_at: "2026-09-01T12:00:00Z",
     updated_at: "2026-09-01T12:00:00Z",
-    ...overrides,
   };
+  const merged = { ...base, ...overrides };
+  if (!overrides.approval_state) {
+    merged.approval_state = {
+      approval_request_id: merged.approval_request_id,
+      approved_revision: merged.approved_revision,
+      approved_revision_is_current:
+        merged.approved_revision !== null && merged.approved_revision === merged.content_revision,
+      can_schedule:
+        merged.status === "approved" &&
+        merged.approved_revision !== null &&
+        merged.approved_revision === merged.content_revision,
+      current_revision: merged.content_revision,
+      label: humanizedStatus(merged.status),
+      state: merged.status,
+    };
+  }
+  return merged;
+}
+
+function humanizedStatus(value: string): string {
+  return value.replace(/_/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
 function channel(overrides: Partial<MarketingContentItem["channels"][number]> = {}) {
@@ -739,10 +771,163 @@ describe("MarketingWorkspace", () => {
     render(<MarketingWorkspace />);
 
     fireEvent.click(screen.getByRole("button", { name: /Single Teaser/ }));
-    fireEvent.click(screen.getByRole("button", { name: "Submit for Review" }));
+    fireEvent.click(screen.getByRole("button", { name: "Submit for approval" }));
 
     await waitFor(() => expect(mutationMocks.approvalSubmit).toHaveBeenCalledWith({}));
     expect(mutationMocks.status).not.toHaveBeenCalled();
+  });
+
+  it("shows approval compatibility states on calendar items and opens their queue review", () => {
+    mockWorkspaceProfile([
+      "marketing.content.view",
+      "marketing.content.edit",
+      "marketing.content.submit_for_review",
+    ]);
+    mockCalendar([
+      item({
+        approval_request_id: "approval_01",
+        approval_state: {
+          approval_request_id: "approval_01",
+          approved_revision: null,
+          approved_revision_is_current: false,
+          can_schedule: false,
+          current_revision: 1,
+          label: "In review",
+          state: "in_review",
+        },
+        status: "in_review",
+      }),
+      item({
+        id: "content_02",
+        title: "Change Copy",
+        approval_request_id: "approval_02",
+        approval_state: {
+          approval_request_id: "approval_02",
+          approved_revision: null,
+          approved_revision_is_current: false,
+          can_schedule: false,
+          current_revision: 1,
+          label: "Changes requested",
+          state: "changes_requested",
+        },
+        status: "draft",
+      }),
+      item({
+        id: "content_03",
+        title: "Edited Approved",
+        approval_state: {
+          approval_request_id: null,
+          approved_revision: 1,
+          approved_revision_is_current: false,
+          can_schedule: false,
+          current_revision: 2,
+          label: "Reapproval required",
+          state: "reapproval_required",
+        },
+        approved_revision: 1,
+        content_revision: 2,
+        status: "draft",
+      }),
+    ]);
+
+    render(<MarketingWorkspace />);
+
+    expect(screen.getByText("In review")).toBeInTheDocument();
+    expect(screen.getByText("Changes requested")).toBeInTheDocument();
+    expect(screen.getByText("Reapproval required")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Single Teaser/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Open Approval Review" }));
+
+    expect(screen.getByRole("region", { name: "Approval review detail" })).toBeInTheDocument();
+  });
+
+  it("schedules only approved current revisions and blocks stale approved revisions", async () => {
+    vi.useRealTimers();
+    mockWorkspaceProfile(["marketing.content.view", "marketing.content.edit"]);
+    mockCalendar([
+      item({
+        approval_request_id: "approval_01",
+        approval_state: {
+          approval_request_id: "approval_01",
+          approved_revision: 2,
+          approved_revision_is_current: true,
+          can_schedule: true,
+          current_revision: 2,
+          label: "Approved",
+          state: "approved",
+        },
+        approved_revision: 2,
+        content_revision: 2,
+        status: "approved",
+      }),
+    ]);
+    mutationMocks.status.mockResolvedValueOnce(item({ status: "scheduled" }));
+
+    const { rerender } = render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: /Single Teaser/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Schedule" }));
+
+    await waitFor(() =>
+      expect(mutationMocks.status).toHaveBeenCalledWith({ status: "scheduled" }),
+    );
+
+    mockCalendar([
+      item({
+        approval_state: {
+          approval_request_id: null,
+          approved_revision: 1,
+          approved_revision_is_current: false,
+          can_schedule: false,
+          current_revision: 2,
+          label: "Reapproval required",
+          state: "reapproval_required",
+        },
+        approved_revision: 1,
+        content_revision: 2,
+        status: "approved",
+        updated_at: "2026-09-02T12:00:00Z",
+      }),
+    ]);
+    rerender(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: /Single Teaser/ }));
+
+    expect(screen.getByRole("button", { name: "Schedule" })).toBeDisabled();
+    expect(screen.getByText(/Scheduling is blocked/)).toBeInTheDocument();
+  });
+
+  it("warns before material edits to currently approved content", async () => {
+    vi.useRealTimers();
+    const confirm = vi.spyOn(window, "confirm").mockReturnValueOnce(false).mockReturnValueOnce(true);
+    mockWorkspaceProfile(["marketing.content.view", "marketing.content.edit"]);
+    mockCalendar([
+      item({
+        approval_state: {
+          approval_request_id: "approval_01",
+          approved_revision: 1,
+          approved_revision_is_current: true,
+          can_schedule: true,
+          current_revision: 1,
+          label: "Approved",
+          state: "approved",
+        },
+        approval_request_id: "approval_01",
+        approved_revision: 1,
+        content_revision: 1,
+        status: "approved",
+      }),
+    ]);
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: /Single Teaser/ }));
+    fireEvent.change(screen.getByLabelText("Title"), { target: { value: "Approved Edit" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    expect(confirm).toHaveBeenCalled();
+    expect(mutationMocks.update).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(mutationMocks.update).toHaveBeenCalled());
   });
 
   it("shows lifecycle actions based on capabilities", () => {
@@ -751,10 +936,10 @@ describe("MarketingWorkspace", () => {
     expect(screen.queryByRole("button", { name: "Create Content" })).not.toBeInTheDocument();
 
     mockWorkspaceProfile(["marketing.content.view"]);
-    mockCalendar([item({ status: "in_review" })]);
+    mockCalendar([item({ approval_request_id: "approval_01", status: "in_review" })]);
     rerender(<MarketingWorkspace />);
     fireEvent.click(screen.getByRole("button", { name: /Single Teaser/ }));
-    expect(screen.getByRole("button", { name: "Review in Approvals" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open Approval Review" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
 
     mockWorkspaceProfile(["marketing.content.view"]);

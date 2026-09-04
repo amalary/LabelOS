@@ -27,6 +27,7 @@ def _content_item_load_options():
         selectinload(MarketingContentItem.created_by_profile),
         selectinload(MarketingContentItem.owner_profile),
         selectinload(MarketingContentItem.approved_by_profile),
+        selectinload(MarketingContentItem.approval_request),
     )
 
 

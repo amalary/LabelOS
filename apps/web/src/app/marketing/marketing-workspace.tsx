@@ -2,7 +2,7 @@
 
 import { Badge, Button, Card, EmptyState, LoadingState, PageHeader, cn } from "@label-os/ui";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { can, capabilities } from "../../lib/authorization";
 import {
@@ -26,6 +26,7 @@ import {
   type MarketingContentItemUpdate,
   type MarketingContentListOptions,
   useCreateMarketingContentItem,
+  useTransitionMarketingContentStatus,
   useUpdateMarketingContentItem,
   useWorkspaceCalendarContent,
 } from "../../lib/marketing-content";
@@ -310,6 +311,37 @@ function statusVariant(status: MarketingContentItemStatus) {
     return "warning" as const;
   }
   return "neutral" as const;
+}
+
+function approvalStateVariant(item: MarketingContentItem) {
+  const state = item.approval_state?.state ?? item.status;
+  if (state === "approved" || state === "scheduled" || state === "published") {
+    return "success" as const;
+  }
+  if (state === "in_review" || state === "changes_requested" || state === "reapproval_required") {
+    return "warning" as const;
+  }
+  return statusVariant(item.status);
+}
+
+function approvalStateLabel(item: MarketingContentItem): string {
+  return item.approval_state?.label ?? humanize(item.status);
+}
+
+function approvedRevisionIsCurrent(item: MarketingContentItem): boolean {
+  return Boolean(
+    item.approval_state?.approved_revision_is_current ??
+      (item.approved_revision !== null &&
+        item.approved_revision !== undefined &&
+        item.approved_revision === item.content_revision),
+  );
+}
+
+function canScheduleApprovedRevision(item: MarketingContentItem): boolean {
+  return Boolean(
+    item.approval_state?.can_schedule ??
+      (item.status === "approved" && approvedRevisionIsCurrent(item)),
+  );
 }
 
 function channelNames(item: MarketingContentItem): string[] {
@@ -629,7 +661,7 @@ function ContentEditor({
   item,
   mode,
   onCancel,
-  onOpenApprovals,
+  onOpenApprovalReview,
   onSaved,
   timeZone,
 }: {
@@ -641,7 +673,7 @@ function ContentEditor({
   item: MarketingContentItem | null;
   mode: ContentEditorMode;
   onCancel: () => void;
-  onOpenApprovals: () => void;
+  onOpenApprovalReview: (approvalRequestId: string | null) => void;
   onSaved: () => void;
   timeZone: string;
 }) {
@@ -660,6 +692,11 @@ function ContentEditor({
     item?.id ?? null,
   );
   const submitApproval = useSubmitMarketingContentForApproval(
+    item?.workspace_id ?? selectedCampaign?.workspace_id ?? null,
+    item?.campaign_id ?? null,
+    item?.id ?? null,
+  );
+  const transitionStatus = useTransitionMarketingContentStatus(
     item?.workspace_id ?? selectedCampaign?.workspace_id ?? null,
     item?.campaign_id ?? null,
     item?.id ?? null,
@@ -688,8 +725,16 @@ function ContentEditor({
   );
   const ownerOptions = selectedCampaign?.members ?? [];
   const duplicateChannels = duplicateChannelTargets(form.channels);
-  const mutationError = create.error ?? update.error ?? submitApproval.error;
-  const isMutating = create.isMutating || update.isMutating || submitApproval.isMutating;
+  const mutationError =
+    create.error ?? update.error ?? submitApproval.error ?? transitionStatus.error;
+  const isMutating =
+    create.isMutating ||
+    update.isMutating ||
+    submitApproval.isMutating ||
+    transitionStatus.isMutating;
+  const approvalState = item?.approval_state?.state ?? item?.status;
+  const isCurrentlyApproved = item ? approvedRevisionIsCurrent(item) : false;
+  const scheduleEligible = item ? canScheduleApprovedRevision(item) : false;
 
   const setField = (next: Partial<ContentFormState>) => {
     setClientError(null);
@@ -740,6 +785,14 @@ function ContentEditor({
       if (mode === "create") {
         await create.mutate(payload);
       } else {
+        if (
+          isCurrentlyApproved &&
+          !window.confirm(
+            "This content is currently approved. Saving material edits will require reapproval before scheduling.",
+          )
+        ) {
+          return;
+        }
         await update.mutate(payload as MarketingContentItemUpdate);
       }
       onSaved();
@@ -763,6 +816,19 @@ function ContentEditor({
     }
   }
 
+  async function scheduleApproved() {
+    setClientError(null);
+    if (!item) {
+      return;
+    }
+    try {
+      await transitionStatus.mutate({ status: "scheduled" });
+      onSaved();
+    } catch {
+      // The mutation state renders exact-revision approval failures.
+    }
+  }
+
   return (
     <Card className="grid gap-4 p-4" role="region" aria-label="Marketing content editor">
       <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
@@ -776,7 +842,8 @@ function ContentEditor({
           </p>
           {item ? (
             <p className="mt-1 text-xs font-medium text-slate-500">
-              Current status: {humanize(item.status)}
+              Current status: {humanize(item.status)} - Approval: {approvalStateLabel(item)} -
+              Revision {item.content_revision}
             </p>
           ) : null}
         </div>
@@ -1033,15 +1100,43 @@ function ContentEditor({
         <Button disabled={!isEditable || isMutating} onClick={saveDraft} type="button">
           {mode === "create" ? "Save draft" : "Save changes"}
         </Button>
-        {item?.status === "draft" && canSubmitForReview ? (
+        {item?.status === "draft" &&
+        approvalState !== "changes_requested" &&
+        canSubmitForReview ? (
           <Button disabled={isMutating} onClick={submitForReview} type="button" variant="secondary">
-            Submit for Review
+            Submit for approval
           </Button>
         ) : null}
-        {item?.status === "in_review" ? (
-          <Button disabled={isMutating} onClick={onOpenApprovals} type="button" variant="secondary">
-            Review in Approvals
+        {item?.status === "draft" &&
+        approvalState === "changes_requested" &&
+        canSubmitForReview ? (
+          <Button disabled={isMutating} onClick={submitForReview} type="button" variant="secondary">
+            Resubmit for approval
           </Button>
+        ) : null}
+        {item?.approval_request_id ? (
+          <Button
+            disabled={isMutating}
+            onClick={() => onOpenApprovalReview(item.approval_request_id)}
+            type="button"
+            variant="secondary"
+          >
+            Open Approval Review
+          </Button>
+        ) : null}
+        {item?.status === "approved" ? (
+          <Button
+            disabled={isMutating || !scheduleEligible}
+            onClick={scheduleApproved}
+            type="button"
+          >
+            Schedule
+          </Button>
+        ) : null}
+        {item?.status === "approved" && !scheduleEligible ? (
+          <span className="text-sm text-amber-700">
+            Scheduling is blocked until approval matches the current revision.
+          </span>
         ) : null}
         {!isEditable ? (
           <span className="text-sm text-slate-500">
@@ -1121,9 +1216,9 @@ function MonthCalendar({
                     <span className="flex flex-wrap items-center gap-1">
                       <Badge
                         className="max-w-full truncate"
-                        variant={statusVariant(instance.item.status)}
+                        variant={approvalStateVariant(instance.item)}
                       >
-                        {humanize(instance.item.status)}
+                        {approvalStateLabel(instance.item)}
                       </Badge>
                       {instance.hasMultipleChannelTimes ? (
                         <Badge title={formatDateTime(instance.scheduledAt, timeZone)}>
@@ -1191,8 +1286,8 @@ function CalendarList({
                 <h3 className="truncate text-sm font-semibold text-slate-950">
                   {instance.item.title}
                 </h3>
-                <Badge variant={statusVariant(instance.item.status)}>
-                  {humanize(instance.item.status)}
+                <Badge variant={approvalStateVariant(instance.item)}>
+                  {approvalStateLabel(instance.item)}
                 </Badge>
               </div>
               <p className="mt-1 text-sm text-slate-500">
@@ -1276,17 +1371,19 @@ function hasStructuredFeedback(decision: ApprovalDecision): boolean {
 
 function ApprovalQueue({
   currentProfileId,
+  focusedApprovalId,
   onOpenCalendarItem,
   timeZone,
   workspaceId,
 }: {
   currentProfileId: string | null | undefined;
+  focusedApprovalId: string | null;
   onOpenCalendarItem: (contentItemId: string, campaignId: string | null) => void;
   timeZone: string;
   workspaceId: string;
 }) {
   const [view, setView] = useState<ApprovalQueueView>("awaiting_review");
-  const [selectedApprovalId, setSelectedApprovalId] = useState<string | null>(null);
+  const [selectedApprovalId, setSelectedApprovalId] = useState<string | null>(focusedApprovalId);
   const options = useMemo(() => approvalQueueOptions(view), [view]);
   const queue = useApprovalQueue(workspaceId, options);
   const realtime = useOrganizationRealtimeContext();
@@ -1294,6 +1391,12 @@ function ApprovalQueue({
     event.type.startsWith("approval."),
   );
   const approvals = queue.data?.approvals ?? [];
+
+  useEffect(() => {
+    if (focusedApprovalId) {
+      setSelectedApprovalId(focusedApprovalId);
+    }
+  }, [focusedApprovalId]);
 
   return (
     <section className="grid gap-4" aria-label="Marketing approval queue">
@@ -1856,6 +1959,7 @@ export function MarketingWorkspace() {
   >(() =>
     createDate ? { createDate, item: null, key: `create:${createDate}`, mode: "create" } : null,
   );
+  const [focusedApprovalId, setFocusedApprovalId] = useState<string | null>(null);
   const range = useMemo(() => calendarVisibleRange(monthDate, timeZone), [monthDate, timeZone]);
   const campaigns = useCampaigns(activeWorkspace?.id ?? null, { limit: 500, offset: 0 });
   const canView =
@@ -2112,7 +2216,8 @@ export function MarketingWorkspace() {
               key={editor.key}
               mode={editor.mode}
               onCancel={closeEditor}
-              onOpenApprovals={() => {
+              onOpenApprovalReview={(approvalRequestId) => {
+                setFocusedApprovalId(approvalRequestId);
                 setActiveTab("approvals");
                 setEditor(null);
               }}
@@ -2191,11 +2296,13 @@ export function MarketingWorkspace() {
       {activeTab === "approvals" && canView ? (
         <ApprovalQueue
           currentProfileId={workspaceProfile.membership?.profile.id}
+          focusedApprovalId={focusedApprovalId}
           onOpenCalendarItem={(contentItemId, campaignId) => {
             const nextFilters = {
               ...filters,
               campaignId: campaignId ?? filters.campaignId,
             };
+            setFocusedApprovalId(null);
             setFilters(nextFilters);
             updateUrl(nextFilters);
             setActiveTab("calendar");

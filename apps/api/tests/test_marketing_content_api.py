@@ -872,6 +872,9 @@ def test_marketing_content_openapi_contract_exposes_stable_routes(
     }
     assert "approved_at" in schemas["MarketingContentResponse"]["properties"]
     assert "approval_request_id" in schemas["MarketingContentResponse"]["properties"]
+    assert "approval_state" in schemas["MarketingContentResponse"]["properties"]
+    assert "content_revision" in schemas["MarketingContentResponse"]["properties"]
+    assert "approved_revision" in schemas["MarketingContentResponse"]["properties"]
     assert "published_at" in schemas["MarketingContentResponse"]["properties"]
 
 
@@ -1272,6 +1275,157 @@ def test_approval_queue_self_agent_stale_duplicate_and_legacy_status_compatibili
     legacy_detail = client.get(f"{_approvals_base(seeded)}/{legacy_request_id}")
     assert legacy_detail.status_code == 200
     assert legacy_detail.json()["resource_id"] == legacy_content["id"]
+
+
+def test_marketing_content_calendar_approval_queue_integrated_workflow(
+    marketing_content_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededMarketingContentApi,
+    ],
+) -> None:
+    client, sessionmaker, seeded = marketing_content_client
+    scheduled_at = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+
+    def submitter() -> None:
+        _set_context(client, seeded)
+
+    def reviewer() -> None:
+        _set_context(
+            client,
+            seeded,
+            user_id=seeded.approver_user_id,
+            email="marketing-approver-profile@example.com",
+            capability_permissions=(
+                Capability.marketing_content_view.value,
+                Capability.marketing_content_approve.value,
+            ),
+            department_access=("marketing",),
+        )
+
+    submitter()
+    draft = client.post(
+        _base(seeded),
+        json={
+            **_draft_payload(seeded, scheduled_at=scheduled_at),
+            "channels": [
+                {
+                    "channel": "Threads",
+                    "placement": "default",
+                    "scheduled_at": scheduled_at.isoformat(),
+                }
+            ],
+        },
+    )
+    assert draft.status_code == 201
+    content = draft.json()
+    assert content["status"] == "draft"
+    assert content["content_revision"] == 1
+    assert content["channels"][0]["channel"] == "threads"
+    assert content["approval_state"]["state"] == "draft"
+
+    submitted = client.post(
+        _approval_submit_base(seeded, content["id"]),
+        json={"summary": "Calendar submit"},
+    )
+    assert submitted.status_code == 201
+    first_approval_id = submitted.json()["id"]
+
+    calendar_item = client.get(f"{_base(seeded)}/{content['id']}").json()
+    assert calendar_item["status"] == "in_review"
+    assert calendar_item["approval_state"]["state"] == "in_review"
+    assert calendar_item["approval_state"]["approval_request_id"] == first_approval_id
+
+    queue = client.get(
+        _approvals_base(seeded),
+        params={"resource_type": "marketing_content_item", "status": "in_review"},
+    )
+    assert queue.status_code == 200
+    assert first_approval_id in [entry["id"] for entry in queue.json()["approvals"]]
+
+    reviewer()
+    changes = client.post(
+        f"{_approvals_base(seeded)}/{first_approval_id}/decisions",
+        json={"action": "changes_requested", "reason": "Tighten CTA"},
+    )
+    assert changes.status_code == 200
+    assert changes.json()["status"] == "changes_requested"
+
+    submitter()
+    needs_changes = client.get(f"{_base(seeded)}/{content['id']}").json()
+    assert needs_changes["status"] == "draft"
+    assert needs_changes["approval_state"]["state"] == "changes_requested"
+
+    edited = client.patch(
+        f"{_base(seeded)}/{content['id']}",
+        json={"copy_text": "Updated CTA"},
+    )
+    assert edited.status_code == 200
+    assert edited.json()["content_revision"] == 2
+
+    resubmitted = client.post(_approval_submit_base(seeded, content["id"]), json={})
+    assert resubmitted.status_code == 201
+    second_approval_id = resubmitted.json()["id"]
+    assert resubmitted.json()["submitted_revision"] == 2
+
+    reviewer()
+    approved = client.post(
+        f"{_approvals_base(seeded)}/{second_approval_id}/decisions",
+        json={"action": "approved"},
+    )
+    assert approved.status_code == 200
+
+    submitter()
+    approved_calendar = client.get(f"{_base(seeded)}/{content['id']}").json()
+    assert approved_calendar["approval_state"]["state"] == "approved"
+    assert approved_calendar["approval_state"]["approved_revision_is_current"] is True
+    assert approved_calendar["approval_state"]["can_schedule"] is True
+
+    scheduled = client.patch(
+        f"{_base(seeded)}/{content['id']}/status",
+        json={"status": "scheduled"},
+    )
+    assert scheduled.status_code == 200
+    assert scheduled.json()["status"] == "scheduled"
+
+    client.patch(f"{_base(seeded)}/{content['id']}/status", json={"status": "approved"})
+    invalidated = client.patch(
+        f"{_base(seeded)}/{content['id']}",
+        json={"title": "Launch Caption Edited"},
+    )
+    assert invalidated.status_code == 200
+    assert invalidated.json()["status"] == "draft"
+    assert invalidated.json()["content_revision"] == 3
+    assert invalidated.json()["approval_state"]["state"] == "reapproval_required"
+
+    blocked_schedule = client.patch(
+        f"{_base(seeded)}/{content['id']}/status",
+        json={"status": "scheduled"},
+    )
+    assert blocked_schedule.status_code == 409
+
+    final_submit = client.post(_approval_submit_base(seeded, content["id"]), json={})
+    assert final_submit.status_code == 201
+    final_approval_id = final_submit.json()["id"]
+    reviewer()
+    final_approval = client.post(
+        f"{_approvals_base(seeded)}/{final_approval_id}/decisions",
+        json={"action": "approved"},
+    )
+    assert final_approval.status_code == 200
+    submitter()
+    final_schedule = client.patch(
+        f"{_base(seeded)}/{content['id']}/status",
+        json={"status": "scheduled"},
+    )
+    assert final_schedule.status_code == 200
+    assert final_schedule.json()["approval_state"]["can_schedule"] is False
+
+    events = asyncio.run(_realtime_events(sessionmaker, seeded.workspace_id))
+    event_types = [event.event_type for event in events]
+    assert RealtimeEventType.approval_updated.value in event_types
+    assert RealtimeEventType.marketing_content_updated.value in event_types
+    assert RealtimeEventType.marketing_content_status_changed.value in event_types
 
 
 def test_approval_queue_openapi_contract_exposes_stable_routes(

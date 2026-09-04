@@ -699,7 +699,6 @@ async def _apply_material_change(
             reason="Material marketing content edit superseded this approval.",
         )
     item.content_revision += 1
-    item.approved_revision = None
     item.approved_at = None
     item.approved_by_profile_id = None
     if item.status in APPROVAL_CLEARING_STATUSES:
