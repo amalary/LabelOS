@@ -1061,6 +1061,27 @@ describe("MarketingWorkspace", () => {
     });
   });
 
+  it("opens directly to a focused approval from navigation query params", () => {
+    getParam.mockImplementation((key: string) => {
+      if (key === "tab") {
+        return "approvals";
+      }
+      if (key === "approvalRequestId") {
+        return "approval_01";
+      }
+      return null;
+    });
+    mockApprovalQueue([approvalSummary()]);
+    approvalHookState.detail = approvalDetail();
+
+    render(<MarketingWorkspace />);
+
+    expect(screen.getByRole("heading", { name: "Approval Queue" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Approval review detail" })).toHaveTextContent(
+      "Request approval_01",
+    );
+  });
+
   it("renders queue results and sends each queue filter to the approval API", () => {
     mockApprovalQueue([approvalSummary()]);
 

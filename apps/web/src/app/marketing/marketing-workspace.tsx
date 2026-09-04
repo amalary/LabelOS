@@ -1788,7 +1788,9 @@ export function MarketingWorkspace() {
   const searchParams = useSearchParams();
   const { activeWorkspace } = useActiveWorkspace();
   const workspaceProfile = useActiveWorkspaceProfile();
-  const [activeTab, setActiveTab] = useState<MarketingTab>("calendar");
+  const tabParam = searchParams.get("tab");
+  const initialTab: MarketingTab = tabParam === "approvals" ? "approvals" : "calendar";
+  const [activeTab, setActiveTab] = useState<MarketingTab>(initialTab);
   const [view, setView] = useState<CalendarView>("month");
   const initialCampaignId = searchParams.get("campaignId") ?? "";
   const createDate = searchParams.get("createDate");
@@ -1811,7 +1813,9 @@ export function MarketingWorkspace() {
   >(() =>
     createDate ? { createDate, item: null, key: `create:${createDate}`, mode: "create" } : null,
   );
-  const [focusedApprovalId, setFocusedApprovalId] = useState<string | null>(null);
+  const [focusedApprovalId, setFocusedApprovalId] = useState<string | null>(
+    searchParams.get("approvalRequestId"),
+  );
   const range = useMemo(() => calendarVisibleRange(monthDate, timeZone), [monthDate, timeZone]);
   const campaigns = useCampaigns(activeWorkspace?.id ?? null, { limit: 500, offset: 0 });
   const canView =

@@ -107,7 +107,9 @@ function response(events: CampaignCalendarEvent[]): CampaignCalendarResponse {
   };
 }
 
-function mockWorkspaceProfile(capabilityList: string[] = ["marketing.campaign.view"]) {
+function mockWorkspaceProfile(
+  capabilityList: string[] = ["marketing.campaign.view", "marketing.content.view"],
+) {
   vi.mocked(workspaceContext.useActiveWorkspace).mockReturnValue({
     activeWorkspace: {
       id: "workspace_01",
@@ -377,6 +379,19 @@ describe("CampaignCalendarWorkspace", () => {
     );
   });
 
+  it("requires campaign and marketing content view access", () => {
+    mockWorkspaceProfile(["marketing.campaign.view"]);
+
+    render(<CampaignCalendarWorkspace />);
+
+    expect(
+      screen.getByText(
+        "You need campaign and marketing content view access to open the Campaign Calendar.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Campaign calendar" })).not.toBeInTheDocument();
+  });
+
   it("navigates campaign events to campaigns and content or approval events to Marketing Hub", () => {
     const campaignStart = event({
       event_type: "campaign.start",
@@ -398,7 +413,10 @@ describe("CampaignCalendarWorkspace", () => {
     fireEvent.click(screen.getByRole("button", { name: "Approval requested: Approval requested" }));
 
     expect(push).toHaveBeenNthCalledWith(1, "/campaigns/campaign_01");
-    expect(push).toHaveBeenNthCalledWith(2, "/marketing?campaignId=campaign_01");
+    expect(push).toHaveBeenNthCalledWith(
+      2,
+      "/marketing?tab=approvals&approvalRequestId=approval_01&campaignId=campaign_01",
+    );
   });
 
   it("uses backend URLs when supplied", () => {

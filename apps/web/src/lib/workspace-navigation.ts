@@ -58,6 +58,7 @@ export const workspaceNavigationItems: readonly WorkspaceNavigationItem[] = [
     href: "/campaign-calendar",
     label: "Campaign Calendar",
     requiredCapabilities: [capabilities.marketingCampaignView, capabilities.marketingContentView],
+    requireAllCapabilities: true,
     requiresActiveWorkspace: true,
   },
   {

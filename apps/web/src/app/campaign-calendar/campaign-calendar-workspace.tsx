@@ -160,7 +160,14 @@ export function campaignCalendarEventHref(event: CampaignCalendarEvent): string 
     return `/campaigns/${campaignId}`;
   }
 
+  const approvalRequestId =
+    event.approval?.request_id ??
+    (event.source_type === "approval_request" ? event.source_id : null);
   const params = new URLSearchParams();
+  if (approvalRequestId) {
+    params.set("tab", "approvals");
+    params.set("approvalRequestId", approvalRequestId);
+  }
   if (campaignId) {
     params.set("campaignId", campaignId);
   }
@@ -596,7 +603,7 @@ export function CampaignCalendarWorkspace() {
   }, [events, timeZone]);
   const canView =
     workspaceProfile.subject && activeWorkspace
-      ? can(workspaceProfile.subject, null, capabilities.marketingCampaignView) ||
+      ? can(workspaceProfile.subject, null, capabilities.marketingCampaignView) &&
         can(workspaceProfile.subject, null, capabilities.marketingContentView)
       : false;
   const isCurrentMonth = monthDate.getTime() === currentCalendarMonthDate(timeZone).getTime();
@@ -647,7 +654,7 @@ export function CampaignCalendarWorkspace() {
           className="rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900"
           role="status"
         >
-          You need campaign or marketing content view access to open the Campaign Calendar.
+          You need campaign and marketing content view access to open the Campaign Calendar.
         </div>
       ) : null}
 
