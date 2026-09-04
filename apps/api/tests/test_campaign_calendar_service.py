@@ -810,9 +810,7 @@ def test_campaign_calendar_service_timezone_projection_and_dst_boundaries(
             events = {event.event_type: event for event in page.events}
             return {
                 "campaign_date": events[campaign_calendar.CAMPAIGN_START].date,
-                "campaign_all_day": events[
-                    campaign_calendar.CAMPAIGN_START
-                ].all_day,
+                "campaign_all_day": events[campaign_calendar.CAMPAIGN_START].all_day,
                 "timed_date": events[
                     campaign_calendar.MARKETING_CONTENT_SCHEDULED
                 ].starts_at[:10],

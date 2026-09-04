@@ -157,9 +157,7 @@ describe("WorkspaceNavigation", () => {
     vi.mocked(fetch)
       .mockResolvedValueOnce(Response.json(profile))
       .mockResolvedValueOnce(
-        Response.json(
-          membership("workspace_member", ["marketing.campaign.view"], ["marketing"]),
-        ),
+        Response.json(membership("workspace_member", ["marketing.campaign.view"], ["marketing"])),
       )
       .mockResolvedValueOnce(
         Response.json(
@@ -179,10 +177,7 @@ describe("WorkspaceNavigation", () => {
     );
 
     await waitFor(() =>
-      expect(screen.getByRole("link", { name: "Campaigns" })).toHaveAttribute(
-        "href",
-        "/campaigns",
-      ),
+      expect(screen.getByRole("link", { name: "Campaigns" })).toHaveAttribute("href", "/campaigns"),
     );
     expect(screen.queryByRole("link", { name: "Campaign Calendar" })).not.toBeInTheDocument();
 

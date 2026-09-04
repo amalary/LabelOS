@@ -189,11 +189,7 @@ export function addCalendarMonths(monthDate: Date, amount: number): Date {
   return new Date(Date.UTC(monthDate.getUTCFullYear(), monthDate.getUTCMonth() + amount, 1));
 }
 
-export function monthDays(
-  monthDate: Date,
-  timeZone: string,
-  today = new Date(),
-): CalendarDay[] {
+export function monthDays(monthDate: Date, timeZone: string, today = new Date()): CalendarDay[] {
   const range = calendarVisibleRange(monthDate, timeZone);
   const days: CalendarDay[] = [];
   const todayKey = dateKeyInTimeZone(today, timeZone);

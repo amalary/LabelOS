@@ -35,12 +35,12 @@ describe("calendar date utilities", () => {
   });
 
   it("converts visible and list ranges through timezone offsets", () => {
-    expect(calendarVisibleRange(new Date(Date.UTC(2026, 8, 1)), "America/Los_Angeles")).toMatchObject(
-      {
-        start: "2026-08-30T07:00:00.000Z",
-        end: "2026-10-04T06:59:59.000Z",
-      },
-    );
+    expect(
+      calendarVisibleRange(new Date(Date.UTC(2026, 8, 1)), "America/Los_Angeles"),
+    ).toMatchObject({
+      start: "2026-08-30T07:00:00.000Z",
+      end: "2026-10-04T06:59:59.000Z",
+    });
     expect(calendarListRange(new Date(Date.UTC(2026, 8, 1)), "America/Los_Angeles")).toEqual({
       start: "2026-09-01T07:00:00.000Z",
       end: "2026-10-01T06:59:59.000Z",

@@ -3,11 +3,7 @@
 import { useCallback, useEffect, useSyncExternalStore } from "react";
 
 export type CampaignCalendarApiErrorCode =
-  | "unauthorized"
-  | "forbidden"
-  | "not_found"
-  | "validation"
-  | "network_failure";
+  "unauthorized" | "forbidden" | "not_found" | "validation" | "network_failure";
 
 export class CampaignCalendarApiError extends Error {
   constructor(
@@ -156,7 +152,10 @@ function definedQueryEntries(options?: CampaignCalendarQueryOptions) {
 
 function normalizedEventTypes(value: string | readonly string[]): string[] {
   const values = typeof value === "string" ? value.split(",") : value;
-  return values.map((item) => item.trim()).filter(Boolean).sort();
+  return values
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .sort();
 }
 
 export function stableCampaignCalendarQueryKey(

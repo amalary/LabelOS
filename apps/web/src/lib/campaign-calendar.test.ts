@@ -136,9 +136,7 @@ describe("campaign calendar data layer", () => {
       event_types: "marketing.content.scheduled,campaign.start",
     };
 
-    expect(stableCampaignCalendarQueryKey(asArray)).toBe(
-      stableCampaignCalendarQueryKey(asString),
-    );
+    expect(stableCampaignCalendarQueryKey(asArray)).toBe(stableCampaignCalendarQueryKey(asString));
     expect(campaignCalendarQuery(asString)).toContain(
       "event_types=campaign.start&event_types=marketing.content.scheduled",
     );
