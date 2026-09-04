@@ -30,7 +30,13 @@ describe("workspace navigation visibility", () => {
         ["marketing", "analytics"],
       ),
     ).toEqual(
-      expect.arrayContaining(["Marketing", "Campaigns", "Analytics", "Analytics Settings"]),
+      expect.arrayContaining([
+        "Marketing",
+        "Campaigns",
+        "Campaign Calendar",
+        "Analytics",
+        "Analytics Settings",
+      ]),
     );
     expect(labelsFor([capabilities.marketingCampaignView], ["marketing"])).not.toContain(
       "Contracts",
