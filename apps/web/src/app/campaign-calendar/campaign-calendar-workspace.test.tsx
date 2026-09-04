@@ -379,6 +379,27 @@ describe("CampaignCalendarWorkspace", () => {
     );
   });
 
+  it("keeps filters stable across view changes and uses backend status values", () => {
+    render(<CampaignCalendarWorkspace />);
+
+    fireEvent.change(screen.getByLabelText("Status"), { target: { value: "planning" } });
+    fireEvent.change(screen.getByLabelText("Event type"), {
+      target: { value: "campaign.milestone.target" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "List" }));
+    fireEvent.click(screen.getByRole("button", { name: "Month" }));
+
+    expect(screen.getByLabelText("Status")).toHaveValue("planning");
+    expect(screen.getByLabelText("Event type")).toHaveValue("campaign.milestone.target");
+    expect(campaignCalendar.useCampaignCalendar).toHaveBeenLastCalledWith(
+      "workspace_01",
+      expect.objectContaining({
+        event_types: "campaign.milestone.target",
+        status: "planning",
+      }),
+    );
+  });
+
   it("requires campaign and marketing content view access", () => {
     mockWorkspaceProfile(["marketing.campaign.view"]);
 
@@ -423,5 +444,13 @@ describe("CampaignCalendarWorkspace", () => {
     expect(campaignCalendarEventHref(event({ url: "/marketing?campaignId=campaign_01" }))).toBe(
       "/marketing?campaignId=campaign_01",
     );
+  });
+
+  it("does not expose calendar editing controls", () => {
+    render(<CampaignCalendarWorkspace />);
+
+    expect(screen.queryByRole("button", { name: /Create/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Save/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
   });
 });

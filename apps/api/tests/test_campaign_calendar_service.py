@@ -160,11 +160,15 @@ def _query(**overrides: object) -> CampaignCalendarEventQuery:
 def test_campaign_calendar_service_authorization_requires_campaign_and_content_view(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    async def run() -> tuple[int, str]:
+    async def run() -> tuple[int, str, str, str]:
         async with sessionmaker() as session:
             data = await _seed_workspace_graph(session)
             workspace = data["workspace"]
+            campaign = data["campaign"]
+            other_campaign = data["other_campaign"]
             assert isinstance(workspace, Organization)
+            assert isinstance(campaign, Campaign)
+            assert isinstance(other_campaign, Campaign)
             allowed = await _seed_actor(
                 session,
                 workspace,
@@ -180,6 +184,12 @@ def test_campaign_calendar_service_authorization_requires_campaign_and_content_v
                 email="campaign-only@example.com",
                 capabilities=(Capability.marketing_campaign_view.value,),
             )
+            missing_campaign = await _seed_actor(
+                session,
+                workspace,
+                email="content-only@example.com",
+                capabilities=(Capability.marketing_content_view.value,),
+            )
 
             page = await list_campaign_calendar_events(
                 session,
@@ -194,12 +204,35 @@ def test_campaign_calendar_service_authorization_requires_campaign_and_content_v
                     actor=missing_content,
                     query=_query(),
                 )
-            return page.total, exc_info.value.reason
+            with pytest.raises(CampaignCalendarAuthorizationError) as campaign_exc:
+                await list_campaign_calendar_events(
+                    session,
+                    workspace.id,
+                    actor=missing_campaign,
+                    query=_query(),
+                )
+            with pytest.raises(CampaignCalendarAuthorizationError) as cross_exc:
+                await list_campaign_calendar_events(
+                    session,
+                    workspace.id,
+                    actor=allowed,
+                    query=_query(campaign_id=other_campaign.id),
+                )
+            return (
+                page.total,
+                exc_info.value.reason,
+                campaign_exc.value.reason,
+                cross_exc.value.reason,
+            )
 
-    total, reason = asyncio.run(run())
+    total, missing_content_reason, missing_campaign_reason, cross_reason = asyncio.run(
+        run()
+    )
 
     assert total == 3
-    assert reason == "missing_capability"
+    assert missing_content_reason == "missing_capability"
+    assert missing_campaign_reason == "missing_capability"
+    assert cross_reason == "invalid_resource_scope"
 
 
 def test_campaign_calendar_service_normalizes_ids_all_day_timezone_and_sorting(
@@ -579,3 +612,312 @@ def test_campaign_calendar_service_timed_events_use_inclusive_aware_range(
             return [event.title for event in page.events]
 
     assert asyncio.run(run()) == ["Boundary Clip"]
+
+
+def test_campaign_calendar_service_projects_parent_and_channel_schedule_cases(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async def run() -> list[tuple[str, str, str | None]]:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            campaign = data["campaign"]
+            assert isinstance(workspace, Organization)
+            assert isinstance(campaign, Campaign)
+            same_timestamp = datetime(2026, 9, 15, 16, tzinfo=UTC)
+            items = [
+                MarketingContentItem(
+                    organization=workspace,
+                    campaign=campaign,
+                    title="Parent Only",
+                    content_type="video",
+                    scheduled_at=datetime(2026, 9, 15, 10, tzinfo=UTC),
+                ),
+                MarketingContentItem(
+                    organization=workspace,
+                    campaign=campaign,
+                    title="Channel Only",
+                    content_type="video",
+                    channels=[
+                        MarketingContentItemChannel(
+                            channel="instagram",
+                            placement="reel",
+                            scheduled_at=datetime(2026, 9, 15, 11, tzinfo=UTC),
+                        )
+                    ],
+                ),
+                MarketingContentItem(
+                    organization=workspace,
+                    campaign=campaign,
+                    title="Same Timestamp",
+                    content_type="video",
+                    scheduled_at=same_timestamp,
+                    channels=[
+                        MarketingContentItemChannel(
+                            channel="tiktok",
+                            placement="feed",
+                            scheduled_at=same_timestamp,
+                        )
+                    ],
+                ),
+                MarketingContentItem(
+                    organization=workspace,
+                    campaign=campaign,
+                    title="Different Timestamp",
+                    content_type="video",
+                    scheduled_at=datetime(2026, 9, 15, 17, tzinfo=UTC),
+                    channels=[
+                        MarketingContentItemChannel(
+                            channel="youtube",
+                            placement="shorts",
+                            scheduled_at=datetime(2026, 9, 15, 18, tzinfo=UTC),
+                        )
+                    ],
+                ),
+                MarketingContentItem(
+                    organization=workspace,
+                    campaign=campaign,
+                    title="Multiple Channels",
+                    content_type="video",
+                    channels=[
+                        MarketingContentItemChannel(
+                            channel="email",
+                            placement="newsletter",
+                            scheduled_at=datetime(2026, 9, 15, 19, tzinfo=UTC),
+                        ),
+                        MarketingContentItemChannel(
+                            channel="sms",
+                            placement="blast",
+                            scheduled_at=datetime(2026, 9, 15, 20, tzinfo=UTC),
+                        ),
+                    ],
+                ),
+            ]
+            session.add_all(items)
+            await session.flush()
+
+            page = await list_campaign_calendar_events(
+                session,
+                workspace.id,
+                query=_query(
+                    start=datetime(2026, 9, 15, 0, 0, tzinfo=UTC),
+                    end=datetime(2026, 9, 15, 23, 59, tzinfo=UTC),
+                    timezone="UTC",
+                    event_types=(
+                        campaign_calendar.MARKETING_CONTENT_SCHEDULED,
+                        campaign_calendar.MARKETING_CONTENT_CHANNEL_SCHEDULED,
+                    ),
+                ),
+            )
+            return [
+                (
+                    event.title,
+                    event.event_type,
+                    event.channel.channel if event.channel else None,
+                )
+                for event in page.events
+            ]
+
+    assert asyncio.run(run()) == [
+        ("Parent Only", campaign_calendar.MARKETING_CONTENT_SCHEDULED, None),
+        (
+            "Channel Only - instagram",
+            campaign_calendar.MARKETING_CONTENT_CHANNEL_SCHEDULED,
+            "instagram",
+        ),
+        (
+            "Same Timestamp - tiktok",
+            campaign_calendar.MARKETING_CONTENT_CHANNEL_SCHEDULED,
+            "tiktok",
+        ),
+        ("Same Timestamp", campaign_calendar.MARKETING_CONTENT_SCHEDULED, None),
+        ("Different Timestamp", campaign_calendar.MARKETING_CONTENT_SCHEDULED, None),
+        (
+            "Different Timestamp - youtube",
+            campaign_calendar.MARKETING_CONTENT_CHANNEL_SCHEDULED,
+            "youtube",
+        ),
+        (
+            "Multiple Channels - email",
+            campaign_calendar.MARKETING_CONTENT_CHANNEL_SCHEDULED,
+            "email",
+        ),
+        (
+            "Multiple Channels - sms",
+            campaign_calendar.MARKETING_CONTENT_CHANNEL_SCHEDULED,
+            "sms",
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("timezone_name", "starts_at", "expected_date"),
+    [
+        ("UTC", datetime(2026, 3, 8, 0, 30, tzinfo=UTC), "2026-03-08"),
+        (
+            "America/Los_Angeles",
+            datetime(2026, 3, 8, 7, 30, tzinfo=UTC),
+            "2026-03-07",
+        ),
+        (
+            "America/New_York",
+            datetime(2026, 3, 8, 4, 30, tzinfo=UTC),
+            "2026-03-07",
+        ),
+    ],
+)
+def test_campaign_calendar_service_timezone_projection_and_dst_boundaries(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    timezone_name: str,
+    starts_at: datetime,
+    expected_date: str,
+) -> None:
+    async def run() -> dict[str, str | bool | None]:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            assert isinstance(workspace, Organization)
+            campaign = Campaign(
+                name=f"DST Campaign {timezone_name}",
+                organization=workspace,
+                start_date=date(2026, 3, 8),
+                status=CampaignStatus.active,
+            )
+            item = MarketingContentItem(
+                organization=workspace,
+                campaign=campaign,
+                title=f"DST Timed {timezone_name}",
+                content_type="video",
+                scheduled_at=starts_at,
+            )
+            session.add_all([campaign, item])
+            await session.flush()
+
+            page = await list_campaign_calendar_events(
+                session,
+                workspace.id,
+                query=CampaignCalendarEventQuery(
+                    start=datetime(2026, 3, 7, 0, 0, tzinfo=UTC),
+                    end=datetime(2026, 3, 8, 23, 59, tzinfo=UTC),
+                    timezone=timezone_name,
+                    campaign_id=campaign.id,
+                    event_types=(
+                        campaign_calendar.CAMPAIGN_START,
+                        campaign_calendar.MARKETING_CONTENT_SCHEDULED,
+                    ),
+                ),
+            )
+            events = {event.event_type: event for event in page.events}
+            return {
+                "campaign_date": events[campaign_calendar.CAMPAIGN_START].date,
+                "campaign_all_day": events[
+                    campaign_calendar.CAMPAIGN_START
+                ].all_day,
+                "timed_date": events[
+                    campaign_calendar.MARKETING_CONTENT_SCHEDULED
+                ].starts_at[:10],
+            }
+
+    assert asyncio.run(run()) == {
+        "campaign_date": "2026-03-08",
+        "campaign_all_day": True,
+        "timed_date": expected_date,
+    }
+
+
+def test_campaign_calendar_service_includes_late_local_month_boundary_event(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async def run() -> list[str]:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            campaign = data["campaign"]
+            assert isinstance(workspace, Organization)
+            assert isinstance(campaign, Campaign)
+            session.add(
+                MarketingContentItem(
+                    organization=workspace,
+                    campaign=campaign,
+                    title="Late Month Boundary",
+                    content_type="video",
+                    scheduled_at=datetime(2026, 10, 4, 6, 30, tzinfo=UTC),
+                )
+            )
+            await session.flush()
+
+            page = await list_campaign_calendar_events(
+                session,
+                workspace.id,
+                query=CampaignCalendarEventQuery(
+                    start=datetime(2026, 8, 30, 7, 0, tzinfo=UTC),
+                    end=datetime(2026, 10, 4, 6, 59, 59, tzinfo=UTC),
+                    timezone="America/Los_Angeles",
+                    event_types=(campaign_calendar.MARKETING_CONTENT_SCHEDULED,),
+                ),
+            )
+            return [event.title for event in page.events]
+
+    assert asyncio.run(run()) == ["Late Month Boundary"]
+
+
+def test_campaign_calendar_service_approval_completed_uses_queue_terminal_state(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async def run() -> list[str]:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            campaign = data["campaign"]
+            assert isinstance(workspace, Organization)
+            assert isinstance(campaign, Campaign)
+            stale_projection = MarketingContentItem(
+                organization=workspace,
+                campaign=campaign,
+                title="Stale Item Projection",
+                content_type="image",
+                status=MarketingContentItemStatus.in_review,
+                approved_at=datetime(2026, 9, 14, 12, tzinfo=UTC),
+            )
+            approved = MarketingContentItem(
+                organization=workspace,
+                campaign=campaign,
+                title="Queue Approved",
+                content_type="image",
+                status=MarketingContentItemStatus.approved,
+                approved_at=datetime(2026, 9, 14, 12, tzinfo=UTC),
+                approved_revision=1,
+            )
+            session.add_all([stale_projection, approved])
+            await session.flush()
+            stale_projection.approval_request = ApprovalRequest(
+                organization=workspace,
+                resource_type=MARKETING_CONTENT_ITEM_RESOURCE_TYPE,
+                resource_id=stale_projection.id,
+                resource_revision=stale_projection.content_revision,
+                title="Review Stale Item Projection",
+                status=ApprovalRequestStatus.in_review,
+                submitted_at=datetime(2026, 9, 14, 10, tzinfo=UTC),
+            )
+            approved.approval_request = ApprovalRequest(
+                organization=workspace,
+                resource_type=MARKETING_CONTENT_ITEM_RESOURCE_TYPE,
+                resource_id=approved.id,
+                resource_revision=approved.content_revision,
+                title="Review Queue Approved",
+                status=ApprovalRequestStatus.approved,
+                submitted_at=datetime(2026, 9, 14, 10, tzinfo=UTC),
+                resolved_at=datetime(2026, 9, 14, 13, tzinfo=UTC),
+            )
+            await session.flush()
+
+            page = await list_campaign_calendar_events(
+                session,
+                workspace.id,
+                query=_query(
+                    event_types=(campaign_calendar.MARKETING_CONTENT_APPROVED,)
+                ),
+            )
+            return [event.title for event in page.events]
+
+    assert asyncio.run(run()) == ["Queue Approved"]

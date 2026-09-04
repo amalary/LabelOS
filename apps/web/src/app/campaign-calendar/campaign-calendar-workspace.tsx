@@ -54,7 +54,7 @@ const eventTypeOptions: Array<{ label: string; value: CampaignCalendarEventType 
 
 const statusOptions = [
   "active",
-  "planned",
+  "planning",
   "completed",
   "draft",
   "in_review",

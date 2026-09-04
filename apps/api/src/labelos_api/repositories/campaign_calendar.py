@@ -664,12 +664,12 @@ def _approval_requested_at(item: MarketingContentItem) -> datetime | None:
 
 
 def _approved_at(item: MarketingContentItem) -> datetime | None:
-    if item.approved_at is not None:
-        return item.approved_at
     request = item.approval_request
-    if request is not None and request.status == ApprovalRequestStatus.approved:
-        return request.resolved_at
-    return None
+    if request is not None:
+        if request.status == ApprovalRequestStatus.approved:
+            return request.resolved_at
+        return None
+    return item.approved_at
 
 
 def _campaign_projectable(

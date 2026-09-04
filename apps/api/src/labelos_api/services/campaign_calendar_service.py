@@ -141,8 +141,6 @@ async def list_campaign_calendar_events(
         campaign_id=query.campaign_id,
     )
 
-    local_start = query.start.astimezone(timezone)
-    local_end = query.end.astimezone(timezone)
     repository_events = await campaign_calendar.list_events(
         session,
         workspace_id,
@@ -152,8 +150,8 @@ async def list_campaign_calendar_events(
             release_id=query.release_id,
             event_types=query.event_types,
             statuses=query.statuses,
-            range_start=local_start.date(),
-            range_end=local_end.date(),
+            range_start=query.start,
+            range_end=query.end,
             include_archived=query.include_archived,
             include_published=query.include_published,
         ),
