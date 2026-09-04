@@ -75,6 +75,7 @@ class CampaignCalendarEvent:
     channel: str | None = None
     placement: str | None = None
     approval_request_id: UUID | None = None
+    approval_request: ApprovalRequest | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -127,7 +128,9 @@ def _content_load_options():
         .selectinload(CampaignRelease.release),
         selectinload(MarketingContentItem.artist),
         selectinload(MarketingContentItem.release),
-        selectinload(MarketingContentItem.approval_request),
+        selectinload(MarketingContentItem.approval_request).selectinload(
+            ApprovalRequest.stages
+        ),
     )
 
 
@@ -595,6 +598,7 @@ def _content_event(
         content_item_id=item.id,
         content_item_title=item.title,
         approval_request_id=approval_request_id,
+        approval_request=item.approval_request,
     )
 
 
