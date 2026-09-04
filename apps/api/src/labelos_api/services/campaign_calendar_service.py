@@ -22,7 +22,7 @@ from labelos_api.repositories.approval_resources import (
 )
 from labelos_api.services import approval_service
 
-MAX_CAMPAIGN_CALENDAR_LIMIT = 500
+MAX_CAMPAIGN_CALENDAR_LIMIT = 1000
 
 
 class CampaignCalendarServiceError(ValueError):
@@ -193,9 +193,7 @@ async def _require_unified_calendar_capabilities(
         return
     resource = AuthorizationResource(
         kind=(
-            ResourceKind.campaign
-            if campaign_id is not None
-            else ResourceKind.workspace
+            ResourceKind.campaign if campaign_id is not None else ResourceKind.workspace
         ),
         id=campaign_id or workspace_id,
         workspace_id=workspace_id,
@@ -234,7 +232,7 @@ def _validate_query(query: CampaignCalendarEventQuery) -> ZoneInfo:
 def _validate_pagination(*, limit: int, offset: int) -> None:
     if limit < 1 or limit > MAX_CAMPAIGN_CALENDAR_LIMIT:
         raise CampaignCalendarValidationError(
-            "Campaign calendar limit must be between 1 and 500"
+            "Campaign calendar limit must be between 1 and 1000"
         )
     if offset < 0:
         raise CampaignCalendarValidationError(
@@ -312,9 +310,11 @@ def _normalized_event_in_range(
         if event.date is None:
             return False
         event_date = date.fromisoformat(event.date)
-        return start.astimezone(timezone).date() <= event_date <= end.astimezone(
-            timezone
-        ).date()
+        return (
+            start.astimezone(timezone).date()
+            <= event_date
+            <= end.astimezone(timezone).date()
+        )
     starts_at = datetime.fromisoformat(event.starts_at)
     starts_at_utc = starts_at.astimezone(UTC)
     return start.astimezone(UTC) <= starts_at_utc <= end.astimezone(UTC)
@@ -359,9 +359,7 @@ def _release_context(
         artist_id=(
             str(event.release_artist_id)
             if event.release_artist_id is not None
-            else str(event.artist_id)
-            if event.artist_id is not None
-            else None
+            else str(event.artist_id) if event.artist_id is not None else None
         ),
     )
 
