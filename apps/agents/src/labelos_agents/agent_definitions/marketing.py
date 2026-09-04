@@ -1,6 +1,11 @@
 from labelos_agents.agent_definitions.base import BaseAgent
 from labelos_agents.agent_definitions.common import build_mock_result
-from labelos_agents.contracts import AgentIdentity, AgentResult, AgentTask
+from labelos_agents.contracts import (
+    AgentIdentity,
+    AgentResult,
+    AgentTask,
+    MarketingApprovalAgentAction,
+)
 
 
 class MarketingAgent(BaseAgent):
@@ -19,7 +24,10 @@ class MarketingAgent(BaseAgent):
             output={
                 "channels": ["owned social", "email", "short-form video"],
                 "message": f"Placeholder campaign message for {audience}.",
-                "next_step": "Route campaign copy through marketing approval.",
+                "allowed_approval_actions": [
+                    action.value for action in MarketingApprovalAgentAction
+                ],
+                "next_step": "Route campaign copy through human approval.",
             },
             confidence_value=0.4,
             evidence_label="Mock marketing fixture",

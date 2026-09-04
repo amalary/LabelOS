@@ -425,6 +425,60 @@ describe("useOrganizationRealtime", () => {
     expect(screen.getByText("approval.updated")).toBeInTheDocument();
   });
 
+  it("refreshes marketing calendar data locally for approval updates with content context", async () => {
+    routeState.pathname = "/marketing";
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(
+        Response.json({
+          marketing_content: [],
+          total: 1,
+          limit: 100,
+          offset: 0,
+        }),
+      )
+      .mockResolvedValueOnce(
+        Response.json({
+          marketing_content: [],
+          total: 2,
+          limit: 100,
+          offset: 0,
+        }),
+      );
+    render(<RealtimeMarketingContentProbe />);
+    const source = FakeEventSource.instances[0]!;
+
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+    act(() => {
+      source.emit("message", {
+        id: "approval_event_marketing_01",
+        type: "approval.updated",
+        version: 1,
+        channel: "organization:org_01",
+        organization_id: "org_01",
+        entity_type: "approval_request",
+        entity_id: "approval_01",
+        operation_id: "operation_approval_marketing_01",
+        actor: { user_id: "user_01", display_name: "Mara Chen" },
+        payload: {
+          approvalRequestId: "approval_01",
+          contentItemId: "content_01",
+          campaignId: "campaign_01",
+          status: "changes_requested",
+          eventAction: "changes_requested",
+        },
+        created_at: new Date().toISOString(),
+      });
+    });
+
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+    expect(fetch).toHaveBeenLastCalledWith(
+      "/api/workspaces/org_01/marketing-content?start=2026-09-01T00%3A00%3A00Z&end=2026-09-30T23%3A59%3A59Z",
+      expect.any(Object),
+    );
+    expect(navigation.refresh).not.toHaveBeenCalled();
+    expect(screen.getByText("approval.updated")).toBeInTheDocument();
+  });
+
   it("ignores events for a different organization", () => {
     render(<RealtimeProbe />);
     const source = FakeEventSource.instances[0]!;

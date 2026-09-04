@@ -471,7 +471,9 @@ async def _publish_approval_event(
     stage: ApprovalRequestStage | None,
     actor: AuthorizationActorInput | None,
     resource: object | None,
+    event_action: ApprovalDecisionValue | str,
 ) -> None:
+    timestamp = _now()
     payload = {
         "approvalRequestId": str(request.id),
         "resourceType": request.resource_type,
@@ -480,6 +482,12 @@ async def _publish_approval_event(
         "status": request.status.value,
         "stageStatus": stage.status.value if stage is not None else None,
         "actorKind": _actor_kind(actor),
+        "eventAction": (
+            event_action.value
+            if isinstance(event_action, ApprovalDecisionValue)
+            else str(event_action)
+        ),
+        "timestamp": timestamp.isoformat(),
     }
     if isinstance(resource, MarketingContentItem):
         payload["contentItemId"] = str(resource.id)
@@ -541,6 +549,7 @@ async def submit_resource_for_approval(
     actor: AuthorizationActorInput | None = None,
     summary: str | None = None,
     metadata_json: dict | None = None,
+    expected_resource_revision: int | None = None,
 ) -> ApprovalRequest:
     adapter, resource = await _load_resource(
         session,
@@ -564,6 +573,13 @@ async def submit_resource_for_approval(
     )
     submitted_at = _now()
     revision = adapter.current_revision(resource)
+    if (
+        expected_resource_revision is not None
+        and expected_resource_revision != revision
+    ):
+        raise ApprovalStaleResourceRevisionError(
+            "Approval submission no longer matches the current resource revision"
+        )
     existing = await approvals.find_active_request_for_resource_revision(
         session,
         workspace_id,
@@ -631,6 +647,7 @@ async def submit_resource_for_approval(
         stage=stage,
         actor=actor,
         resource=resource,
+        event_action=ApprovalDecisionValue.submitted,
     )
     await session.commit()
     return await _load_request(
@@ -875,6 +892,7 @@ async def assign_stage_reviewer(
         stage=stage,
         actor=actor,
         resource=resource,
+        event_action="assigned",
     )
     await session.commit()
     return await _load_request(
@@ -1034,6 +1052,7 @@ async def _human_stage_decision(
         stage=stage,
         actor=actor,
         resource=resource,
+        event_action=decision,
     )
     await session.commit()
     return await _load_request(
@@ -1163,6 +1182,7 @@ async def _system_or_submitter_resolution(
         stage=stage,
         actor=actor,
         resource=resource,
+        event_action=decision,
     )
     await session.commit()
     return await _load_request(
@@ -1181,6 +1201,7 @@ async def resubmit_resource(
     previous_approval_request_id: UUID,
     actor: AuthorizationActorInput | None = None,
     summary: str | None = None,
+    expected_resource_revision: int | None = None,
 ) -> ApprovalRequest:
     previous = await _load_request(
         session,
@@ -1198,6 +1219,13 @@ async def resubmit_resource(
             "Previous approval request does not belong to resource"
         )
     current_revision = adapter.current_revision(resource)
+    if (
+        expected_resource_revision is not None
+        and expected_resource_revision != current_revision
+    ):
+        raise ApprovalStaleResourceRevisionError(
+            "Approval resubmission no longer matches the current resource revision"
+        )
     if current_revision <= previous.resource_revision:
         raise ApprovalStaleResourceRevisionError(
             "Resubmission must target a newer resource revision"
@@ -1227,6 +1255,15 @@ async def resubmit_resource(
         actor_profile_id=actor_profile_id,
         reason=summary,
         payload={"previousApprovalRequestId": str(previous.id)},
+    )
+    await _publish_approval_event(
+        session,
+        workspace_id=workspace_id,
+        request=new_request,
+        stage=_current_stage(new_request),
+        actor=actor,
+        resource=resource,
+        event_action=ApprovalDecisionValue.resubmitted,
     )
     await session.commit()
     return await _load_request(
@@ -1316,5 +1353,6 @@ async def record_current_approval_invalidated(
         stage=stage,
         actor=actor,
         resource=resource,
+        event_action=ApprovalDecisionValue.invalidated,
     )
     return request

@@ -61,7 +61,7 @@ export type ApprovalStage = {
 export type ApprovalDecision = {
   id: string;
   stage_id: string | null;
-  decision: ApprovalAction | "submitted" | "assigned" | "invalidated";
+  decision: ApprovalAction | "submitted" | "assigned" | "resubmitted" | "invalidated";
   decided_by_user_id: string | null;
   decided_by_profile_id: string | null;
   actor_kind: string;
@@ -279,10 +279,15 @@ function toApprovalApiError(status: number, detail?: string | null): ApprovalApi
     return new ApprovalApiError("not_found", "Approval request was not found.", status);
   }
   if (status === 422) {
-    return new ApprovalApiError("validation", detail || "Approval request has validation errors.", status);
+    return new ApprovalApiError(
+      "validation",
+      detail || "Approval request has validation errors.",
+      status,
+    );
   }
   if (status === 409) {
-    const stale = detail?.toLowerCase().includes("stale") || detail?.toLowerCase().includes("revision");
+    const stale =
+      detail?.toLowerCase().includes("stale") || detail?.toLowerCase().includes("revision");
     return new ApprovalApiError(
       stale ? "stale_revision" : "conflict",
       detail || "Approval request could not be changed.",
@@ -290,7 +295,11 @@ function toApprovalApiError(status: number, detail?: string | null): ApprovalApi
     );
   }
   if (status === 400) {
-    return new ApprovalApiError("conflict", detail || "Approval request could not be changed.", status);
+    return new ApprovalApiError(
+      "conflict",
+      detail || "Approval request could not be changed.",
+      status,
+    );
   }
   return new ApprovalApiError("network_failure", "Approvals could not be loaded.", status);
 }
@@ -743,7 +752,10 @@ export function useApprovalQueue(
   options?: ApprovalListOptions,
 ): ApprovalResourceState<ApprovalRequestList> {
   const key = workspaceId ? approvalQueryKeys.workspaceList(workspaceId, options) : null;
-  const fetcher = useCallback(() => listApprovals(workspaceId ?? "", options), [options, workspaceId]);
+  const fetcher = useCallback(
+    () => listApprovals(workspaceId ?? "", options),
+    [options, workspaceId],
+  );
   return useApprovalResource(key, workspaceId ? fetcher : null);
 }
 
@@ -752,7 +764,9 @@ export function useApprovalRequest(
   approvalRequestId: string | null,
 ): ApprovalResourceState<ApprovalRequestDetail> {
   const key =
-    workspaceId && approvalRequestId ? approvalQueryKeys.detail(workspaceId, approvalRequestId) : null;
+    workspaceId && approvalRequestId
+      ? approvalQueryKeys.detail(workspaceId, approvalRequestId)
+      : null;
   const fetcher = useCallback(
     () => getApprovalRequest(workspaceId ?? "", approvalRequestId ?? ""),
     [approvalRequestId, workspaceId],

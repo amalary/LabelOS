@@ -1063,7 +1063,7 @@ def test_approval_queue_decisions_and_idempotency(
         SeededMarketingContentApi,
     ],
 ) -> None:
-    client, _sessionmaker, seeded = marketing_content_client
+    client, sessionmaker, seeded = marketing_content_client
 
     def submit(title: str) -> str:
         _set_context(client, seeded)
@@ -1105,6 +1105,22 @@ def test_approval_queue_decisions_and_idempotency(
     assert approved.status_code == 200
     assert repeated.status_code == 200
     assert duplicate_action.status_code == 409
+
+    async def approved_event_count() -> int:
+        async with sessionmaker() as session:
+            payloads = (
+                await session.scalars(
+                    select(RealtimeEvent.payload)
+                    .where(RealtimeEvent.organization_id == seeded.workspace_id)
+                    .where(RealtimeEvent.entity_id == approved_id)
+                    .where(RealtimeEvent.event_type == "approval.updated")
+                )
+            ).all()
+            return sum(
+                1 for payload in payloads if payload.get("eventAction") == "approved"
+            )
+
+    assert asyncio.run(approved_event_count()) == 1
 
     rejected_id = submit("Reject")
     reviewer()

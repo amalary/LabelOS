@@ -315,7 +315,9 @@ export function useOrganizationRealtime(organizationId: string | null): Organiza
               campaignId:
                 typeof event.payload.campaignId === "string" ? event.payload.campaignId : null,
               contentItemId:
-                typeof event.payload.contentItemId === "string" ? event.payload.contentItemId : null,
+                typeof event.payload.contentItemId === "string"
+                  ? event.payload.contentItemId
+                  : null,
               workspaceId: organizationId,
             });
           }
@@ -345,7 +347,11 @@ export function useOrganizationRealtime(organizationId: string | null): Organiza
           const isAnalyticsWorkspaceRefresh =
             pathname.startsWith("/analytics") && event.type.startsWith(analyticsEventPrefix);
           const isMarketingContentWorkspaceRefresh =
-            pathname.startsWith("/marketing") && event.type.startsWith(marketingContentEventPrefix);
+            pathname.startsWith("/marketing") &&
+            (event.type.startsWith(marketingContentEventPrefix) ||
+              (event.type.startsWith(approvalEventPrefix) &&
+                (typeof event.payload.campaignId === "string" ||
+                  typeof event.payload.contentItemId === "string")));
           const isApprovalWorkspaceRefresh =
             pathname.startsWith("/approvals") && event.type.startsWith(approvalEventPrefix);
           if (

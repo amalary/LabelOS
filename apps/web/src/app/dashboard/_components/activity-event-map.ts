@@ -45,6 +45,58 @@ function humanizeType(type: string) {
   return type.replace(/[._-]+/g, " ").replace(/\b\w/g, (character) => character.toUpperCase());
 }
 
+function approvalActivityCopy(event: ActivityEvent) {
+  const action = textValue(event.payload, ["eventAction"], "");
+  const title = entityName(event, "Approval");
+  switch (action) {
+    case "submitted":
+      return {
+        title: "Submitted for approval",
+        description: `${title} was submitted for human review`,
+      };
+    case "assigned":
+      return {
+        title: "Assigned for review",
+        description: `${title} was assigned for review`,
+      };
+    case "approved":
+      return {
+        title: "Approved",
+        description: `${title} was approved`,
+      };
+    case "changes_requested":
+      return {
+        title: "Changes requested",
+        description: `${title} needs changes before approval`,
+      };
+    case "rejected":
+      return {
+        title: "Rejected",
+        description: `${title} was rejected`,
+      };
+    case "cancelled":
+      return {
+        title: "Cancelled",
+        description: `${title} approval was cancelled`,
+      };
+    case "resubmitted":
+      return {
+        title: "Resubmitted for approval",
+        description: `${title} was resubmitted for human review`,
+      };
+    case "invalidated":
+      return {
+        title: "Approval invalidated",
+        description: `${title} approval was invalidated by content changes`,
+      };
+    default:
+      return {
+        title: "Approval updated",
+        description: `${title} was updated`,
+      };
+  }
+}
+
 export function formatActivityTimestamp(createdAt: string, now: Date = new Date()) {
   const created = new Date(createdAt);
 
@@ -286,8 +338,7 @@ const activityEventMappers: Partial<Record<ActivityEventType, ActivityEventMappe
     tone: "campaign",
   }),
   "approval.updated": (event) => ({
-    title: "Approval updated",
-    description: `${entityName(event, "An approval")} was updated`,
+    ...approvalActivityCopy(event),
     tone: "approval",
   }),
   "agent.started": (event) => ({

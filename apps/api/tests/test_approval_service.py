@@ -54,7 +54,11 @@ from labelos_api.services.approval_service import (
     submit_resource_for_approval,
 )
 from labelos_api.services.marketing_content_service import (
+    MarketingContentLifecycleError,
+    MarketingContentItemCreate,
     MarketingContentItemUpdate,
+    create_content_item,
+    transition_status,
     update_content_item,
 )
 
@@ -75,6 +79,23 @@ class ApprovalServiceSeed:
     submitter_profile_id: UUID
     reviewer_profile_id: UUID
     other_workspace_profile_id: UUID
+
+
+@dataclass(frozen=True)
+class AgentActor:
+    user: User
+    authorization_actor: AuthorizationActor
+
+
+def _agent_actor(user: User, *, execution_id: str = "exec_approval_test") -> AgentActor:
+    return AgentActor(
+        user=user,
+        authorization_actor=AuthorizationActor(
+            kind=ActorKind.ai_agent,
+            subject=f"agent:marketing:{execution_id}",
+            user_id=user.id,
+        ),
+    )
 
 
 @pytest.fixture
@@ -163,6 +184,8 @@ async def _seed(session: AsyncSession) -> ApprovalServiceSeed:
         email=f"submitter-{uuid4().hex}@example.com",
         capabilities=(
             Capability.marketing_content_submit_for_review.value,
+            Capability.marketing_content_view.value,
+            Capability.marketing_content_create.value,
             Capability.marketing_content_edit.value,
             Capability.marketing_content_approve.value,
         ),
@@ -359,9 +382,9 @@ def test_approval_service_approve_request_resolves_stage_request_and_projection(
 def test_approval_service_request_changes_reject_cancel_and_invalidate_are_distinct(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    async def run() -> tuple[
-        tuple[str, str, str], tuple[str, str, str], tuple[str, str, str]
-    ]:
+    async def run() -> (
+        tuple[tuple[str, str, str], tuple[str, str, str], tuple[str, str, str]]
+    ):
         async with sessionmaker() as session:
             seed = await _seed(session)
             changes = await _submit(session, seed)
@@ -482,10 +505,6 @@ def test_approval_service_request_changes_reject_cancel_and_invalidate_are_disti
 def test_approval_service_denies_invalid_actor_and_resource_boundaries(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    @dataclass(frozen=True)
-    class AgentActor:
-        authorization_actor: AuthorizationActor
-
     async def run() -> dict[str, bool]:
         async with sessionmaker() as session:
             seed = await _seed(session)
@@ -540,12 +559,7 @@ def test_approval_service_denies_invalid_actor_and_resource_boundaries(
                 )
             result["self_approval"] = True
 
-            agent = AgentActor(
-                authorization_actor=AuthorizationActor(
-                    kind=ActorKind.ai_agent,
-                    subject="agent:copy-review",
-                )
-            )
+            agent = _agent_actor(seed.reviewer, execution_id="copy-review")
             with pytest.raises(ApprovalAgentDecisionDeniedError):
                 await approve_request(
                     session,
@@ -648,12 +662,284 @@ def test_approval_service_resubmit_targets_new_revision_and_preserves_history(
     )
 
 
+def test_approval_realtime_payload_covers_lifecycle_actions_without_private_comments(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async def run() -> tuple[list[str], bool]:
+        async with sessionmaker() as session:
+            seed = await _seed(session)
+            request = await _submit(session, seed)
+            await assign_stage_reviewer(
+                session,
+                seed.organization_id,
+                request.id,
+                seed.reviewer_profile_id,
+                actor=seed.reviewer,
+            )
+            await request_changes(
+                session,
+                seed.organization_id,
+                request.id,
+                actor=seed.reviewer,
+                comment="Private change note.",
+            )
+            await update_content_item(
+                session,
+                seed.organization_id,
+                seed.content_item_id,
+                MarketingContentItemUpdate(title="Edited", material_change=True),
+                actor=seed.submitter,
+            )
+            resubmitted = await resubmit_resource(
+                session,
+                seed.organization_id,
+                MARKETING_CONTENT_ITEM_RESOURCE_TYPE,
+                seed.content_item_id,
+                previous_approval_request_id=request.id,
+                actor=seed.submitter,
+                summary="Private resubmit note.",
+            )
+            await approve_request(
+                session,
+                seed.organization_id,
+                resubmitted.id,
+                actor=seed.reviewer,
+                comment="Private approval note.",
+            )
+            await update_content_item(
+                session,
+                seed.organization_id,
+                seed.content_item_id,
+                MarketingContentItemUpdate(title="Invalidated", material_change=True),
+                actor=seed.submitter,
+            )
+
+            rejected = await submit_resource_for_approval(
+                session,
+                seed.organization_id,
+                MARKETING_CONTENT_ITEM_RESOURCE_TYPE,
+                seed.other_content_item_id,
+                actor=seed.submitter,
+            )
+            await reject_request(
+                session,
+                seed.organization_id,
+                rejected.id,
+                actor=seed.reviewer,
+                comment="Private rejection note.",
+            )
+
+            cancel_item = MarketingContentItem(
+                organization_id=seed.organization_id,
+                campaign_id=seed.campaign_id,
+                title="Cancel",
+                content_type="caption",
+                status=MarketingContentItemStatus.draft,
+            )
+            session.add(cancel_item)
+            await session.commit()
+            cancelled = await submit_resource_for_approval(
+                session,
+                seed.organization_id,
+                MARKETING_CONTENT_ITEM_RESOURCE_TYPE,
+                cancel_item.id,
+                actor=seed.submitter,
+            )
+            await cancel_request(
+                session,
+                seed.organization_id,
+                cancelled.id,
+                actor=seed.submitter,
+                reason="Private cancellation note.",
+            )
+
+            payloads = (
+                await session.scalars(
+                    select(RealtimeEvent.payload)
+                    .where(RealtimeEvent.event_type == "approval.updated")
+                    .where(RealtimeEvent.organization_id == seed.organization_id)
+                    .order_by(RealtimeEvent.created_at.asc(), RealtimeEvent.id.asc())
+                )
+            ).all()
+            required_keys = {
+                "approvalRequestId",
+                "resourceType",
+                "resourceId",
+                "resourceRevision",
+                "status",
+                "stageStatus",
+                "actorKind",
+                "eventAction",
+                "contentItemId",
+                "campaignId",
+                "timestamp",
+            }
+            safe = all(
+                required_keys <= set(payload)
+                and "reason" not in payload
+                and "comment" not in payload
+                for payload in payloads
+            )
+            return ([payload["eventAction"] for payload in payloads], safe)
+
+    actions, safe = asyncio.run(run())
+    assert {
+        "submitted",
+        "assigned",
+        "changes_requested",
+        "resubmitted",
+        "approved",
+        "invalidated",
+        "rejected",
+        "cancelled",
+    } <= set(actions)
+    assert safe is True
+
+
+def test_marketing_agent_boundary_allows_submission_revision_and_resubmission_only(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async def run() -> tuple[str, str, str, str, str, bool, bool, bool]:
+        async with sessionmaker() as session:
+            seed = await _seed(session)
+            agent = _agent_actor(seed.submitter, execution_id="exec_marketing_01")
+            item = await create_content_item(
+                session,
+                seed.organization_id,
+                MarketingContentItemCreate(
+                    campaign_id=seed.campaign_id,
+                    title="Agent Draft",
+                    content_type="caption",
+                    copy_text="Draft copy.",
+                ),
+                actor=agent,
+            )
+            request = await submit_resource_for_approval(
+                session,
+                seed.organization_id,
+                MARKETING_CONTENT_ITEM_RESOURCE_TYPE,
+                item.id,
+                actor=agent,
+                metadata_json={"agentExecutionId": "exec_marketing_01"},
+                expected_resource_revision=item.content_revision,
+            )
+            await request_changes(
+                session,
+                seed.organization_id,
+                request.id,
+                actor=seed.reviewer,
+                comment="Make the CTA clearer.",
+            )
+            changed_feedback = await get_approval_history(
+                session,
+                seed.organization_id,
+                request.id,
+                actor=agent,
+            )
+            updated = await update_content_item(
+                session,
+                seed.organization_id,
+                item.id,
+                MarketingContentItemUpdate(
+                    copy_text="Draft copy with a clearer CTA.",
+                    material_change=True,
+                ),
+                actor=agent,
+            )
+            resubmitted = await resubmit_resource(
+                session,
+                seed.organization_id,
+                MARKETING_CONTENT_ITEM_RESOURCE_TYPE,
+                item.id,
+                previous_approval_request_id=request.id,
+                actor=agent,
+                expected_resource_revision=updated.content_revision,
+                summary="Revised by agent execution exec_marketing_01.",
+            )
+            resubmitted_id = resubmitted.id
+
+            decision_denied = False
+            try:
+                await approve_request(
+                    session,
+                    seed.organization_id,
+                    resubmitted_id,
+                    actor=agent,
+                )
+            except ApprovalAgentDecisionDeniedError:
+                decision_denied = True
+
+            approved = await approve_request(
+                session,
+                seed.organization_id,
+                resubmitted_id,
+                actor=seed.reviewer,
+            )
+            scheduling_denied = False
+            try:
+                await transition_status(
+                    session,
+                    seed.organization_id,
+                    approved.resource_id,
+                    MarketingContentItemStatus.scheduled,
+                    actor=agent,
+                )
+            except MarketingContentLifecycleError:
+                scheduling_denied = True
+
+            cross_org_denied = False
+            try:
+                await submit_resource_for_approval(
+                    session,
+                    seed.other_organization_id,
+                    MARKETING_CONTENT_ITEM_RESOURCE_TYPE,
+                    item.id,
+                    actor=agent,
+                )
+            except ApprovalResourceNotFoundError:
+                cross_org_denied = True
+
+            first_decision = changed_feedback[0]
+            latest_decision = (
+                await get_approval_history(
+                    session,
+                    seed.organization_id,
+                    resubmitted_id,
+                )
+            )[0]
+            return (
+                request.submitted_by_actor_kind,
+                request.submitted_by_actor_key or "",
+                first_decision.actor_kind,
+                latest_decision.actor_key or "",
+                changed_feedback[-1].reason or "",
+                decision_denied,
+                scheduling_denied,
+                cross_org_denied,
+            )
+
+    assert asyncio.run(run()) == (
+        "ai_agent",
+        "agent:marketing:exec_marketing_01",
+        "ai_agent",
+        "agent:marketing:exec_marketing_01",
+        "Make the CTA clearer.",
+        True,
+        True,
+        True,
+    )
+
+
 def test_approval_service_rolls_back_transition_stage_decision_projection_and_event(
     sessionmaker: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def run() -> tuple[
-        ApprovalRequestStatus, ApprovalStageStatus, MarketingContentItemStatus, int, int
+        ApprovalRequestStatus,
+        ApprovalStageStatus,
+        MarketingContentItemStatus,
+        int,
+        int,
     ]:
         async with sessionmaker() as session:
             seed = await _seed(session)

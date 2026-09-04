@@ -14,6 +14,7 @@ from labelos_database.models import (
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from labelos_api.authorization import (
+    ActorKind,
     AuthorizationActorInput,
     AuthorizationResource,
     Capability,
@@ -359,6 +360,14 @@ def _actor_user(actor: AuthorizationActorInput | None) -> User | None:
         return actor
     user = getattr(actor, "user", None)
     return user if isinstance(user, User) else None
+
+
+def _actor_kind(actor: AuthorizationActorInput | None) -> str:
+    actor_ref = getattr(actor, "authorization_actor", None)
+    kind = getattr(actor_ref, "kind", None)
+    if kind is not None:
+        return str(kind.value if isinstance(kind, ActorKind) else kind)
+    return "user"
 
 
 def _status_value(status: MarketingContentItemStatus | str) -> str:
@@ -1230,6 +1239,13 @@ async def transition_status(
         capability=_capability_for_status_transition(next_status),
         campaign_id=item.campaign_id,
     )
+    if _actor_kind(actor) == ActorKind.ai_agent.value and next_status in {
+        MarketingContentItemStatus.scheduled,
+        MarketingContentItemStatus.published,
+    }:
+        raise MarketingContentLifecycleError(
+            "AI agents cannot schedule or publish marketing content"
+        )
     if next_status == MarketingContentItemStatus.scheduled:
         _assert_can_schedule(item)
         if not await _has_completed_approval_for_current_revision(
