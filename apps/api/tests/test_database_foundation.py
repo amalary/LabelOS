@@ -1,6 +1,6 @@
 from datetime import date
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from labelos_database.bootstrap import seed_system_roles_and_capabilities
@@ -23,6 +23,12 @@ from labelos_database.models import (
     AnalyticsMetricValueType,
     AnalyticsObservation,
     AnalyticsProvider,
+    ApprovalDecision,
+    ApprovalDecisionValue,
+    ApprovalRequest,
+    ApprovalRequestStage,
+    ApprovalRequestStatus,
+    ApprovalStageStatus,
     Artist,
     ArtistProfile,
     AuthIdentity,
@@ -101,6 +107,9 @@ def test_foundational_models_are_registered() -> None:
         CampaignRelease.__tablename__,
         MarketingContentItem.__tablename__,
         MarketingContentItemChannel.__tablename__,
+        ApprovalRequest.__tablename__,
+        ApprovalRequestStage.__tablename__,
+        ApprovalDecision.__tablename__,
         Contract.__tablename__,
         Royalty.__tablename__,
         AnalyticsEvent.__tablename__,
@@ -140,6 +149,9 @@ def test_foundational_models_are_registered() -> None:
         "campaign_releases",
         "marketing_content_items",
         "marketing_content_item_channels",
+        "approval_requests",
+        "approval_request_stages",
+        "approval_decisions",
         "contracts",
         "royalties",
         "analytics_events",
@@ -393,6 +405,10 @@ def test_marketing_content_models_define_persistence_contract() -> None:
     assert item_table.c.metadata.server_default is not None
     assert item_table.c.status.server_default is not None
     assert item_table.c.status.type.name == "marketing_content_item_status"
+    assert item_table.c.content_revision.nullable is False
+    assert item_table.c.content_revision.server_default is not None
+    assert item_table.c.approved_revision.nullable is True
+    assert item_table.c.approval_request_id.nullable is True
     assert item_table.c.created_at.nullable is False
     assert item_table.c.updated_at.nullable is False
     assert item_constraint_names
@@ -407,12 +423,14 @@ def test_marketing_content_models_define_persistence_contract() -> None:
         "ix_marketing_content_items_org_owner_profile",
         "ix_marketing_content_items_org_created_user",
         "ix_marketing_content_items_org_created_profile",
+        "ix_marketing_content_items_org_approval_request",
     } <= item_index_names
     assert item_foreign_key_deletions == {
         "organization_id": "CASCADE",
         "campaign_id": "CASCADE",
         "artist_id": "SET NULL",
         "release_id": "SET NULL",
+        "approval_request_id": "SET NULL",
         "approved_by_profile_id": "SET NULL",
         "created_by_user_id": "SET NULL",
         "created_by_profile_id": "SET NULL",
@@ -449,6 +467,285 @@ def test_marketing_content_models_define_persistence_contract() -> None:
         MarketingContentItem(status=MarketingContentItemStatus.approved).status
         == MarketingContentItemStatus.approved
     )
+
+
+def test_approval_models_define_generic_queue_contract() -> None:
+    request_table = ApprovalRequest.__table__
+    stage_table = ApprovalRequestStage.__table__
+    decision_table = ApprovalDecision.__table__
+    request_index_names = {index.name for index in request_table.indexes}
+    stage_index_names = {index.name for index in stage_table.indexes}
+    decision_index_names = {index.name for index in decision_table.indexes}
+    request_constraint_names = {
+        constraint.name for constraint in request_table.constraints
+    }
+    stage_constraint_names = {constraint.name for constraint in stage_table.constraints}
+    request_foreign_key_deletions = {
+        foreign_key.parent.name: foreign_key.ondelete
+        for foreign_key in request_table.foreign_keys
+    }
+    stage_foreign_key_deletions = {
+        foreign_key.parent.name: foreign_key.ondelete
+        for foreign_key in stage_table.foreign_keys
+    }
+    decision_foreign_key_deletions = {
+        foreign_key.parent.name: foreign_key.ondelete
+        for foreign_key in decision_table.foreign_keys
+    }
+
+    assert request_table.c.organization_id.nullable is False
+    assert request_table.c.resource_type.nullable is False
+    assert request_table.c.resource_id.nullable is False
+    assert request_table.c.resource_revision.nullable is False
+    assert request_table.c.resource_revision.server_default is not None
+    assert request_table.c.status.type.name == "approval_request_status"
+    assert request_table.c.status.server_default is not None
+    assert request_table.c.requested_by_user_id.nullable is True
+    assert request_table.c.requested_by_profile_id.nullable is True
+    assert request_table.c.submitted_by_actor_kind.nullable is False
+    assert request_table.c.current_stage_order.nullable is False
+    assert request_table.c.title.nullable is False
+    assert request_table.c.summary.nullable is True
+    assert request_table.c.metadata.server_default is not None
+    assert request_table.c.submitted_at.nullable is False
+    assert request_table.c.resolved_at.nullable is True
+    assert request_table.c.created_at.nullable is False
+    assert request_table.c.updated_at.nullable is False
+    assert {
+        "ck_approval_requests_resource_revision_positive",
+        "ck_approval_requests_current_stage_order_positive",
+    } <= request_constraint_names
+    assert {
+        "ix_approval_requests_organization_id",
+        "ix_approval_requests_organization_id_status",
+        "ix_approval_requests_resource_lookup",
+        "ix_approval_requests_queue_order",
+        "ix_approval_requests_requested_by_user",
+        "ix_approval_requests_requested_by_profile",
+        "uq_approval_requests_active_resource_revision",
+    } <= request_index_names
+    active_index = next(
+        index
+        for index in request_table.indexes
+        if index.name == "uq_approval_requests_active_resource_revision"
+    )
+    assert active_index.unique is True
+    assert active_index.dialect_options["postgresql"]["where"] is not None
+    assert active_index.dialect_options["sqlite"]["where"] is not None
+    assert request_foreign_key_deletions == {
+        "organization_id": "RESTRICT",
+        "requested_by_user_id": "SET NULL",
+        "requested_by_profile_id": "SET NULL",
+    }
+
+    assert stage_table.c.approval_request_id.nullable is False
+    assert stage_table.c.stage_order.nullable is False
+    assert stage_table.c.stage_order.server_default is not None
+    assert stage_table.c.required_capability.nullable is False
+    assert stage_table.c.status.type.name == "approval_stage_status"
+    assert stage_table.c.status.server_default is not None
+    assert stage_table.c.assigned_profile_id.nullable is True
+    assert stage_table.c.started_at.nullable is True
+    assert stage_table.c.completed_at.nullable is True
+    assert stage_table.c.created_at.nullable is False
+    assert stage_table.c.updated_at.nullable is False
+    assert {
+        "ck_approval_request_stages_stage_order_positive",
+        "uq_approval_request_stages_request_stage_order",
+    } <= stage_constraint_names
+    assert {
+        "ix_approval_request_stages_approval_request_id",
+        "ix_approval_request_stages_request_status",
+        "ix_approval_request_stages_reviewer_queue",
+        "ix_approval_request_stages_required_capability",
+    } <= stage_index_names
+    assert stage_foreign_key_deletions == {
+        "approval_request_id": "RESTRICT",
+        "assigned_profile_id": "SET NULL",
+    }
+
+    assert decision_table.c.approval_request_id.nullable is False
+    assert decision_table.c.stage_id.nullable is True
+    assert decision_table.c.organization_id.nullable is False
+    assert decision_table.c.decision.type.name == "approval_decision_value"
+    assert decision_table.c.decided_by_user_id.nullable is True
+    assert decision_table.c.decided_by_profile_id.nullable is True
+    assert decision_table.c.actor_kind.nullable is False
+    assert decision_table.c.actor_key.nullable is True
+    assert decision_table.c.reason.nullable is True
+    assert decision_table.c.payload.server_default is not None
+    assert decision_table.c.created_at.nullable is False
+    assert {
+        "ix_approval_decisions_organization_id",
+        "ix_approval_decisions_request_created",
+        "ix_approval_decisions_stage_id",
+        "ix_approval_decisions_organization_decision",
+        "ix_approval_decisions_decided_by_user",
+        "ix_approval_decisions_decided_by_profile",
+    } <= decision_index_names
+    assert decision_foreign_key_deletions == {
+        "approval_request_id": "RESTRICT",
+        "stage_id": "SET NULL",
+        "organization_id": "RESTRICT",
+        "decided_by_user_id": "SET NULL",
+        "decided_by_profile_id": "SET NULL",
+    }
+
+    assert [status.value for status in ApprovalRequestStatus] == [
+        "requested",
+        "in_review",
+        "changes_requested",
+        "approved",
+        "rejected",
+        "cancelled",
+    ]
+    assert [status.value for status in ApprovalStageStatus] == [
+        "pending",
+        "in_review",
+        "changes_requested",
+        "approved",
+        "rejected",
+        "cancelled",
+        "invalidated",
+    ]
+    assert [decision.value for decision in ApprovalDecisionValue] == [
+        "submitted",
+        "approved",
+        "rejected",
+        "changes_requested",
+        "resubmitted",
+        "invalidated",
+        "cancelled",
+    ]
+
+
+def test_approval_relationships_defaults_and_constraints() -> None:
+    engine = create_engine("sqlite:///:memory:")
+
+    @event.listens_for(engine, "connect")
+    def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record) -> None:
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+    ApprovalRequest.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        organization = Organization(
+            name="Example Label",
+            slug="example-label-approvals",
+            owner=User(email="owner-approvals@example.com"),
+        )
+        requester = User(email="requester-approvals@example.com")
+        requester_profile = UniversalProfile(
+            user=requester,
+            slug="requester-approvals",
+        )
+        reviewer_profile = UniversalProfile(
+            user=User(email="reviewer-approvals@example.com"),
+            slug="reviewer-approvals",
+        )
+        request = ApprovalRequest(
+            organization=organization,
+            resource_type="marketing_content_item",
+            resource_id=uuid4(),
+            title="Launch Caption",
+            summary="  Review launch caption.  ",
+            requested_by_user=requester,
+            requested_by_profile=requester_profile,
+            metadata_json={"priority": "high"},
+        )
+        stage = ApprovalRequestStage(
+            approval_request=request,
+            required_capability="marketing.content.approve",
+            assigned_profile=reviewer_profile,
+        )
+        decision = ApprovalDecision(
+            approval_request=request,
+            stage=stage,
+            organization=organization,
+            decision=ApprovalDecisionValue.submitted,
+            decided_by_user=requester,
+            decided_by_profile=requester_profile,
+            actor_kind="user",
+            actor_key="  requester-approvals@example.com  ",
+            reason="  Ready for review.  ",
+            payload={"source": "test"},
+        )
+        content_item = MarketingContentItem(
+            organization=organization,
+            campaign=Campaign(name="Approval Campaign", organization=organization),
+            title="Approval Linked",
+            content_type="caption",
+            status=MarketingContentItemStatus.in_review,
+            approval_request=request,
+        )
+
+        session.add_all([request, stage, decision, content_item])
+        session.commit()
+        session.refresh(request)
+
+        assert request.resource_revision == 1
+        assert request.status == ApprovalRequestStatus.requested
+        assert request.current_stage_order == 1
+        assert request.summary == "Review launch caption."
+        assert request.metadata_json == {"priority": "high"}
+        assert request.organization == organization
+        assert request.requested_by_user == requester
+        assert request.requested_by_profile == requester_profile
+        assert request.stages == [stage]
+        assert request.decisions == [decision]
+        assert organization.approval_requests == [request]
+        assert organization.approval_decisions == [decision]
+        assert stage.stage_order == 1
+        assert stage.status == ApprovalStageStatus.pending
+        assert stage.assigned_profile == reviewer_profile
+        assert stage.decisions == [decision]
+        assert decision.actor_key == "requester-approvals@example.com"
+        assert decision.reason == "Ready for review."
+        assert decision.payload == {"source": "test"}
+        assert decision.created_at is not None
+        assert content_item.content_revision == 1
+        assert content_item.approved_revision is None
+        assert content_item.approval_request == request
+
+        session.add(
+            ApprovalRequestStage(
+                approval_request=request,
+                required_capability="marketing.content.approve",
+            )
+        )
+        with pytest.raises(IntegrityError):
+            session.commit()
+        session.rollback()
+
+        session.add(
+            ApprovalRequest(
+                organization=organization,
+                resource_type=request.resource_type,
+                resource_id=request.resource_id,
+                resource_revision=request.resource_revision,
+                title="Duplicate Active Request",
+            )
+        )
+        with pytest.raises(IntegrityError):
+            session.commit()
+        session.rollback()
+
+        request.status = ApprovalRequestStatus.approved
+        session.flush()
+        session.add(
+            ApprovalRequest(
+                organization=organization,
+                resource_type=request.resource_type,
+                resource_id=request.resource_id,
+                resource_revision=request.resource_revision,
+                title="New Request After Resolution",
+            )
+        )
+        session.commit()
+
+    engine.dispose()
 
 
 def test_marketing_content_relationships_defaults_and_delete_behavior() -> None:
