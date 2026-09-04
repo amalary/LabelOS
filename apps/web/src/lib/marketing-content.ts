@@ -36,6 +36,25 @@ export type MarketingContentItemChannel = {
   updated_at: string;
 };
 
+export type MarketingContentApprovalState = {
+  state:
+    | "draft"
+    | "in_review"
+    | "approved"
+    | "changes_requested"
+    | "reapproval_required"
+    | "scheduled"
+    | "published"
+    | "cancelled"
+    | "archived";
+  label: string;
+  approval_request_id: string | null;
+  current_revision: number;
+  approved_revision: number | null;
+  approved_revision_is_current: boolean;
+  can_schedule: boolean;
+};
+
 export type MarketingContentItem = {
   id: string;
   workspace_id: string;
@@ -54,6 +73,10 @@ export type MarketingContentItem = {
   scheduled_at: string | null;
   published_at: string | null;
   approval_requested_at: string | null;
+  approval_request_id: string | null;
+  approval_state: MarketingContentApprovalState;
+  content_revision: number;
+  approved_revision: number | null;
   approved_at: string | null;
   approved_by_profile_id: string | null;
   channels: MarketingContentItemChannel[];

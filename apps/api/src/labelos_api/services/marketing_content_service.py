@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from labelos_database.models import (
+    ApprovalRequestStatus,
     MarketingContentItem,
     MarketingContentItemChannel,
     MarketingContentItemStatus,
@@ -13,6 +14,7 @@ from labelos_database.models import (
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from labelos_api.authorization import (
+    ActorKind,
     AuthorizationActorInput,
     AuthorizationResource,
     Capability,
@@ -20,7 +22,16 @@ from labelos_api.authorization import (
     authorization_service,
 )
 from labelos_api.realtime import RealtimeEventType, RealtimePublisher
-from labelos_api.repositories import marketing_content
+from labelos_api.repositories import approvals, marketing_content
+from labelos_api.repositories.approval_resources import (
+    MARKETING_CONTENT_ITEM_RESOURCE_TYPE,
+)
+from labelos_api.services import approval_service
+from labelos_api.services.approval_service import (
+    ApprovalDuplicateActiveRequestError,
+    ApprovalMissingCapabilityError,
+    ApprovalServiceError,
+)
 
 
 class MarketingContentServiceError(ValueError):
@@ -47,7 +58,11 @@ class MarketingContentAuthorizationError(MarketingContentServiceError):
 
 MAX_MARKETING_CONTENT_LIST_LIMIT = 500
 APPROVAL_CLEARING_STATUSES = frozenset(
-    {MarketingContentItemStatus.approved, MarketingContentItemStatus.scheduled}
+    {
+        MarketingContentItemStatus.approved,
+        MarketingContentItemStatus.scheduled,
+        MarketingContentItemStatus.in_review,
+    }
 )
 MATERIAL_FIELDS = frozenset(
     {
@@ -56,9 +71,20 @@ MATERIAL_FIELDS = frozenset(
         "copy_text",
         "asset_refs",
         "metadata_json",
+        "campaign_id",
         "artist_id",
         "release_id",
         "scheduled_at",
+    }
+)
+CHANNEL_MATERIAL_FIELDS = frozenset(
+    {
+        "channel",
+        "placement",
+        "scheduled_at",
+        "copy_text_override",
+        "asset_refs",
+        "metadata_json",
     }
 )
 ALLOWED_MARKETING_CONTENT_TRANSITIONS: dict[
@@ -67,7 +93,6 @@ ALLOWED_MARKETING_CONTENT_TRANSITIONS: dict[
     MarketingContentItemStatus.draft: frozenset(
         {
             MarketingContentItemStatus.in_review,
-            MarketingContentItemStatus.approved,
             MarketingContentItemStatus.cancelled,
             MarketingContentItemStatus.archived,
         }
@@ -337,6 +362,14 @@ def _actor_user(actor: AuthorizationActorInput | None) -> User | None:
     return user if isinstance(user, User) else None
 
 
+def _actor_kind(actor: AuthorizationActorInput | None) -> str:
+    actor_ref = getattr(actor, "authorization_actor", None)
+    kind = getattr(actor_ref, "kind", None)
+    if kind is not None:
+        return str(kind.value if isinstance(kind, ActorKind) else kind)
+    return "user"
+
+
 def _status_value(status: MarketingContentItemStatus | str) -> str:
     return (
         status.value if isinstance(status, MarketingContentItemStatus) else str(status)
@@ -568,6 +601,8 @@ def _clear_approval_fields(item: MarketingContentItem) -> None:
     item.approval_requested_at = None
     item.approved_at = None
     item.approved_by_profile_id = None
+    item.approved_revision = None
+    item.approval_request_id = None
 
 
 def _assert_transition_allowed(
@@ -593,6 +628,119 @@ def _assert_can_schedule(item: MarketingContentItem) -> None:
     raise MarketingContentLifecycleError(
         "scheduled status requires item or channel scheduled_at"
     )
+
+
+def _value_changed(current: object, proposed: object) -> bool:
+    return current != proposed
+
+
+def _changed_fields(
+    item: MarketingContentItem,
+    values: Mapping[str, object],
+) -> set[str]:
+    return {
+        field
+        for field, value in values.items()
+        if _value_changed(getattr(item, field), value)
+    }
+
+
+def _changed_channel_fields(
+    channel: MarketingContentItemChannel,
+    values: Mapping[str, object],
+) -> set[str]:
+    return {
+        field
+        for field, value in values.items()
+        if _value_changed(getattr(channel, field), value)
+    }
+
+
+def _channel_signature(channel: MarketingContentItemChannel) -> tuple:
+    return (
+        channel.channel,
+        channel.placement,
+        channel.scheduled_at,
+        channel.copy_text_override,
+        list(channel.asset_refs),
+        dict(channel.metadata_json),
+    )
+
+
+def _channel_values_signature(values: Mapping[str, object]) -> tuple:
+    return (
+        values.get("channel"),
+        values.get("placement"),
+        values.get("scheduled_at"),
+        values.get("copy_text_override"),
+        list(values.get("asset_refs", [])),
+        dict(values.get("metadata_json", {})),
+    )
+
+
+def _replacement_channels_materially_changed(
+    item: MarketingContentItem,
+    channel_values: Sequence[Mapping[str, object]],
+) -> bool:
+    current = sorted(_channel_signature(channel) for channel in item.channels)
+    proposed = sorted(_channel_values_signature(values) for values in channel_values)
+    return current != proposed
+
+
+async def _apply_material_change(
+    session: AsyncSession,
+    *,
+    workspace_id: UUID,
+    item: MarketingContentItem,
+    actor: AuthorizationActorInput | None,
+) -> bool:
+    approval_was_current = (
+        item.approval_request_id is not None
+        and item.approved_revision == item.content_revision
+    )
+    previous_request_id = item.approval_request_id
+    if approval_was_current and previous_request_id is not None:
+        await approval_service.record_current_approval_invalidated(
+            session,
+            workspace_id,
+            previous_request_id,
+            actor=actor,
+            reason="Material marketing content edit superseded this approval.",
+        )
+    item.content_revision += 1
+    item.approved_at = None
+    item.approved_by_profile_id = None
+    if item.status in APPROVAL_CLEARING_STATUSES:
+        item.status = MarketingContentItemStatus.draft
+        item.approval_requested_at = None
+        item.approval_request_id = None
+    return approval_was_current
+
+
+async def _has_completed_approval_for_current_revision(
+    session: AsyncSession,
+    *,
+    workspace_id: UUID,
+    item: MarketingContentItem,
+) -> bool:
+    if item.approved_revision != item.content_revision:
+        return False
+    request = await approvals.find_conflicting_or_resolved_request(
+        session,
+        workspace_id,
+        MARKETING_CONTENT_ITEM_RESOURCE_TYPE,
+        item.id,
+        item.content_revision,
+    )
+    return request is not None and request.status == ApprovalRequestStatus.approved
+
+
+def _approval_error(exc: ApprovalServiceError) -> MarketingContentServiceError:
+    if isinstance(exc, ApprovalMissingCapabilityError):
+        return MarketingContentAuthorizationError(exc.reason)
+    if isinstance(exc, ApprovalDuplicateActiveRequestError):
+        return MarketingContentLifecycleError(str(exc))
+    return MarketingContentLifecycleError(str(exc))
 
 
 async def _load_content_item_for_workspace(
@@ -879,20 +1027,22 @@ async def update_content_item(
     if "release_id" not in relationship_values and item.release_id is not None:
         relationship_values["release_id"] = item.release_id
     await _validate_item_relationships(session, workspace_id, relationship_values)
-    if (
-        item.status in APPROVAL_CLEARING_STATUSES
-        and payload.material_change
-        and any(field in MATERIAL_FIELDS for field in values)
-    ):
-        values["status"] = MarketingContentItemStatus.draft
-        values["approval_requested_at"] = None
-        values["approved_at"] = None
-        values["approved_by_profile_id"] = None
+    changed_fields = _changed_fields(item, values)
+    if not changed_fields:
+        return item
+    material_change = bool(payload.material_change and changed_fields & MATERIAL_FIELDS)
+    if material_change:
+        await _apply_material_change(
+            session,
+            workspace_id=workspace_id,
+            item=item,
+            actor=actor,
+        )
     updated = await marketing_content.update_item(
         session,
         workspace_id,
         content_item_id,
-        values,
+        {key: values[key] for key in changed_fields},
     )
     if updated is None:
         raise MarketingContentNotFoundError("Marketing content item not found")
@@ -930,11 +1080,17 @@ async def replace_channels(
     )
     channel_values = [_channel_create_values(channel) for channel in channels]
     _assert_unique_channel_targets(channel_values)
+    material_change = _replacement_channels_materially_changed(item, channel_values)
+    if not material_change:
+        return item
     await marketing_content.replace_channels(session, item.id, channel_values)
     session.expire(item, ["channels"])
-    if item.status in APPROVAL_CLEARING_STATUSES:
-        item.status = MarketingContentItemStatus.draft
-        _clear_approval_fields(item)
+    await _apply_material_change(
+        session,
+        workspace_id=workspace_id,
+        item=item,
+        actor=actor,
+    )
     await _publish_content_event(
         session,
         workspace_id=workspace_id,
@@ -974,6 +1130,9 @@ async def update_channel(
     values = _channel_update_values(payload)
     if not values:
         return channel
+    changed_fields = _changed_channel_fields(channel, values)
+    if not changed_fields:
+        return channel
     prospective = []
     for row in item.channels:
         prospective.append(
@@ -983,12 +1142,20 @@ async def update_channel(
             }
         )
     _assert_unique_channel_targets(prospective)
-    updated = await marketing_content.update_channel(session, channel_id, values)
+    updated = await marketing_content.update_channel(
+        session,
+        channel_id,
+        {key: values[key] for key in changed_fields},
+    )
     if updated is None:
         raise MarketingContentNotFoundError("Marketing content channel not found")
-    if item.status in APPROVAL_CLEARING_STATUSES and values:
-        item.status = MarketingContentItemStatus.draft
-        _clear_approval_fields(item)
+    if changed_fields & CHANNEL_MATERIAL_FIELDS:
+        await _apply_material_change(
+            session,
+            workspace_id=workspace_id,
+            item=item,
+            actor=actor,
+        )
     await _publish_content_event(
         session,
         workspace_id=workspace_id,
@@ -1019,6 +1186,52 @@ async def transition_status(
     next_status = _assert_transition_allowed(item.status, status)
     if next_status == item.status:
         return item
+    if next_status == MarketingContentItemStatus.in_review:
+        try:
+            request = await approval_service.submit_resource_for_approval(
+                session,
+                workspace_id,
+                MARKETING_CONTENT_ITEM_RESOURCE_TYPE,
+                content_item_id,
+                actor=actor,
+            )
+        except ApprovalServiceError as exc:
+            raise _approval_error(exc) from exc
+        return await get_content_item(session, workspace_id, request.resource_id)
+    if next_status == MarketingContentItemStatus.approved:
+        if item.status == MarketingContentItemStatus.scheduled:
+            if not await _has_completed_approval_for_current_revision(
+                session,
+                workspace_id=workspace_id,
+                item=item,
+            ):
+                raise MarketingContentLifecycleError(
+                    "Approved status requires completed approval for the current "
+                    "revision"
+                )
+        else:
+            request = await approvals.find_active_request_for_resource_revision(
+                session,
+                workspace_id,
+                MARKETING_CONTENT_ITEM_RESOURCE_TYPE,
+                content_item_id,
+                item.content_revision,
+            )
+            if request is None:
+                raise MarketingContentLifecycleError(
+                    "Approval requires an active generic approval request for the "
+                    "current revision"
+                )
+            try:
+                approved = await approval_service.approve_request(
+                    session,
+                    workspace_id,
+                    request.id,
+                    actor=actor,
+                )
+            except ApprovalServiceError as exc:
+                raise _approval_error(exc) from exc
+            return await get_content_item(session, workspace_id, approved.resource_id)
     await _require_capability(
         session,
         actor=actor,
@@ -1026,36 +1239,23 @@ async def transition_status(
         capability=_capability_for_status_transition(next_status),
         campaign_id=item.campaign_id,
     )
-    if next_status == MarketingContentItemStatus.approved:
-        has_approval = await _has_approval_capability(
-            session,
-            actor=actor,
-            workspace_id=workspace_id,
-            campaign_id=item.campaign_id,
-            assume_approval_capability=assume_approval_capability,
+    if _actor_kind(actor) == ActorKind.ai_agent.value and next_status in {
+        MarketingContentItemStatus.scheduled,
+        MarketingContentItemStatus.published,
+    }:
+        raise MarketingContentLifecycleError(
+            "AI agents cannot schedule or publish marketing content"
         )
-        if not has_approval:
-            raise MarketingContentAuthorizationError(
-                "Approving marketing content requires approval capability"
-            )
-        if approved_by_profile_id is None:
-            raise MarketingContentRelationshipError(
-                "approved_by_profile_id is required for approval"
-            )
-        await _validate_item_relationships(
-            session,
-            workspace_id,
-            {
-                "campaign_id": item.campaign_id,
-                "approved_by_profile_id": approved_by_profile_id,
-            },
-        )
-        item.approved_at = _now()
-        item.approved_by_profile_id = approved_by_profile_id
-    if next_status == MarketingContentItemStatus.in_review:
-        item.approval_requested_at = item.approval_requested_at or _now()
     if next_status == MarketingContentItemStatus.scheduled:
         _assert_can_schedule(item)
+        if not await _has_completed_approval_for_current_revision(
+            session,
+            workspace_id=workspace_id,
+            item=item,
+        ):
+            raise MarketingContentLifecycleError(
+                "Scheduling requires completed approval for the current revision"
+            )
     if next_status == MarketingContentItemStatus.published:
         item.published_at = item.published_at or _now()
     if (

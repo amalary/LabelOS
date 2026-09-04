@@ -4,6 +4,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from labelos_database.models import (
+    ApprovalRequestStatus,
     MarketingContentItem,
     MarketingContentItemChannel,
     MarketingContentItemStatus,
@@ -110,6 +111,16 @@ class MarketingContentChannelResponse(BaseModel):
     updated_at: datetime
 
 
+class MarketingContentApprovalStateResponse(BaseModel):
+    state: str
+    label: str
+    approval_request_id: UUID | None
+    current_revision: int
+    approved_revision: int | None
+    approved_revision_is_current: bool
+    can_schedule: bool
+
+
 class MarketingContentResponse(BaseModel):
     id: UUID
     workspace_id: UUID
@@ -128,6 +139,10 @@ class MarketingContentResponse(BaseModel):
     scheduled_at: datetime | None
     published_at: datetime | None
     approval_requested_at: datetime | None
+    approval_request_id: UUID | None
+    approval_state: MarketingContentApprovalStateResponse
+    content_revision: int
+    approved_revision: int | None
     approved_at: datetime | None
     approved_by_profile_id: UUID | None
     channels: list[MarketingContentChannelResponse]
@@ -265,6 +280,62 @@ def _channel_response(
     )
 
 
+def _approval_state(
+    item: MarketingContentItem,
+) -> MarketingContentApprovalStateResponse:
+    approval_request = item.approval_request
+    approved_revision_is_current = (
+        item.approved_revision is not None
+        and item.approved_revision == item.content_revision
+        and approval_request is not None
+        and approval_request.status == ApprovalRequestStatus.approved
+    )
+    can_schedule = (
+        item.status == MarketingContentItemStatus.approved
+        and approved_revision_is_current
+    )
+    if item.status in {
+        MarketingContentItemStatus.published,
+        MarketingContentItemStatus.cancelled,
+        MarketingContentItemStatus.archived,
+    }:
+        state = item.status.value
+        label = item.status.value.replace("_", " ").title()
+    elif approved_revision_is_current:
+        state = "approved"
+        label = "Approved"
+    elif approval_request is not None and approval_request.status in {
+        ApprovalRequestStatus.requested,
+        ApprovalRequestStatus.in_review,
+    }:
+        state = "in_review"
+        label = "In review"
+    elif (
+        approval_request is not None
+        and approval_request.status == ApprovalRequestStatus.changes_requested
+    ):
+        state = "changes_requested"
+        label = "Changes requested"
+    elif (
+        item.approved_revision is not None
+        and item.approved_revision != item.content_revision
+    ):
+        state = "reapproval_required"
+        label = "Reapproval required"
+    else:
+        state = item.status.value
+        label = item.status.value.replace("_", " ").title()
+    return MarketingContentApprovalStateResponse(
+        state=state,
+        label=label,
+        approval_request_id=item.approval_request_id,
+        current_revision=item.content_revision,
+        approved_revision=item.approved_revision,
+        approved_revision_is_current=approved_revision_is_current,
+        can_schedule=can_schedule,
+    )
+
+
 def _content_response(item: MarketingContentItem) -> MarketingContentResponse:
     return MarketingContentResponse(
         id=item.id,
@@ -284,6 +355,10 @@ def _content_response(item: MarketingContentItem) -> MarketingContentResponse:
         scheduled_at=item.scheduled_at,
         published_at=item.published_at,
         approval_requested_at=item.approval_requested_at,
+        approval_request_id=item.approval_request_id,
+        approval_state=_approval_state(item),
+        content_revision=item.content_revision,
+        approved_revision=item.approved_revision,
         approved_at=item.approved_at,
         approved_by_profile_id=item.approved_by_profile_id,
         channels=[_channel_response(channel) for channel in item.channels],

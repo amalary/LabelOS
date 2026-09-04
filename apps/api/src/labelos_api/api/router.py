@@ -2,6 +2,7 @@ from fastapi import APIRouter
 
 from labelos_api.api.v1 import authorization_examples
 from labelos_api.api.v1.analytics import router as analytics_router
+from labelos_api.api.v1.approvals import router as approvals_router
 from labelos_api.api.v1.artist_profiles import router as artist_profiles_router
 from labelos_api.api.v1.artists import router as artists_router
 from labelos_api.api.v1.campaigns import router as campaigns_router
@@ -17,6 +18,7 @@ from labelos_api.api.v1.webhooks import router as webhooks_router
 
 api_router = APIRouter()
 api_router.include_router(analytics_router)
+api_router.include_router(approvals_router)
 api_router.include_router(artist_profiles_router)
 api_router.include_router(artists_router)
 api_router.include_router(authorization_examples.router)

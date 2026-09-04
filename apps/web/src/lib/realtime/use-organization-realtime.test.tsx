@@ -1,6 +1,7 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { clearApprovalCache, useApprovalQueue } from "../approvals";
 import {
   clearAnalyticsCache,
   shouldInvalidateAnalyticsRealtimeCacheKey,
@@ -105,8 +106,22 @@ function RealtimeMarketingContentProbe() {
   );
 }
 
+function RealtimeApprovalProbe() {
+  const { recentActivityEvents } = useOrganizationRealtime("org_01");
+  const approvals = useApprovalQueue("org_01", { status: "in_review", limit: 25 });
+  const content = useWorkspaceMarketingContent("org_01", marketingContentCalendarOptions);
+  return (
+    <div>
+      <span>{approvals.data?.total ?? "no approvals"}</span>
+      <span>{content.data?.total ?? "no content"}</span>
+      <span>{recentActivityEvents[0]?.type ?? "no activity"}</span>
+    </div>
+  );
+}
+
 describe("useOrganizationRealtime", () => {
   beforeEach(() => {
+    clearApprovalCache();
     clearAnalyticsCache();
     clearMarketingContentCache();
     navigation.refresh.mockReset();
@@ -333,6 +348,135 @@ describe("useOrganizationRealtime", () => {
     );
     expect(navigation.refresh).not.toHaveBeenCalled();
     expect(screen.getByText("marketing.content.approval_requested")).toBeInTheDocument();
+  });
+
+  it("invalidates approval and targeted marketing content caches for approval updates", async () => {
+    routeState.pathname = "/approvals";
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(
+        Response.json({
+          approvals: [],
+          total: 1,
+          limit: 25,
+          offset: 0,
+        }),
+      )
+      .mockResolvedValueOnce(
+        Response.json({
+          marketing_content: [],
+          total: 1,
+          limit: 100,
+          offset: 0,
+        }),
+      )
+      .mockResolvedValueOnce(
+        Response.json({
+          approvals: [],
+          total: 2,
+          limit: 25,
+          offset: 0,
+        }),
+      )
+      .mockResolvedValueOnce(
+        Response.json({
+          marketing_content: [],
+          total: 2,
+          limit: 100,
+          offset: 0,
+        }),
+      );
+    render(<RealtimeApprovalProbe />);
+    const source = FakeEventSource.instances[0]!;
+
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+    act(() => {
+      source.emit("message", {
+        id: "approval_event_01",
+        type: "approval.updated",
+        version: 1,
+        channel: "organization:org_01",
+        organization_id: "org_01",
+        entity_type: "approval_request",
+        entity_id: "approval_01",
+        operation_id: "operation_approval_01",
+        actor: { user_id: "user_01", display_name: "Mara Chen" },
+        payload: {
+          approvalRequestId: "approval_01",
+          contentItemId: "content_01",
+          campaignId: "campaign_01",
+          status: "approved",
+        },
+        created_at: new Date().toISOString(),
+      });
+    });
+
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(4));
+    expect(fetch).toHaveBeenNthCalledWith(
+      3,
+      "/api/workspaces/org_01/approvals?status=in_review&limit=25",
+      expect.any(Object),
+    );
+    expect(fetch).toHaveBeenNthCalledWith(
+      4,
+      "/api/workspaces/org_01/marketing-content?start=2026-09-01T00%3A00%3A00Z&end=2026-09-30T23%3A59%3A59Z",
+      expect.any(Object),
+    );
+    expect(navigation.refresh).not.toHaveBeenCalled();
+    expect(screen.getByText("approval.updated")).toBeInTheDocument();
+  });
+
+  it("refreshes marketing calendar data locally for approval updates with content context", async () => {
+    routeState.pathname = "/marketing";
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(
+        Response.json({
+          marketing_content: [],
+          total: 1,
+          limit: 100,
+          offset: 0,
+        }),
+      )
+      .mockResolvedValueOnce(
+        Response.json({
+          marketing_content: [],
+          total: 2,
+          limit: 100,
+          offset: 0,
+        }),
+      );
+    render(<RealtimeMarketingContentProbe />);
+    const source = FakeEventSource.instances[0]!;
+
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+    act(() => {
+      source.emit("message", {
+        id: "approval_event_marketing_01",
+        type: "approval.updated",
+        version: 1,
+        channel: "organization:org_01",
+        organization_id: "org_01",
+        entity_type: "approval_request",
+        entity_id: "approval_01",
+        operation_id: "operation_approval_marketing_01",
+        actor: { user_id: "user_01", display_name: "Mara Chen" },
+        payload: {
+          approvalRequestId: "approval_01",
+          contentItemId: "content_01",
+          campaignId: "campaign_01",
+          status: "changes_requested",
+          eventAction: "changes_requested",
+        },
+        created_at: new Date().toISOString(),
+      });
+    });
+
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+    expect(fetch).toHaveBeenLastCalledWith(
+      "/api/workspaces/org_01/marketing-content?start=2026-09-01T00%3A00%3A00Z&end=2026-09-30T23%3A59%3A59Z",
+      expect.any(Object),
+    );
+    expect(navigation.refresh).not.toHaveBeenCalled();
+    expect(screen.getByText("approval.updated")).toBeInTheDocument();
   });
 
   it("ignores events for a different organization", () => {

@@ -9,6 +9,7 @@ from uuid import UUID
 from sqlalchemy import (
     JSON,
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     Enum,
@@ -18,6 +19,7 @@ from sqlalchemy import (
     Numeric,
     String,
     UniqueConstraint,
+    and_,
     false,
     func,
     true,
@@ -112,6 +114,35 @@ class MarketingContentItemStatus(StrEnum):
     published = "published"
     cancelled = "cancelled"
     archived = "archived"
+
+
+class ApprovalRequestStatus(StrEnum):
+    requested = "requested"
+    in_review = "in_review"
+    changes_requested = "changes_requested"
+    approved = "approved"
+    rejected = "rejected"
+    cancelled = "cancelled"
+
+
+class ApprovalStageStatus(StrEnum):
+    pending = "pending"
+    in_review = "in_review"
+    changes_requested = "changes_requested"
+    approved = "approved"
+    rejected = "rejected"
+    cancelled = "cancelled"
+    invalidated = "invalidated"
+
+
+class ApprovalDecisionValue(StrEnum):
+    submitted = "submitted"
+    approved = "approved"
+    rejected = "rejected"
+    changes_requested = "changes_requested"
+    resubmitted = "resubmitted"
+    invalidated = "invalidated"
+    cancelled = "cancelled"
 
 
 class AnalyticsMetricValueType(StrEnum):
@@ -612,6 +643,12 @@ class Organization(Base, TimestampMixin):
     marketing_content_items: Mapped[list["MarketingContentItem"]] = relationship(
         back_populates="organization",
         cascade="all, delete-orphan",
+    )
+    approval_requests: Mapped[list["ApprovalRequest"]] = relationship(
+        back_populates="organization"
+    )
+    approval_decisions: Mapped[list["ApprovalDecision"]] = relationship(
+        back_populates="organization"
     )
 
     __table_args__ = (
@@ -1887,6 +1924,346 @@ class Campaign(Base, TimestampMixin, OrganizationOwnedMixin):
     )
 
 
+class ApprovalRequest(Base, TimestampMixin):
+    __tablename__ = "approval_requests"
+
+    id: Mapped[UUIDPrimaryKey]
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    resource_type: Mapped[str] = mapped_column(String(120), nullable=False)
+    resource_id: Mapped[UUID] = mapped_column(nullable=False)
+    resource_revision: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=1,
+        server_default="1",
+    )
+    status: Mapped[ApprovalRequestStatus] = mapped_column(
+        Enum(ApprovalRequestStatus, name="approval_request_status"),
+        nullable=False,
+        default=ApprovalRequestStatus.requested,
+        server_default=ApprovalRequestStatus.requested.value,
+    )
+    requested_by_user_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    requested_by_profile_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("universal_profiles.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    submitted_by_actor_kind: Mapped[str] = mapped_column(
+        String(60),
+        nullable=False,
+        default="user",
+        server_default="user",
+    )
+    submitted_by_actor_key: Mapped[str | None] = mapped_column(String(255))
+    current_stage_order: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=1,
+        server_default="1",
+    )
+    title: Mapped[str] = mapped_column(String(240), nullable=False)
+    summary: Mapped[str | None] = mapped_column(String(4000))
+    metadata_json: Mapped[dict] = mapped_column(
+        "metadata",
+        JSON,
+        nullable=False,
+        default=dict,
+        server_default="{}",
+    )
+    submitted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        server_default=func.now(),
+    )
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    organization: Mapped[Organization] = relationship(
+        back_populates="approval_requests"
+    )
+    requested_by_user: Mapped[User | None] = relationship(
+        foreign_keys=[requested_by_user_id]
+    )
+    requested_by_profile: Mapped[UniversalProfile | None] = relationship(
+        foreign_keys=[requested_by_profile_id]
+    )
+    stages: Mapped[list["ApprovalRequestStage"]] = relationship(
+        back_populates="approval_request",
+        order_by=lambda: (
+            ApprovalRequestStage.stage_order.asc(),
+            ApprovalRequestStage.created_at.asc(),
+            ApprovalRequestStage.id.asc(),
+        ),
+    )
+    decisions: Mapped[list["ApprovalDecision"]] = relationship(
+        back_populates="approval_request",
+        order_by=lambda: (
+            ApprovalDecision.created_at.asc(),
+            ApprovalDecision.id.asc(),
+        ),
+    )
+    marketing_content_items: Mapped[list["MarketingContentItem"]] = relationship(
+        back_populates="approval_request"
+    )
+
+    @validates("resource_type", "submitted_by_actor_kind", "title")
+    def _validate_required_text(self, key: str, value: str | None) -> str:
+        return _required_text(value, key)
+
+    @validates("submitted_by_actor_key", "summary")
+    def _validate_optional_text(self, _key: str, value: str | None) -> str | None:
+        return _optional_text(value)
+
+    @validates("metadata_json")
+    def _validate_metadata(self, key: str, value: dict | None) -> dict:
+        return _json_object(value, key)
+
+    __table_args__ = (
+        CheckConstraint(
+            "resource_revision >= 1",
+            name="resource_revision_positive",
+        ),
+        CheckConstraint(
+            "current_stage_order >= 1",
+            name="current_stage_order_positive",
+        ),
+        Index("ix_approval_requests_organization_id", "organization_id"),
+        Index(
+            "ix_approval_requests_organization_id_status",
+            "organization_id",
+            "status",
+        ),
+        Index(
+            "ix_approval_requests_resource_lookup",
+            "organization_id",
+            "resource_type",
+            "resource_id",
+            "resource_revision",
+        ),
+        Index(
+            "ix_approval_requests_queue_order",
+            "organization_id",
+            "status",
+            "submitted_at",
+        ),
+        Index(
+            "ix_approval_requests_requested_by_user",
+            "organization_id",
+            "requested_by_user_id",
+        ),
+        Index(
+            "ix_approval_requests_requested_by_profile",
+            "organization_id",
+            "requested_by_profile_id",
+        ),
+        Index(
+            "uq_approval_requests_active_resource_revision",
+            "organization_id",
+            "resource_type",
+            "resource_id",
+            "resource_revision",
+            unique=True,
+            postgresql_where=and_(
+                status.in_(
+                    (
+                        ApprovalRequestStatus.requested,
+                        ApprovalRequestStatus.in_review,
+                        ApprovalRequestStatus.changes_requested,
+                    )
+                )
+            ),
+            sqlite_where=and_(
+                status.in_(
+                    (
+                        ApprovalRequestStatus.requested,
+                        ApprovalRequestStatus.in_review,
+                        ApprovalRequestStatus.changes_requested,
+                    )
+                )
+            ),
+        ),
+    )
+
+
+class ApprovalRequestStage(Base, TimestampMixin):
+    __tablename__ = "approval_request_stages"
+
+    id: Mapped[UUIDPrimaryKey]
+    approval_request_id: Mapped[UUID] = mapped_column(
+        ForeignKey("approval_requests.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    stage_order: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=1,
+        server_default="1",
+    )
+    required_capability: Mapped[str] = mapped_column(String(160), nullable=False)
+    status: Mapped[ApprovalStageStatus] = mapped_column(
+        Enum(ApprovalStageStatus, name="approval_stage_status"),
+        nullable=False,
+        default=ApprovalStageStatus.pending,
+        server_default=ApprovalStageStatus.pending.value,
+    )
+    assigned_profile_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("universal_profiles.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    approval_request: Mapped[ApprovalRequest] = relationship(back_populates="stages")
+    assigned_profile: Mapped[UniversalProfile | None] = relationship(
+        foreign_keys=[assigned_profile_id]
+    )
+    decisions: Mapped[list["ApprovalDecision"]] = relationship(
+        back_populates="stage",
+        order_by=lambda: (
+            ApprovalDecision.created_at.asc(),
+            ApprovalDecision.id.asc(),
+        ),
+    )
+
+    @validates("required_capability")
+    def _validate_required_text(self, key: str, value: str | None) -> str:
+        return _required_text(value, key)
+
+    __table_args__ = (
+        CheckConstraint(
+            "stage_order >= 1",
+            name="stage_order_positive",
+        ),
+        UniqueConstraint(
+            "approval_request_id",
+            "stage_order",
+            name="uq_approval_request_stages_request_stage_order",
+        ),
+        Index(
+            "ix_approval_request_stages_approval_request_id",
+            "approval_request_id",
+        ),
+        Index(
+            "ix_approval_request_stages_request_status",
+            "approval_request_id",
+            "status",
+        ),
+        Index(
+            "ix_approval_request_stages_reviewer_queue",
+            "assigned_profile_id",
+            "status",
+            "started_at",
+        ),
+        Index(
+            "ix_approval_request_stages_required_capability",
+            "required_capability",
+        ),
+    )
+
+
+class ApprovalDecision(Base):
+    __tablename__ = "approval_decisions"
+
+    id: Mapped[UUIDPrimaryKey]
+    approval_request_id: Mapped[UUID] = mapped_column(
+        ForeignKey("approval_requests.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    stage_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("approval_request_stages.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    decision: Mapped[ApprovalDecisionValue] = mapped_column(
+        Enum(ApprovalDecisionValue, name="approval_decision_value"),
+        nullable=False,
+    )
+    decided_by_user_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    decided_by_profile_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("universal_profiles.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    actor_kind: Mapped[str] = mapped_column(String(60), nullable=False)
+    actor_key: Mapped[str | None] = mapped_column(String(255))
+    reason: Mapped[str | None] = mapped_column(String(4000))
+    payload: Mapped[dict] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+        server_default="{}",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    approval_request: Mapped[ApprovalRequest] = relationship(back_populates="decisions")
+    stage: Mapped[ApprovalRequestStage | None] = relationship(
+        back_populates="decisions",
+        foreign_keys=[stage_id],
+    )
+    organization: Mapped[Organization] = relationship(
+        back_populates="approval_decisions"
+    )
+    decided_by_user: Mapped[User | None] = relationship(
+        foreign_keys=[decided_by_user_id]
+    )
+    decided_by_profile: Mapped[UniversalProfile | None] = relationship(
+        foreign_keys=[decided_by_profile_id]
+    )
+
+    @validates("actor_kind")
+    def _validate_required_text(self, key: str, value: str | None) -> str:
+        return _required_text(value, key)
+
+    @validates("actor_key", "reason")
+    def _validate_optional_text(self, _key: str, value: str | None) -> str | None:
+        return _optional_text(value)
+
+    @validates("payload")
+    def _validate_payload(self, key: str, value: dict | None) -> dict:
+        return _json_object(value, key)
+
+    __table_args__ = (
+        Index("ix_approval_decisions_organization_id", "organization_id"),
+        Index(
+            "ix_approval_decisions_request_created",
+            "approval_request_id",
+            "created_at",
+        ),
+        Index("ix_approval_decisions_stage_id", "stage_id"),
+        Index(
+            "ix_approval_decisions_organization_decision",
+            "organization_id",
+            "decision",
+        ),
+        Index(
+            "ix_approval_decisions_decided_by_user",
+            "organization_id",
+            "decided_by_user_id",
+        ),
+        Index(
+            "ix_approval_decisions_decided_by_profile",
+            "organization_id",
+            "decided_by_profile_id",
+        ),
+    )
+
+
 class MarketingContentItem(Base, TimestampMixin, OrganizationOwnedMixin):
     __tablename__ = "marketing_content_items"
 
@@ -1924,6 +2301,17 @@ class MarketingContentItem(Base, TimestampMixin, OrganizationOwnedMixin):
         nullable=False,
         default=MarketingContentItemStatus.draft,
         server_default=MarketingContentItemStatus.draft.value,
+    )
+    content_revision: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=1,
+        server_default="1",
+    )
+    approved_revision: Mapped[int | None] = mapped_column(Integer)
+    approval_request_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("approval_requests.id", ondelete="SET NULL"),
+        nullable=True,
     )
     scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -1985,6 +2373,10 @@ class MarketingContentItem(Base, TimestampMixin, OrganizationOwnedMixin):
         back_populates="owned_marketing_content_items",
         foreign_keys=[owner_profile_id],
     )
+    approval_request: Mapped[ApprovalRequest | None] = relationship(
+        back_populates="marketing_content_items",
+        foreign_keys=[approval_request_id],
+    )
 
     @validates("title", "content_type")
     def _validate_required_text(self, key: str, value: str | None) -> str:
@@ -2003,6 +2395,10 @@ class MarketingContentItem(Base, TimestampMixin, OrganizationOwnedMixin):
         return _json_object(value, key)
 
     __table_args__ = (
+        CheckConstraint(
+            "content_revision >= 1",
+            name="content_revision_positive",
+        ),
         Index("ix_marketing_content_items_organization_id", "organization_id"),
         Index(
             "ix_marketing_content_items_organization_id_campaign_id",
@@ -2048,6 +2444,11 @@ class MarketingContentItem(Base, TimestampMixin, OrganizationOwnedMixin):
             "ix_marketing_content_items_org_created_profile",
             "organization_id",
             "created_by_profile_id",
+        ),
+        Index(
+            "ix_marketing_content_items_org_approval_request",
+            "organization_id",
+            "approval_request_id",
         ),
     )
 

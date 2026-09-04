@@ -130,4 +130,27 @@ describe("activity event mapping", () => {
   it("formats unavailable timestamps without throwing", () => {
     expect(formatActivityTimestamp("not-a-date", now)).toBe("Time unavailable");
   });
+
+  it("maps approval activity events by lifecycle action without comment content", () => {
+    const baseEvent = {
+      id: "activity-approval",
+      type: "approval.updated" as const,
+      createdAt: "2026-09-03T12:00:00.000Z",
+      actor: { userId: "user_01", displayName: "Reviewer" },
+      entityType: "approval_request",
+      entityId: "approval_01",
+      payload: {
+        title: "Launch caption",
+        eventAction: "changes_requested",
+        status: "changes_requested",
+        reason: "Private reviewer feedback",
+      },
+    };
+
+    const mapped = mapActivityEvent(baseEvent, new Date("2026-09-03T12:01:00.000Z"));
+
+    expect(mapped.title).toBe("Changes requested");
+    expect(mapped.description).toBe("Launch caption needs changes before approval");
+    expect(mapped.description).not.toContain("Private reviewer feedback");
+  });
 });
