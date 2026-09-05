@@ -689,6 +689,10 @@ def test_marketing_content_workspace_calendar_filters(
     status_filtered = client.get(workspace_base, params={"status": "in_review"})
     channel_filtered = client.get(workspace_base, params={"channel": "TikTok"})
     type_filtered = client.get(workspace_base, params={"content_type": "Video"})
+    owner_filtered = client.get(
+        workspace_base,
+        params={"owner_profile_id": str(seeded.owner_profile_id)},
+    )
 
     assert {item["id"] for item in date_filtered.json()["marketing_content"]} == {
         first["id"],
@@ -708,6 +712,9 @@ def test_marketing_content_workspace_calendar_filters(
     ]
     assert [item["id"] for item in type_filtered.json()["marketing_content"]] == [
         second["id"]
+    ]
+    assert [item["id"] for item in owner_filtered.json()["marketing_content"]] == [
+        first["id"]
     ]
 
 

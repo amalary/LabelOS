@@ -257,7 +257,7 @@ function revisionLabel(item: MarketingContentItem): string {
     : `Revision ${item.content_revision} / approved ${item.approved_revision}`;
 }
 
-function filtersActive(filters: CalendarFilters): boolean {
+function filtersActive(filters: CalendarFilters | DraftFilters): boolean {
   return Object.values(filters).some((value) => value.trim().length > 0);
 }
 
@@ -267,6 +267,30 @@ type CalendarFilters = {
   channel: string;
   releaseId: string;
   status: string;
+};
+
+type DraftUpdatedFilter = "" | "7" | "30";
+
+type DraftFilters = {
+  artistId: string;
+  campaignId: string;
+  channel: string;
+  contentType: string;
+  ownerProfileId: string;
+  releaseId: string;
+  search: string;
+  updatedWithinDays: DraftUpdatedFilter;
+};
+
+const emptyDraftFilters: DraftFilters = {
+  artistId: "",
+  campaignId: "",
+  channel: "",
+  contentType: "",
+  ownerProfileId: "",
+  releaseId: "",
+  search: "",
+  updatedWithinDays: "",
 };
 
 type ContentEditorMode = "create" | "edit";
@@ -1208,6 +1232,49 @@ function CalendarList({
   );
 }
 
+function draftOwnerOptions(campaigns: Campaign[]) {
+  return [
+    ...campaigns.flatMap((campaign) => [
+      ...(campaign.owner ? [campaign.owner] : []),
+      ...campaign.members.map((member) => ({
+        display_name: member.display_name,
+        profile_id: member.profile_id,
+      })),
+    ]),
+  ].filter(
+    (owner, index, owners) =>
+      owners.findIndex((entry) => entry.profile_id === owner.profile_id) === index,
+  );
+}
+
+function draftSearchText(item: MarketingContentItem): string {
+  return [
+    item.title,
+    item.copy_text,
+    ...item.channels.map((channel) => channel.copy_text_override),
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+}
+
+function draftMatchesSearch(item: MarketingContentItem, search: string): boolean {
+  const query = search.trim().toLowerCase();
+  return !query || draftSearchText(item).includes(query);
+}
+
+function draftRecentlyUpdated(item: MarketingContentItem, updatedWithinDays: DraftUpdatedFilter) {
+  if (!updatedWithinDays) {
+    return true;
+  }
+  const updatedAt = new Date(item.updated_at).getTime();
+  if (Number.isNaN(updatedAt)) {
+    return false;
+  }
+  const days = Number(updatedWithinDays);
+  return updatedAt >= Date.now() - days * 24 * 60 * 60 * 1000;
+}
+
 function DraftsTab({
   canCreate,
   campaigns,
@@ -1221,17 +1288,68 @@ function DraftsTab({
   onItemClick: (item: MarketingContentItem) => void;
   workspaceId: string;
 }) {
+  const [filters, setFilters] = useState<DraftFilters>(emptyDraftFilters);
+  const updateFilter = useCallback((next: Partial<DraftFilters>) => {
+    setFilters((current) => ({ ...current, ...next }));
+  }, []);
+  const resetFilters = useCallback(() => setFilters(emptyDraftFilters), []);
   const draftOptions = useMemo<MarketingContentListOptions>(
     () => ({
+      artist_id: filters.artistId.trim() || null,
+      campaign_id: filters.campaignId || null,
+      channel: filters.channel || null,
+      content_type: filters.contentType || null,
       limit: 500,
       offset: 0,
+      owner_profile_id: filters.ownerProfileId || null,
+      release_id: filters.releaseId.trim() || null,
       status: "draft",
     }),
-    [],
+    [
+      filters.artistId,
+      filters.campaignId,
+      filters.channel,
+      filters.contentType,
+      filters.ownerProfileId,
+      filters.releaseId,
+    ],
   );
   const drafts = useWorkspaceMarketingContent(workspaceId, draftOptions);
-  const draftItems = (drafts.data?.marketing_content ?? []).filter(
+  const serverDraftItems = (drafts.data?.marketing_content ?? []).filter(
     (draft) => draft.status === "draft",
+  );
+  const draftItems = useMemo(
+    () =>
+      serverDraftItems
+        .filter(
+          (draft) =>
+            draftMatchesSearch(draft, filters.search) &&
+            draftRecentlyUpdated(draft, filters.updatedWithinDays),
+        )
+        .sort(
+          (left, right) =>
+            new Date(right.updated_at).getTime() - new Date(left.updated_at).getTime() ||
+            left.title.localeCompare(right.title),
+        ),
+    [filters.search, filters.updatedWithinDays, serverDraftItems],
+  );
+  const activeFilters = filtersActive(filters);
+  const ownerOptions = draftOwnerOptions(campaigns);
+  const artistOptions = [
+    ...campaigns.flatMap((campaign) => [
+      ...(campaign.primary_artist ? [campaign.primary_artist] : []),
+      ...campaign.artists.map((entry) => entry.artist),
+    ]),
+  ].filter(
+    (artist, index, artists) => artists.findIndex((entry) => entry.id === artist.id) === index,
+  );
+  const releaseOptions = [
+    ...campaigns.flatMap((campaign) => [
+      ...(campaign.release ? [campaign.release] : []),
+      ...campaign.releases.map((entry) => entry.release),
+    ]),
+  ].filter(
+    (release, index, releases) => releases.findIndex((entry) => entry.id === release.id) === index,
   );
 
   return (
@@ -1244,7 +1362,146 @@ function DraftsTab({
               Unsubmitted marketing content where status is draft.
             </p>
           </div>
-          <Badge>{draftItems.length} drafts</Badge>
+          <Badge>
+            {draftItems.length}
+            {activeFilters ? ` of ${serverDraftItems.length}` : ""} drafts
+          </Badge>
+        </div>
+      </Card>
+
+      <Card className="grid gap-3 p-4">
+        <div className="grid gap-3 lg:grid-cols-[minmax(220px,1.5fr)_repeat(3,minmax(150px,1fr))]">
+          <label className="grid gap-1 text-sm font-medium text-slate-700">
+            <span>Search title or copy</span>
+            <input
+              className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950"
+              onChange={(event) => updateFilter({ search: event.target.value })}
+              placeholder="Search drafts"
+              type="search"
+              value={filters.search}
+            />
+          </label>
+          <label className="grid gap-1 text-sm font-medium text-slate-700">
+            <span>Campaign</span>
+            <select
+              className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950"
+              onChange={(event) => updateFilter({ campaignId: event.target.value })}
+              value={filters.campaignId}
+            >
+              <option value="">All campaigns</option>
+              {campaigns.map((campaign) => (
+                <option key={campaign.id} value={campaign.id}>
+                  {campaign.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="grid gap-1 text-sm font-medium text-slate-700">
+            <span>Channel</span>
+            <select
+              className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950"
+              onChange={(event) => updateFilter({ channel: event.target.value })}
+              value={filters.channel}
+            >
+              <option value="">Any channel</option>
+              {channelOptions.map((channel) => (
+                <option key={channel} value={channel}>
+                  {humanize(channel)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="grid gap-1 text-sm font-medium text-slate-700">
+            <span>Content type</span>
+            <select
+              className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950"
+              onChange={(event) => updateFilter({ contentType: event.target.value })}
+              value={filters.contentType}
+            >
+              <option value="">Any type</option>
+              {contentTypeOptions.map((contentType) => (
+                <option key={contentType} value={contentType}>
+                  {humanize(contentType)}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+        <div className="grid gap-3 md:grid-cols-4">
+          <label className="grid gap-1 text-sm font-medium text-slate-700">
+            <span>Artist</span>
+            <select
+              className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950"
+              onChange={(event) => updateFilter({ artistId: event.target.value })}
+              value={filters.artistId}
+            >
+              <option value="">Any artist</option>
+              {artistOptions.map((artist) => (
+                <option key={artist.id} value={artist.id}>
+                  {artist.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="grid gap-1 text-sm font-medium text-slate-700">
+            <span>Release</span>
+            <select
+              className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950"
+              onChange={(event) => updateFilter({ releaseId: event.target.value })}
+              value={filters.releaseId}
+            >
+              <option value="">Any release</option>
+              {releaseOptions.map((release) => (
+                <option key={release.id} value={release.id}>
+                  {release.title}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="grid gap-1 text-sm font-medium text-slate-700">
+            <span>Owner</span>
+            <select
+              className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950"
+              onChange={(event) => updateFilter({ ownerProfileId: event.target.value })}
+              value={filters.ownerProfileId}
+            >
+              <option value="">Any owner</option>
+              {ownerOptions.map((owner) => (
+                <option key={owner.profile_id} value={owner.profile_id}>
+                  {owner.display_name ?? owner.profile_id}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="grid gap-1 text-sm font-medium text-slate-700">
+            <span>Recently updated</span>
+            <select
+              className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950"
+              onChange={(event) =>
+                updateFilter({ updatedWithinDays: event.target.value as DraftUpdatedFilter })
+              }
+              value={filters.updatedWithinDays}
+            >
+              <option value="">Any time</option>
+              <option value="7">Last 7 days</option>
+              <option value="30">Last 30 days</option>
+            </select>
+          </label>
+        </div>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <p className="text-xs text-slate-500">
+            Draft status is fixed. Linked filters use the marketing content API; search and updated
+            recency apply to the loaded draft set.
+          </p>
+          <Button
+            disabled={!activeFilters}
+            onClick={resetFilters}
+            size="sm"
+            type="button"
+            variant="secondary"
+          >
+            Clear filters
+          </Button>
         </div>
       </Card>
 
@@ -1268,15 +1525,23 @@ function DraftsTab({
         </Card>
       ) : draftItems.length === 0 ? (
         <EmptyState
-          description="Draft posts appear here before they are submitted for approval or scheduled."
+          description={
+            activeFilters
+              ? "Try clearing filters or broadening the search terms."
+              : "Draft posts appear here before they are submitted for approval or scheduled."
+          }
           action={
-            canCreate ? (
+            activeFilters ? (
+              <Button onClick={resetFilters} type="button" variant="secondary">
+                Clear filters
+              </Button>
+            ) : canCreate ? (
               <Button onClick={onCreate} type="button">
                 Create Draft
               </Button>
             ) : null
           }
-          title="No draft posts"
+          title={activeFilters ? "No matching draft posts" : "No draft posts"}
         />
       ) : (
         <Card className="overflow-hidden p-0">

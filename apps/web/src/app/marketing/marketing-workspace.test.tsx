@@ -1474,7 +1474,7 @@ describe("MarketingWorkspace", () => {
     expect(screen.getByText("BTS Draft")).toBeInTheDocument();
     expect(screen.getByText("Behind the scenes clip for release week.")).toBeInTheDocument();
     expect(screen.getByText("Short Video - Instagram / Tiktok")).toBeInTheDocument();
-    expect(screen.getByText("Single Rollout")).toBeInTheDocument();
+    expect(screen.getAllByText("Single Rollout").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("Artist: artist_01")).toBeInTheDocument();
     expect(screen.getByText("Release: release_01")).toBeInTheDocument();
     expect(screen.getByText("Instagram / Reels, Tiktok / Video")).toBeInTheDocument();
@@ -1482,6 +1482,128 @@ describe("MarketingWorkspace", () => {
     expect(screen.getByText("Changes requested")).toBeInTheDocument();
     expect(screen.getByText("2026-09-12")).toBeInTheDocument();
     expect(screen.getByText("Owner profile_owner")).toBeInTheDocument();
+  });
+
+  it("filters draft posts with existing API dimensions and local search plus recency", () => {
+    vi.mocked(campaignsLib.useCampaigns).mockReturnValue({
+      data: {
+        campaigns: [
+          {
+            ...campaign,
+            members: [
+              {
+                display_name: "Draft Owner",
+                is_owner: true,
+                participation_status: "active",
+                profile_id: "profile_owner",
+                responsibility_label: null,
+                workspace_membership_id: "membership_owner",
+              },
+            ],
+            owner: { display_name: "Draft Owner", profile_id: "profile_owner" },
+            owner_profile_id: "profile_owner",
+          },
+        ],
+        limit: 500,
+        offset: 0,
+        total: 1,
+      },
+      error: null,
+      isLoading: false,
+      isMutating: false,
+      reload: vi.fn(),
+    });
+    mockDrafts([
+      item({
+        id: "content_bts",
+        channels: [channel({ channel: "tiktok", copy_text_override: "Alt behind clip" })],
+        content_type: "video",
+        copy_text: "Behind the scenes clip.",
+        owner_profile_id: "profile_owner",
+        status: "draft",
+        title: "BTS Draft",
+        updated_at: "2026-09-12T10:30:00Z",
+      }),
+      item({
+        id: "content_radio",
+        channels: [channel({ channel: "instagram" })],
+        content_type: "social_post",
+        copy_text: "Radio push.",
+        owner_profile_id: null,
+        status: "draft",
+        title: "Radio Draft",
+        updated_at: "2026-08-01T10:30:00Z",
+      }),
+    ]);
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+
+    fireEvent.change(screen.getByLabelText("Search title or copy"), {
+      target: { value: "behind" },
+    });
+    fireEvent.change(screen.getByLabelText("Recently updated"), { target: { value: "7" } });
+    fireEvent.change(screen.getByLabelText("Campaign"), { target: { value: "campaign_01" } });
+    fireEvent.change(screen.getByLabelText("Channel"), { target: { value: "tiktok" } });
+    fireEvent.change(screen.getByLabelText("Content type"), { target: { value: "video" } });
+    fireEvent.change(screen.getByLabelText("Artist"), { target: { value: "artist_01" } });
+    fireEvent.change(screen.getByLabelText("Release"), { target: { value: "release_01" } });
+    fireEvent.change(screen.getByLabelText("Owner"), { target: { value: "profile_owner" } });
+
+    expect(screen.getByText("BTS Draft")).toBeInTheDocument();
+    expect(screen.queryByText("Radio Draft")).not.toBeInTheDocument();
+    expect(marketingContent.useWorkspaceMarketingContent).toHaveBeenLastCalledWith(
+      "workspace_01",
+      expect.objectContaining({
+        artist_id: "artist_01",
+        campaign_id: "campaign_01",
+        channel: "tiktok",
+        content_type: "video",
+        limit: 500,
+        offset: 0,
+        owner_profile_id: "profile_owner",
+        release_id: "release_01",
+        status: "draft",
+      }),
+    );
+  });
+
+  it("clears draft filters and restores the default draft query", () => {
+    mockDrafts([
+      item({
+        id: "content_bts",
+        copy_text: "Behind the scenes clip.",
+        status: "draft",
+        title: "BTS Draft",
+        updated_at: "2026-09-12T10:30:00Z",
+      }),
+      item({
+        id: "content_radio",
+        copy_text: "Radio push.",
+        status: "draft",
+        title: "Radio Draft",
+        updated_at: "2026-08-01T10:30:00Z",
+      }),
+    ]);
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+    fireEvent.change(screen.getByLabelText("Search title or copy"), {
+      target: { value: "behind" },
+    });
+
+    expect(screen.getByText("BTS Draft")).toBeInTheDocument();
+    expect(screen.queryByText("Radio Draft")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Clear filters" }));
+
+    expect(screen.getByText("BTS Draft")).toBeInTheDocument();
+    expect(screen.getByText("Radio Draft")).toBeInTheDocument();
+    expect(screen.getByLabelText("Search title or copy")).toHaveValue("");
+    expect(marketingContent.useWorkspaceMarketingContent).toHaveBeenLastCalledWith(
+      "workspace_01",
+      expect.objectContaining({ limit: 500, offset: 0, status: "draft" }),
+    );
   });
 
   it("opens the drafts surface directly from navigation query params", () => {

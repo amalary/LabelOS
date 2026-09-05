@@ -73,11 +73,13 @@ describe("marketing content data layer", () => {
         release: "release_01",
         status: "draft",
         channel: "instagram",
+        content_type: "social_post",
+        owner_profile_id: "profile_01",
       }),
     ).resolves.toMatchObject({ total: 1 });
 
     expect(fetch).toHaveBeenCalledWith(
-      "/api/workspaces/workspace_01/marketing-content?start=2026-09-01T00%3A00%3A00Z&end=2026-09-30T23%3A59%3A59Z&status=draft&channel=instagram&campaign_id=campaign_01&artist_id=artist_01&release_id=release_01",
+      "/api/workspaces/workspace_01/marketing-content?start=2026-09-01T00%3A00%3A00Z&end=2026-09-30T23%3A59%3A59Z&status=draft&channel=instagram&content_type=social_post&owner_profile_id=profile_01&campaign_id=campaign_01&artist_id=artist_01&release_id=release_01",
       expect.objectContaining({
         cache: "no-store",
         headers: expect.any(Headers),
@@ -92,9 +94,10 @@ describe("marketing content data layer", () => {
         status: "draft",
         start: "2026-09-01T00:00:00Z",
         end: "2026-09-30T23:59:59Z",
+        owner_profile_id: "profile_01",
       }),
     ).toBe(
-      "marketing-content:workspace-list:workspace_01:channel:instagram|end:2026-09-30T23:59:59Z|start:2026-09-01T00:00:00Z|status:draft",
+      "marketing-content:workspace-list:workspace_01:channel:instagram|end:2026-09-30T23:59:59Z|owner_profile_id:profile_01|start:2026-09-01T00:00:00Z|status:draft",
     );
   });
 
