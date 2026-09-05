@@ -735,7 +735,7 @@ function ContentEditor({
       return;
     }
     try {
-      await submitApproval.mutate({});
+      await submitApproval.mutate({ expected_resource_revision: item.content_revision });
       onSaved(null);
     } catch {
       // The mutation state renders API denial and invalid transition messages.
@@ -1124,9 +1124,9 @@ function ContentEditorDetail({
   timeZone: string;
 }) {
   const detail = useMarketingContentItem(
-    mode === "edit" ? item?.workspace_id ?? null : null,
-    mode === "edit" ? item?.campaign_id ?? null : null,
-    mode === "edit" ? item?.id ?? null : null,
+    mode === "edit" ? (item?.workspace_id ?? null) : null,
+    mode === "edit" ? (item?.campaign_id ?? null) : null,
+    mode === "edit" ? (item?.id ?? null) : null,
   );
 
   if (mode === "edit") {
@@ -1153,9 +1153,7 @@ function ContentEditorDetail({
           <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
             <div>
               <h2 className="text-lg font-semibold text-slate-950">Edit content</h2>
-              <p className="text-sm text-slate-500">
-                {item?.title ?? "Marketing content detail"}
-              </p>
+              <p className="text-sm text-slate-500">{item?.title ?? "Marketing content detail"}</p>
             </div>
             <Button onClick={onCancel} size="sm" type="button" variant="secondary">
               Close
@@ -2536,17 +2534,20 @@ export function MarketingWorkspace() {
     updateUrl(filters);
   }, [filters, updateUrl]);
 
-  const handleSaved = useCallback((savedItem: MarketingContentItem | null) => {
-    setEditor(null);
-    updateUrl(filters);
-    setSaveNotice(
-      savedItem
-        ? `Saved ${savedItem.title}. Revision ${savedItem.content_revision}.`
-        : "Marketing content updated.",
-    );
-    setSavedRevision((current) => current + 1);
-    void calendarContent.reload().catch(() => undefined);
-  }, [calendarContent, filters, updateUrl]);
+  const handleSaved = useCallback(
+    (savedItem: MarketingContentItem | null) => {
+      setEditor(null);
+      updateUrl(filters);
+      setSaveNotice(
+        savedItem
+          ? `Saved ${savedItem.title}. Revision ${savedItem.content_revision}.`
+          : "Marketing content updated.",
+      );
+      setSavedRevision((current) => current + 1);
+      void calendarContent.reload().catch(() => undefined);
+    },
+    [calendarContent, filters, updateUrl],
+  );
 
   const updateFilters = useCallback(
     (next: Partial<CalendarFilters>) => {
@@ -2761,18 +2762,14 @@ export function MarketingWorkspace() {
                   updateUrl(filters, dateKey);
                 }
               }}
-              onItemClick={(selectedItem) =>
-                openEditEditor(selectedItem, "calendar")
-              }
+              onItemClick={(selectedItem) => openEditEditor(selectedItem, "calendar")}
               timeZone={timeZone}
             />
           ) : (
             <CalendarList
               campaigns={campaignList}
               instances={scheduleInstances}
-              onItemClick={(selectedItem) =>
-                openEditEditor(selectedItem, "calendar")
-              }
+              onItemClick={(selectedItem) => openEditEditor(selectedItem, "calendar")}
               timeZone={timeZone}
             />
           )}
@@ -2808,9 +2805,7 @@ export function MarketingWorkspace() {
             canCreate={canCreate}
             campaigns={campaignList}
             onCreate={() => openCreateEditor(null, "drafts")}
-            onItemClick={(selectedItem) =>
-              openEditEditor(selectedItem, "drafts")
-            }
+            onItemClick={(selectedItem) => openEditEditor(selectedItem, "drafts")}
             savedRevision={savedRevision}
             workspaceId={activeWorkspace.id}
           />

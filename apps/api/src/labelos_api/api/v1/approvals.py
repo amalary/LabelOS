@@ -58,6 +58,7 @@ class ApprovalSubmitRequest(BaseModel):
 
     summary: str | None = Field(default=None, max_length=4000)
     metadata: dict[str, Any] | None = None
+    expected_resource_revision: int | None = Field(default=None, ge=1)
 
 
 class ApprovalDecisionRequest(BaseModel):
@@ -721,6 +722,7 @@ async def submit_campaign_marketing_content_approval_request(
             actor=context,
             summary=payload.summary,
             metadata_json=payload.metadata,
+            expected_resource_revision=payload.expected_resource_revision,
         )
     except (MarketingContentNotFoundError, MarketingContentAuthorizationError) as exc:
         if isinstance(exc, MarketingContentAuthorizationError):

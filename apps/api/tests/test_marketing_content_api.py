@@ -9,6 +9,8 @@ from fastapi.testclient import TestClient
 from labelos_database.base import Base
 from labelos_database.capabilities import Capability
 from labelos_database.models import (
+    ApprovalRequest,
+    ApprovalRequestStatus,
     Artist,
     Campaign,
     MembershipRole,
@@ -1084,6 +1086,186 @@ def test_approval_queue_capabilities_and_error_mapping(
         ).status_code
         == 400
     )
+
+
+def test_draft_edit_submit_changes_requested_and_resubmit_revision_lifecycle(
+    marketing_content_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededMarketingContentApi,
+    ],
+) -> None:
+    client, sessionmaker, seeded = marketing_content_client
+    _set_context(client, seeded)
+    base = _base(seeded)
+
+    created = client.post(
+        base,
+        json={
+            **_draft_payload(seeded, title="Draft Lifecycle"),
+            "channels": [{"channel": "Instagram", "placement": "Feed"}],
+        },
+    ).json()
+    edited = client.patch(
+        f"{base}/{created['id']}",
+        json={
+            "title": "Draft Lifecycle Edited",
+            "copy_text": "Updated copy.",
+            "channels": [
+                {
+                    "channel": "Instagram",
+                    "placement": "Reels",
+                    "copy_text_override": "Updated IG.",
+                }
+            ],
+        },
+    )
+    assert edited.status_code == 200
+    assert edited.json()["status"] == "draft"
+    assert edited.json()["content_revision"] == 2
+    assert edited.json()["approval_state"]["current_revision"] == 2
+
+    stale_submit = client.post(
+        _approval_submit_base(seeded, created["id"]),
+        json={"expected_resource_revision": 1},
+    )
+    assert stale_submit.status_code == 409
+
+    submitted = client.post(
+        _approval_submit_base(seeded, created["id"]),
+        json={"expected_resource_revision": 2},
+    )
+    assert submitted.status_code == 201
+    original_approval_id = submitted.json()["id"]
+    assert submitted.json()["submitted_revision"] == 2
+    assert submitted.json()["current_resource_revision"] == 2
+    assert submitted.json()["is_stale"] is False
+
+    _set_context(
+        client,
+        seeded,
+        user_id=seeded.approver_user_id,
+        email="marketing-approver-profile@example.com",
+        capability_permissions=(
+            Capability.marketing_content_view.value,
+            Capability.marketing_content_approve.value,
+        ),
+        department_access=("marketing",),
+    )
+    changes = client.post(
+        f"{_approvals_base(seeded)}/{original_approval_id}/decisions",
+        json={"action": "changes_requested", "reason": "Tighten the CTA."},
+    )
+    assert changes.status_code == 200
+    assert changes.json()["status"] == "changes_requested"
+
+    _set_context(client, seeded)
+    returned = client.get(f"{base}/{created['id']}")
+    assert returned.status_code == 200
+    assert returned.json()["status"] == "draft"
+    assert returned.json()["approval_state"]["state"] == "changes_requested"
+    assert returned.json()["approval_request_id"] == original_approval_id
+    assert returned.json()["content_revision"] == 2
+
+    returned_edit = client.patch(
+        f"{base}/{created['id']}",
+        json={"copy_text": "CTA tightened."},
+    )
+    assert returned_edit.status_code == 200
+    assert returned_edit.json()["status"] == "draft"
+    assert returned_edit.json()["content_revision"] == 3
+    # Existing projection keeps the returned approval context visible until
+    # the next submission replaces it with a current-revision request.
+    assert returned_edit.json()["approval_request_id"] == original_approval_id
+
+    stale_resubmit = client.post(
+        _approval_submit_base(seeded, created["id"]),
+        json={"expected_resource_revision": 2},
+    )
+    assert stale_resubmit.status_code == 409
+
+    resubmitted = client.post(
+        _approval_submit_base(seeded, created["id"]),
+        json={"expected_resource_revision": 3},
+    )
+    assert resubmitted.status_code == 201
+    assert resubmitted.json()["id"] != original_approval_id
+    assert resubmitted.json()["submitted_revision"] == 3
+    assert resubmitted.json()["marketing_content_preview"]["current_revision"] == 3
+
+    async def request_statuses() -> tuple[ApprovalRequestStatus, ApprovalRequestStatus]:
+        async with sessionmaker() as session:
+            original = await session.get(ApprovalRequest, UUID(original_approval_id))
+            latest = await session.get(ApprovalRequest, UUID(resubmitted.json()["id"]))
+            assert original is not None
+            assert latest is not None
+            return original.status, latest.status
+
+    assert asyncio.run(request_statuses()) == (
+        ApprovalRequestStatus.changes_requested,
+        ApprovalRequestStatus.in_review,
+    )
+
+
+def test_approved_material_edit_returns_to_draft_and_preserves_stale_approval_boundary(
+    marketing_content_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededMarketingContentApi,
+    ],
+) -> None:
+    client, _sessionmaker, seeded = marketing_content_client
+    _set_context(client, seeded)
+    base = _base(seeded)
+
+    created = client.post(
+        base,
+        json={
+            **_draft_payload(seeded, title="Approved Lifecycle"),
+            "scheduled_at": datetime(2026, 9, 10, 12, 0, tzinfo=UTC).isoformat(),
+        },
+    ).json()
+    submitted = client.post(
+        _approval_submit_base(seeded, created["id"]),
+        json={"expected_resource_revision": 1},
+    ).json()
+    _set_context(
+        client,
+        seeded,
+        user_id=seeded.approver_user_id,
+        email="marketing-approver-profile@example.com",
+        capability_permissions=(
+            Capability.marketing_content_view.value,
+            Capability.marketing_content_approve.value,
+        ),
+        department_access=("marketing",),
+    )
+    approved = client.post(
+        f"{_approvals_base(seeded)}/{submitted['id']}/decisions",
+        json={"action": "approved"},
+    )
+    assert approved.status_code == 200
+
+    _set_context(client, seeded)
+    edited = client.patch(
+        f"{base}/{created['id']}",
+        json={"title": "Approved Lifecycle Edited"},
+    )
+    assert edited.status_code == 200
+    assert edited.json()["status"] == "draft"
+    assert edited.json()["content_revision"] == 2
+    assert edited.json()["approved_revision"] == 1
+    assert edited.json()["approved_at"] is None
+    assert edited.json()["approved_by_profile_id"] is None
+    assert edited.json()["approval_request_id"] is None
+    assert edited.json()["approval_state"]["state"] == "reapproval_required"
+    assert edited.json()["approval_state"]["approved_revision_is_current"] is False
+
+    schedule = client.patch(
+        f"{base}/{created['id']}/status",
+        json={"status": "scheduled"},
+    )
+    assert schedule.status_code == 409
 
 
 def test_approval_queue_decisions_and_idempotency(

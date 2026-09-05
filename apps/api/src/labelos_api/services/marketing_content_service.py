@@ -1058,6 +1058,79 @@ async def update_content_item(
     return updated
 
 
+async def update_content_item_with_channels(
+    session: AsyncSession,
+    workspace_id: UUID,
+    content_item_id: UUID,
+    payload: MarketingContentItemUpdate,
+    channels: Sequence[MarketingContentChannelCreate],
+    *,
+    actor: AuthorizationActorInput | None = None,
+) -> MarketingContentItem:
+    item = await _load_content_item_for_workspace(
+        session,
+        workspace_id,
+        content_item_id,
+    )
+    await _require_capability(
+        session,
+        actor=actor,
+        workspace_id=workspace_id,
+        capability=Capability.marketing_content_edit,
+        campaign_id=item.campaign_id,
+    )
+    values = _update_values(payload)
+    relationship_values = dict(values)
+    relationship_values.setdefault("campaign_id", item.campaign_id)
+    if "artist_id" not in relationship_values and item.artist_id is not None:
+        relationship_values["artist_id"] = item.artist_id
+    if "release_id" not in relationship_values and item.release_id is not None:
+        relationship_values["release_id"] = item.release_id
+    await _validate_item_relationships(session, workspace_id, relationship_values)
+    channel_values = [_channel_create_values(channel) for channel in channels]
+    _assert_unique_channel_targets(channel_values)
+    changed_fields = _changed_fields(item, values) if values else set()
+    channel_material_change = _replacement_channels_materially_changed(
+        item,
+        channel_values,
+    )
+    item_material_change = bool(
+        payload.material_change and changed_fields & MATERIAL_FIELDS
+    )
+    if not changed_fields and not channel_material_change:
+        return item
+    if item_material_change or channel_material_change:
+        await _apply_material_change(
+            session,
+            workspace_id=workspace_id,
+            item=item,
+            actor=actor,
+        )
+    if changed_fields:
+        updated = await marketing_content.update_item(
+            session,
+            workspace_id,
+            content_item_id,
+            {key: values[key] for key in changed_fields},
+        )
+        if updated is None:
+            raise MarketingContentNotFoundError("Marketing content item not found")
+        item = updated
+    if channel_material_change:
+        await marketing_content.replace_channels(session, item.id, channel_values)
+        session.expire(item, ["channels"])
+    await _publish_content_event(
+        session,
+        workspace_id=workspace_id,
+        event_type=RealtimeEventType.marketing_content_updated,
+        actor=actor,
+        item=item,
+        status=item.status,
+    )
+    await session.commit()
+    return await get_content_item(session, workspace_id, item.id)
+
+
 async def replace_channels(
     session: AsyncSession,
     workspace_id: UUID,

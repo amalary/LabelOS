@@ -835,7 +835,11 @@ describe("MarketingWorkspace", () => {
     fireEvent.click(screen.getByRole("button", { name: /Single Teaser/ }));
     fireEvent.click(screen.getByRole("button", { name: "Submit for approval" }));
 
-    await waitFor(() => expect(mutationMocks.approvalSubmit).toHaveBeenCalledWith({}));
+    await waitFor(() =>
+      expect(mutationMocks.approvalSubmit).toHaveBeenCalledWith({
+        expected_resource_revision: 1,
+      }),
+    );
     expect(mutationMocks.status).not.toHaveBeenCalled();
   });
 
@@ -1600,8 +1604,9 @@ describe("MarketingWorkspace", () => {
     expect(within(editor).getByDisplayValue("Existing draft copy")).toBeInTheDocument();
     expect(within(editor).getByDisplayValue("reels")).toBeInTheDocument();
     expect(within(editor).getByDisplayValue("Existing IG copy")).toBeInTheDocument();
-    expect(within(editor).getByText("Current status: Draft - Approval: Draft - Revision 3"))
-      .toBeInTheDocument();
+    expect(
+      within(editor).getByText("Current status: Draft - Approval: Draft - Revision 3"),
+    ).toBeInTheDocument();
 
     fireEvent.change(within(editor).getByLabelText("Title"), {
       target: { value: "Updated Draft Caption" },
@@ -1633,7 +1638,9 @@ describe("MarketingWorkspace", () => {
         title: "Updated Draft Caption",
       }),
     );
-    expect(screen.getByRole("status")).toHaveTextContent("Saved Updated Draft Caption. Revision 4.");
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Saved Updated Draft Caption. Revision 4.",
+    );
     expect(calendarReload).toHaveBeenCalled();
     await waitFor(() => expect(draftsReload).toHaveBeenCalled());
   });
@@ -1810,6 +1817,52 @@ describe("MarketingWorkspace", () => {
     expect(screen.getByText("Changes requested")).toBeInTheDocument();
     expect(screen.getByText("2026-09-12")).toBeInTheDocument();
     expect(screen.getByText("Owner profile_owner")).toBeInTheDocument();
+  });
+
+  it("resubmits returned draft content with the current revision from Draft Posts", async () => {
+    vi.useRealTimers();
+    const draft = item({
+      approval_request_id: "approval_02",
+      approval_state: {
+        approval_request_id: "approval_02",
+        approved_revision: null,
+        approved_revision_is_current: false,
+        can_schedule: false,
+        current_revision: 3,
+        label: "Changes requested",
+        state: "changes_requested",
+      },
+      content_revision: 3,
+      id: "content_draft_02",
+      status: "draft",
+      title: "Returned Draft",
+    });
+    mockWorkspaceProfile([
+      "marketing.content.view",
+      "marketing.content.edit",
+      "marketing.content.submit_for_review",
+    ]);
+    mockDrafts([draft]);
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+
+    expect(screen.getByText("Changes requested")).toBeInTheDocument();
+    expect(screen.getByText("Revision 3")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open draft Returned Draft" }));
+    const editor = screen.getByRole("region", { name: "Marketing content editor" });
+    expect(
+      within(editor).getByText("Current status: Draft - Approval: Changes requested - Revision 3"),
+    ).toBeInTheDocument();
+
+    fireEvent.click(within(editor).getByRole("button", { name: "Resubmit for approval" }));
+
+    await waitFor(() =>
+      expect(mutationMocks.approvalSubmit).toHaveBeenCalledWith({
+        expected_resource_revision: 3,
+      }),
+    );
   });
 
   it("filters draft posts with existing API dimensions and local search plus recency", () => {

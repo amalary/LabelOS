@@ -578,19 +578,21 @@ async def update_marketing_content(
         context=context,
     )
     try:
-        item = await marketing_content_service.update_content_item(
-            session,
-            workspace_id,
-            content_id,
-            _update_payload(payload),
-            actor=context,
-        )
         if payload.channels is not None:
-            item = await marketing_content_service.replace_channels(
+            item = await marketing_content_service.update_content_item_with_channels(
                 session,
                 workspace_id,
                 content_id,
+                _update_payload(payload),
                 [_channel_create(channel) for channel in payload.channels],
+                actor=context,
+            )
+        else:
+            item = await marketing_content_service.update_content_item(
+                session,
+                workspace_id,
+                content_id,
+                _update_payload(payload),
                 actor=context,
             )
     except (
