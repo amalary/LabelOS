@@ -631,6 +631,75 @@ def test_marketing_content_mutations_publish_workspace_scoped_realtime_events(
     )
 
 
+def test_marketing_content_api_rejects_material_edits_to_published_content(
+    marketing_content_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededMarketingContentApi,
+    ],
+) -> None:
+    client, _sessionmaker, seeded = marketing_content_client
+    _set_context(client, seeded)
+    base = _base(seeded)
+    created = client.post(
+        base,
+        json={
+            **_draft_payload(seeded, title="Published Guard"),
+            "scheduled_at": datetime(2026, 9, 10, 12, 0, tzinfo=UTC).isoformat(),
+        },
+    ).json()
+    submitted = client.post(
+        _approval_submit_base(seeded, created["id"]),
+        json={"expected_resource_revision": 1},
+    ).json()
+    _set_context(
+        client,
+        seeded,
+        user_id=seeded.approver_user_id,
+        email="marketing-approver-profile@example.com",
+        capability_permissions=(
+            Capability.marketing_content_view.value,
+            Capability.marketing_content_approve.value,
+        ),
+        department_access=("marketing",),
+    )
+    assert (
+        client.post(
+            f"{_approvals_base(seeded)}/{submitted['id']}/decisions",
+            json={"action": "approved"},
+        ).status_code
+        == 200
+    )
+
+    _set_context(client, seeded)
+    assert (
+        client.patch(
+            f"{base}/{created['id']}/status",
+            json={"status": "scheduled"},
+        ).status_code
+        == 200
+    )
+    assert (
+        client.patch(
+            f"{base}/{created['id']}/status",
+            json={"status": "published"},
+        ).status_code
+        == 200
+    )
+    edited = client.patch(
+        f"{base}/{created['id']}",
+        json={"title": "Published Guard Edited"},
+    )
+    assert edited.status_code == 409
+    assert edited.json()["detail"] == (
+        "Published marketing content cannot receive material edits"
+    )
+    current = client.get(f"{base}/{created['id']}").json()
+    assert current["status"] == "published"
+    assert current["content_revision"] == 1
+    assert current["approved_revision"] == 1
+
+
 def test_marketing_content_does_not_publish_realtime_event_on_failed_mutation(
     marketing_content_client: tuple[
         TestClient,
@@ -1188,9 +1257,7 @@ def test_marketing_content_draft_authoring_accepts_multi_channel_overrides_only(
     ]
     assert content["channels"][0]["placement"] == "reel"
     assert content["channels"][0]["copy_text_override"] == "IG cut"
-    assert content["channels"][0]["asset_refs"] == [
-        {"kind": "video", "id": "ig-video"}
-    ]
+    assert content["channels"][0]["asset_refs"] == [{"kind": "video", "id": "ig-video"}]
     assert content["channels"][0]["published_at"] is None
     assert content["channels"][0]["external_post_id"] is None
     assert content["channels"][0]["external_url"] is None

@@ -1118,6 +1118,60 @@ def test_marketing_content_service_clears_approval_on_material_content_change(
     assert asyncio.run(run()) == (MarketingContentItemStatus.draft, True)
 
 
+def test_marketing_content_service_rejects_material_edits_to_published_content(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async def run() -> tuple[bool, MarketingContentItemStatus, int, int | None]:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            campaign = data["campaign"]
+            assert isinstance(workspace, Organization)
+            assert isinstance(campaign, Campaign)
+            item = await create_content_item(
+                session,
+                workspace.id,
+                MarketingContentItemCreate(
+                    campaign_id=campaign.id,
+                    title="Published",
+                    content_type="image",
+                    scheduled_at=datetime(2026, 9, 10, tzinfo=UTC),
+                ),
+            )
+            await _submit_and_approve_content(session, workspace.id, item.id)
+            await transition_status(session, workspace.id, item.id, "scheduled")
+            published = await transition_status(
+                session, workspace.id, item.id, "published"
+            )
+            denied = False
+            try:
+                await update_content_item(
+                    session,
+                    workspace.id,
+                    item.id,
+                    MarketingContentItemUpdate(
+                        title="Published Edited",
+                        material_change=True,
+                    ),
+                )
+            except MarketingContentLifecycleError:
+                denied = True
+            await session.refresh(published)
+            return (
+                denied,
+                published.status,
+                published.content_revision,
+                published.approved_revision,
+            )
+
+    assert asyncio.run(run()) == (
+        True,
+        MarketingContentItemStatus.published,
+        1,
+        1,
+    )
+
+
 def test_marketing_content_service_routes_legacy_submit_and_approve_to_queue(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:

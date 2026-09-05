@@ -694,6 +694,10 @@ async def _apply_material_change(
     item: MarketingContentItem,
     actor: AuthorizationActorInput | None,
 ) -> bool:
+    if item.status == MarketingContentItemStatus.published:
+        raise MarketingContentLifecycleError(
+            "Published marketing content cannot receive material edits"
+        )
     approval_was_current = (
         item.approval_request_id is not None
         and item.approved_revision == item.content_revision

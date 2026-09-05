@@ -283,7 +283,9 @@ describe("approvals data layer", () => {
     );
 
     await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
-    await approveApprovalRequest("workspace_01", "approval_01");
+    await act(async () => {
+      await approveApprovalRequest("workspace_01", "approval_01");
+    });
     await waitFor(() => expect(fetch).toHaveBeenCalledTimes(5));
 
     expect(fetch).toHaveBeenNthCalledWith(
@@ -317,11 +319,13 @@ describe("approvals data layer", () => {
     );
 
     await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
-    handleApprovalRealtimeInvalidation({
-      approvalRequestId: "approval_01",
-      campaignId: "campaign_01",
-      contentItemId: "content_01",
-      workspaceId: "workspace_01",
+    act(() => {
+      handleApprovalRealtimeInvalidation({
+        approvalRequestId: "approval_01",
+        campaignId: "campaign_01",
+        contentItemId: "content_01",
+        workspaceId: "workspace_01",
+      });
     });
     await waitFor(() => expect(fetch).toHaveBeenCalledTimes(4));
   });
