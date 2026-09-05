@@ -281,6 +281,7 @@ def test_campaign_calendar_projects_parent_and_channel_content_schedules(
         campaign_calendar.MARKETING_CONTENT_CHANNEL_PUBLISHED,
     ]
 
+
 def test_campaign_calendar_projects_existing_marketing_content_event_types_only(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:

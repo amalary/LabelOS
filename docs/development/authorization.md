@@ -313,15 +313,15 @@ Draft Posts scheduling and publish transitions intentionally do not introduce
 new capabilities yet. The completed Draft Posts workflow maps UI actions to the
 existing marketing content capabilities:
 
-| Draft Posts action                    | Capability                                      |
-| ------------------------------------- | ----------------------------------------------- |
-| View draft list and draft detail      | `marketing.content.view`                        |
-| Create draft posts                    | `marketing.content.create`                      |
-| Edit draft fields, channel targets, and planned publish times | `marketing.content.edit` |
-| Archive draft posts                   | `marketing.content.archive`                     |
-| Submit or resubmit for approval       | `marketing.content.submit_for_review`           |
-| Approval decisions and reviewer assignment | `marketing.content.approve`                |
-| Move approved content to scheduled or published | `marketing.content.edit` plus lifecycle guards |
+| Draft Posts action                                            | Capability                                     |
+| ------------------------------------------------------------- | ---------------------------------------------- |
+| View draft list and draft detail                              | `marketing.content.view`                       |
+| Create draft posts                                            | `marketing.content.create`                     |
+| Edit draft fields, channel targets, and planned publish times | `marketing.content.edit`                       |
+| Archive draft posts                                           | `marketing.content.archive`                    |
+| Submit or resubmit for approval                               | `marketing.content.submit_for_review`          |
+| Approval decisions and reviewer assignment                    | `marketing.content.approve`                    |
+| Move approved content to scheduled or published               | `marketing.content.edit` plus lifecycle guards |
 
 Separate `marketing.content.schedule` and `marketing.content.publish`
 authorization should be revisited during Scheduling Engine and Publishing

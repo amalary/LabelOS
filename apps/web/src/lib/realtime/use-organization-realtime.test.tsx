@@ -587,7 +587,9 @@ describe("useOrganizationRealtime", () => {
       const count = (fetchCounts.get(key) ?? 0) + 1;
       fetchCounts.set(key, count);
       if (key === "approvals") {
-        return Promise.resolve(Response.json({ approvals: [], total: count, limit: 25, offset: 0 }));
+        return Promise.resolve(
+          Response.json({ approvals: [], total: count, limit: 25, offset: 0 }),
+        );
       }
       if (key === "campaign-calendar") {
         return Promise.resolve(Response.json(campaignCalendarResponse("org_01", count)));
