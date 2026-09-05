@@ -70,6 +70,11 @@ const marketingContentCalendarOptions = {
   start: "2026-09-01T00:00:00Z",
   end: "2026-09-30T23:59:59Z",
 };
+const draftPostsOptions = {
+  status: "draft" as const,
+  limit: 500,
+  offset: 0,
+};
 const campaignCalendarOptions = {
   start: "2026-09-01T00:00:00Z",
   end: "2026-09-30T23:59:59Z",
@@ -138,6 +143,23 @@ function RealtimeCampaignCalendarProbe() {
   );
 }
 
+function RealtimeCrossSurfaceMarketingProbe() {
+  const { recentActivityEvents } = useOrganizationRealtime("org_01");
+  const drafts = useWorkspaceMarketingContent("org_01", draftPostsOptions);
+  const marketingCalendar = useWorkspaceMarketingContent("org_01", marketingContentCalendarOptions);
+  const approvals = useApprovalQueue("org_01", { status: "in_review", limit: 25 });
+  const campaignCalendar = useCampaignCalendar("org_01", campaignCalendarOptions);
+  return (
+    <div>
+      <span>drafts:{drafts.data?.total ?? "none"}</span>
+      <span>marketing:{marketingCalendar.data?.total ?? "none"}</span>
+      <span>approvals:{approvals.data?.total ?? "none"}</span>
+      <span>campaign-calendar:{campaignCalendar.data?.total ?? "none"}</span>
+      <span>{recentActivityEvents[0]?.type ?? "no activity"}</span>
+    </div>
+  );
+}
+
 function campaignCalendarResponse(workspaceId: string, total: number) {
   return {
     workspace_id: workspaceId,
@@ -170,6 +192,20 @@ function realtimeEvent(type: string, organizationId = "org_01") {
       releaseId: "release_01",
     },
     created_at: new Date().toISOString(),
+  };
+}
+
+function marketingContentRealtimeEvent(type: string, status: string) {
+  return {
+    ...realtimeEvent(type),
+    id: `event_${type}_${status}`.replaceAll(".", "_"),
+    entity_type: "marketing_content_item",
+    entity_id: "content_01",
+    payload: {
+      campaignId: "campaign_01",
+      contentItemId: "content_01",
+      status,
+    },
   };
 }
 
@@ -405,6 +441,62 @@ describe("useOrganizationRealtime", () => {
     expect(screen.getByText("marketing.content.approval_requested")).toBeInTheDocument();
   });
 
+  it.each([
+    ["another user creates a draft", "marketing.content.created", "draft"],
+    ["another user edits a draft", "marketing.content.updated", "draft"],
+    ["a draft is submitted for review", "marketing.content.approval_requested", "in_review"],
+    ["approval returns content to draft", "marketing.content.status_changed", "draft"],
+    ["content becomes approved", "marketing.content.approved", "approved"],
+    ["content becomes scheduled", "marketing.content.status_changed", "scheduled"],
+    ["content is archived", "marketing.content.status_changed", "archived"],
+    ["content is published", "marketing.content.published", "published"],
+  ])(
+    "keeps Drafts, Marketing Calendar, Approval Queue, and Campaign Calendar coordinated when %s",
+    async (_label, eventType, status) => {
+      routeState.pathname = "/marketing";
+      const fetchCounts = new Map<string, number>();
+      vi.mocked(fetch).mockImplementation((input: RequestInfo | URL) => {
+        const url = String(input);
+        const key = url.includes("/approvals")
+          ? "approvals"
+          : url.includes("/campaign-calendar")
+            ? "campaign-calendar"
+            : url.includes("status=draft")
+              ? "drafts"
+              : "marketing-calendar";
+        const count = (fetchCounts.get(key) ?? 0) + 1;
+        fetchCounts.set(key, count);
+        if (key === "approvals") {
+          return Promise.resolve(
+            Response.json({ approvals: [], total: count, limit: 25, offset: 0 }),
+          );
+        }
+        if (key === "campaign-calendar") {
+          return Promise.resolve(Response.json(campaignCalendarResponse("org_01", count)));
+        }
+        return Promise.resolve(
+          Response.json({ marketing_content: [], total: count, limit: 100, offset: 0 }),
+        );
+      });
+
+      render(<RealtimeCrossSurfaceMarketingProbe />);
+      const source = FakeEventSource.instances[0]!;
+
+      await waitFor(() => expect(fetch).toHaveBeenCalledTimes(4));
+      act(() => {
+        source.emit("message", marketingContentRealtimeEvent(eventType, status));
+      });
+
+      await waitFor(() => expect(fetch).toHaveBeenCalledTimes(7));
+      expect(fetchCounts.get("drafts")).toBe(2);
+      expect(fetchCounts.get("marketing-calendar")).toBe(2);
+      expect(fetchCounts.get("approvals")).toBe(1);
+      expect(fetchCounts.get("campaign-calendar")).toBe(2);
+      expect(navigation.refresh).not.toHaveBeenCalled();
+      expect(screen.getByText(eventType)).toBeInTheDocument();
+    },
+  );
+
   it("invalidates approval and targeted marketing content caches for approval updates", async () => {
     routeState.pathname = "/approvals";
     vi.mocked(fetch)
@@ -476,6 +568,58 @@ describe("useOrganizationRealtime", () => {
       "/api/workspaces/org_01/marketing-content?start=2026-09-01T00%3A00%3A00Z&end=2026-09-30T23%3A59%3A59Z",
       expect.any(Object),
     );
+    expect(navigation.refresh).not.toHaveBeenCalled();
+    expect(screen.getByText("approval.updated")).toBeInTheDocument();
+  });
+
+  it("keeps approval state changes coordinated across Drafts, Marketing Calendar, Approval Queue, and Campaign Calendar", async () => {
+    routeState.pathname = "/marketing";
+    const fetchCounts = new Map<string, number>();
+    vi.mocked(fetch).mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      const key = url.includes("/approvals")
+        ? "approvals"
+        : url.includes("/campaign-calendar")
+          ? "campaign-calendar"
+          : url.includes("status=draft")
+            ? "drafts"
+            : "marketing-calendar";
+      const count = (fetchCounts.get(key) ?? 0) + 1;
+      fetchCounts.set(key, count);
+      if (key === "approvals") {
+        return Promise.resolve(Response.json({ approvals: [], total: count, limit: 25, offset: 0 }));
+      }
+      if (key === "campaign-calendar") {
+        return Promise.resolve(Response.json(campaignCalendarResponse("org_01", count)));
+      }
+      return Promise.resolve(
+        Response.json({ marketing_content: [], total: count, limit: 100, offset: 0 }),
+      );
+    });
+
+    render(<RealtimeCrossSurfaceMarketingProbe />);
+    const source = FakeEventSource.instances[0]!;
+
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(4));
+    act(() => {
+      source.emit("message", {
+        ...realtimeEvent("approval.updated"),
+        entity_type: "approval_request",
+        entity_id: "approval_01",
+        payload: {
+          approvalRequestId: "approval_01",
+          campaignId: "campaign_01",
+          contentItemId: "content_01",
+          status: "changes_requested",
+        },
+      });
+    });
+
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(8));
+    expect(fetchCounts.get("drafts")).toBe(2);
+    expect(fetchCounts.get("marketing-calendar")).toBe(2);
+    expect(fetchCounts.get("approvals")).toBe(2);
+    expect(fetchCounts.get("campaign-calendar")).toBe(2);
     expect(navigation.refresh).not.toHaveBeenCalled();
     expect(screen.getByText("approval.updated")).toBeInTheDocument();
   });
