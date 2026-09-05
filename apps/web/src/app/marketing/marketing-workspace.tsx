@@ -37,6 +37,7 @@ import {
   type MarketingContentItemStatus,
   type MarketingContentItemUpdate,
   type MarketingContentListOptions,
+  useArchiveMarketingContentItem,
   useCreateMarketingContentItem,
   useMarketingContentItem,
   useTransitionMarketingContentStatus,
@@ -577,12 +578,14 @@ function Filters({
 function ContentEditor({
   campaigns,
   canEdit,
+  canArchive,
   canSubmitForReview,
   createDate,
   filters,
   item,
   mode,
   onCancel,
+  onArchived,
   onOpenApprovalReview,
   onSaved,
   surface,
@@ -590,12 +593,14 @@ function ContentEditor({
 }: {
   campaigns: Campaign[];
   canEdit: boolean;
+  canArchive: boolean;
   canSubmitForReview: boolean;
   createDate: string | null;
   filters: CalendarFilters;
   item: MarketingContentItem | null;
   mode: ContentEditorMode;
   onCancel: () => void;
+  onArchived: (item: MarketingContentItem) => void;
   onOpenApprovalReview: (approvalRequestId: string | null) => void;
   onSaved: (item: MarketingContentItem | null) => void;
   surface: ContentEditorSurface;
@@ -616,6 +621,11 @@ function ContentEditor({
     item?.id ?? null,
   );
   const submitApproval = useSubmitMarketingContentForApproval(
+    item?.workspace_id ?? selectedCampaign?.workspace_id ?? null,
+    item?.campaign_id ?? null,
+    item?.id ?? null,
+  );
+  const archive = useArchiveMarketingContentItem(
     item?.workspace_id ?? selectedCampaign?.workspace_id ?? null,
     item?.campaign_id ?? null,
     item?.id ?? null,
@@ -650,11 +660,12 @@ function ContentEditor({
   const ownerOptions = selectedCampaign?.members ?? [];
   const duplicateChannels = duplicateChannelTargets(form.channels);
   const mutationError =
-    create.error ?? update.error ?? submitApproval.error ?? transitionStatus.error;
+    create.error ?? update.error ?? submitApproval.error ?? archive.error ?? transitionStatus.error;
   const isMutating =
     create.isMutating ||
     update.isMutating ||
     submitApproval.isMutating ||
+    archive.isMutating ||
     transitionStatus.isMutating;
   const approvalState = item?.approval_state?.state ?? item?.status;
   const isCurrentlyApproved = item ? approvedRevisionIsCurrent(item) : false;
@@ -752,6 +763,26 @@ function ContentEditor({
       onSaved(saved);
     } catch {
       // The mutation state renders exact-revision approval failures.
+    }
+  }
+
+  async function archiveContent() {
+    setClientError(null);
+    if (!item) {
+      return;
+    }
+    if (
+      !window.confirm(
+        `Archive "${item.title}"? It will be hidden from active Draft Posts and retained in Marketing Content history.`,
+      )
+    ) {
+      return;
+    }
+    try {
+      const archived = await archive.mutate();
+      onArchived(archived);
+    } catch {
+      // The mutation state renders API authorization and lifecycle failures.
     }
   }
 
@@ -899,9 +930,7 @@ function ContentEditor({
             type="datetime-local"
             value={form.scheduledAt}
           />
-          <span className="text-xs font-normal text-slate-500">
-            Calendar timezone: {timeZone}
-          </span>
+          <span className="text-xs font-normal text-slate-500">Calendar timezone: {timeZone}</span>
         </label>
         <label className="grid gap-1 text-sm font-medium text-slate-700 md:col-span-2">
           <span>Core Copy / Caption</span>
@@ -982,9 +1011,7 @@ function ContentEditor({
                   aria-label="Channel planned publish time"
                   className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950"
                   disabled={!isEditable}
-                  onChange={(event) =>
-                    setChannel(channel.id, { scheduledAt: event.target.value })
-                  }
+                  onChange={(event) => setChannel(channel.id, { scheduledAt: event.target.value })}
                   type="datetime-local"
                   value={channel.scheduledAt}
                 />
@@ -1069,6 +1096,11 @@ function ContentEditor({
             Scheduling is blocked until approval matches the current revision.
           </span>
         ) : null}
+        {item && isDraftSurface && canArchive && item.status === "draft" ? (
+          <Button disabled={isMutating} onClick={archiveContent} type="button" variant="secondary">
+            {archive.isMutating ? "Archiving..." : "Archive"}
+          </Button>
+        ) : null}
         {!isEditable ? (
           <span className="text-sm text-slate-500">
             You need edit access to change this content.
@@ -1095,12 +1127,14 @@ function contentDetailErrorMessage(code: string | undefined): string {
 function ContentEditorDetail({
   campaigns,
   canEdit,
+  canArchive,
   canSubmitForReview,
   createDate,
   filters,
   item,
   mode,
   onCancel,
+  onArchived,
   onOpenApprovalReview,
   onSaved,
   surface,
@@ -1108,12 +1142,14 @@ function ContentEditorDetail({
 }: {
   campaigns: Campaign[];
   canEdit: boolean;
+  canArchive: boolean;
   canSubmitForReview: boolean;
   createDate: string | null;
   filters: CalendarFilters;
   item: MarketingContentItem | null;
   mode: ContentEditorMode;
   onCancel: () => void;
+  onArchived: (item: MarketingContentItem) => void;
   onOpenApprovalReview: (approvalRequestId: string | null) => void;
   onSaved: (item: MarketingContentItem | null) => void;
   surface: ContentEditorSurface;
@@ -1192,6 +1228,7 @@ function ContentEditorDetail({
     <ContentEditor
       campaigns={campaigns}
       canEdit={canEdit}
+      canArchive={canArchive}
       canSubmitForReview={canSubmitForReview}
       createDate={createDate}
       filters={filters}
@@ -1199,6 +1236,7 @@ function ContentEditorDetail({
       key={canonicalItem ? `${canonicalItem.id}:${canonicalItem.updated_at}` : undefined}
       mode={mode}
       onCancel={onCancel}
+      onArchived={onArchived}
       onOpenApprovalReview={onOpenApprovalReview}
       onSaved={onSaved}
       surface={surface}
@@ -1416,22 +1454,27 @@ function draftRecentlyUpdated(item: MarketingContentItem, updatedWithinDays: Dra
 
 function DraftsTab({
   canCreate,
+  canArchive,
   canSubmitForReview,
   campaigns,
   onCreate,
+  onArchived,
   onItemClick,
   savedRevision,
   workspaceId,
 }: {
   canCreate: boolean;
+  canArchive: boolean;
   canSubmitForReview: boolean;
   campaigns: Campaign[];
   onCreate: () => void;
+  onArchived: (item: MarketingContentItem) => void;
   onItemClick: (item: MarketingContentItem) => void;
   savedRevision: number;
   workspaceId: string;
 }) {
   const [filters, setFilters] = useState<DraftFilters>(emptyDraftFilters);
+  const [archivedDraftIds, setArchivedDraftIds] = useState<Set<string>>(() => new Set());
   const updateFilter = useCallback((next: Partial<DraftFilters>) => {
     setFilters((current) => ({ ...current, ...next }));
   }, []);
@@ -1458,13 +1501,36 @@ function DraftsTab({
     ],
   );
   const drafts = useWorkspaceMarketingContent(workspaceId, draftOptions);
+  const markArchived = useCallback(
+    (archived: MarketingContentItem) => {
+      setArchivedDraftIds((current) => new Set(current).add(archived.id));
+      onArchived(archived);
+      void Promise.resolve(drafts.reload()).catch(() => undefined);
+    },
+    [drafts.reload, onArchived],
+  );
   useEffect(() => {
     if (savedRevision > 0) {
       void Promise.resolve(drafts.reload()).catch(() => undefined);
     }
   }, [drafts.reload, savedRevision]);
+  useEffect(() => {
+    if (!drafts.data) {
+      return;
+    }
+    const activeIds = new Set(
+      drafts.data.marketing_content
+        .filter((draft) => draft.status === "draft")
+        .map((draft) => draft.id),
+    );
+    setArchivedDraftIds((current) => {
+      const next = new Set([...current].filter((id) => activeIds.has(id)));
+      const unchanged = next.size === current.size && [...next].every((id) => current.has(id));
+      return unchanged ? current : next;
+    });
+  }, [drafts.data]);
   const serverDraftItems = (drafts.data?.marketing_content ?? []).filter(
-    (draft) => draft.status === "draft",
+    (draft) => draft.status === "draft" && !archivedDraftIds.has(draft.id),
   );
   const draftItems = useMemo(
     () =>
@@ -1699,12 +1765,14 @@ function DraftsTab({
           <div className="divide-y divide-slate-100">
             {draftItems.map((draft) => (
               <DraftRow
+                canArchive={canArchive}
                 canSubmitForReview={canSubmitForReview}
                 campaigns={campaigns}
                 draft={draft}
                 key={draft.id}
+                onArchived={markArchived}
                 onItemClick={onItemClick}
-                onSubmitted={() => void drafts.reload().catch(() => undefined)}
+                onSubmitted={() => void Promise.resolve(drafts.reload()).catch(() => undefined)}
                 workspaceId={workspaceId}
               />
             ))}
@@ -1716,16 +1784,20 @@ function DraftsTab({
 }
 
 function DraftRow({
+  canArchive,
   canSubmitForReview,
   campaigns,
   draft,
+  onArchived,
   onItemClick,
   onSubmitted,
   workspaceId,
 }: {
+  canArchive: boolean;
   canSubmitForReview: boolean;
   campaigns: Campaign[];
   draft: MarketingContentItem;
+  onArchived: (item: MarketingContentItem) => void;
   onItemClick: (item: MarketingContentItem) => void;
   onSubmitted: () => void;
   workspaceId: string;
@@ -1735,6 +1807,7 @@ function DraftRow({
     draft.campaign_id,
     draft.id,
   );
+  const archive = useArchiveMarketingContentItem(workspaceId, draft.campaign_id, draft.id);
   const approvalState = draft.approval_state?.state ?? draft.status;
   const canSubmitDraft = canSubmitForReview && draft.status === "draft";
   const submitLabel =
@@ -1746,6 +1819,22 @@ function DraftRow({
       onSubmitted();
     } catch {
       // Mutation state renders the existing approval eligibility/capability errors.
+    }
+  }
+
+  async function archiveDraft() {
+    if (
+      !window.confirm(
+        `Archive "${draft.title}"? It will be hidden from active Draft Posts and retained in Marketing Content history.`,
+      )
+    ) {
+      return;
+    }
+    try {
+      const archived = await archive.mutate();
+      onArchived(archived);
+    } catch {
+      // Mutation state renders authorization and API failures inline.
     }
   }
 
@@ -1809,9 +1898,21 @@ function DraftRow({
             {submitApproval.isMutating ? "Submitting..." : submitLabel}
           </Button>
         ) : null}
-        {submitApproval.error ? (
+        {canArchive ? (
+          <Button
+            aria-label={`Archive draft ${draft.title}`}
+            disabled={archive.isMutating}
+            onClick={archiveDraft}
+            size="sm"
+            type="button"
+            variant="secondary"
+          >
+            {archive.isMutating ? "Archiving..." : "Archive"}
+          </Button>
+        ) : null}
+        {submitApproval.error || archive.error ? (
           <p className="basis-full text-xs font-medium text-red-700" role="alert">
-            {submitApproval.error.message}
+            {submitApproval.error?.message ?? archive.error?.message}
           </p>
         ) : null}
       </div>
@@ -2504,6 +2605,10 @@ export function MarketingWorkspace() {
     workspaceProfile.subject && activeWorkspace
       ? can(workspaceProfile.subject, null, capabilities.marketingContentEdit)
       : false;
+  const canArchive =
+    workspaceProfile.subject && activeWorkspace
+      ? can(workspaceProfile.subject, null, capabilities.marketingContentArchive)
+      : false;
   const canSubmitForReview =
     workspaceProfile.subject && activeWorkspace
       ? can(workspaceProfile.subject, null, capabilities.marketingContentSubmitForReview)
@@ -2610,6 +2715,16 @@ export function MarketingWorkspace() {
           ? `Saved ${savedItem.title}. Revision ${savedItem.content_revision}.`
           : "Marketing content updated.",
       );
+      setSavedRevision((current) => current + 1);
+      void calendarContent.reload().catch(() => undefined);
+    },
+    [calendarContent, filters, updateUrl],
+  );
+  const handleArchived = useCallback(
+    (archivedItem: MarketingContentItem) => {
+      setEditor(null);
+      updateUrl(filters);
+      setSaveNotice(`Archived ${archivedItem.title}.`);
       setSavedRevision((current) => current + 1);
       void calendarContent.reload().catch(() => undefined);
     },
@@ -2772,6 +2887,7 @@ export function MarketingWorkspace() {
             <ContentEditorDetail
               campaigns={campaignList}
               canEdit={canEdit}
+              canArchive={canArchive}
               canSubmitForReview={canSubmitForReview}
               createDate={editor.createDate}
               filters={filters}
@@ -2779,6 +2895,7 @@ export function MarketingWorkspace() {
               key={editor.key}
               mode={editor.mode}
               onCancel={closeEditor}
+              onArchived={handleArchived}
               onOpenApprovalReview={(approvalRequestId) => {
                 setFocusedApprovalId(approvalRequestId);
                 setActiveTab("approvals");
@@ -2870,9 +2987,11 @@ export function MarketingWorkspace() {
         <>
           <DraftsTab
             canCreate={canCreate}
+            canArchive={canArchive}
             canSubmitForReview={canSubmitForReview}
             campaigns={campaignList}
             onCreate={() => openCreateEditor(null, "drafts")}
+            onArchived={handleArchived}
             onItemClick={(selectedItem) => openEditEditor(selectedItem, "drafts")}
             savedRevision={savedRevision}
             workspaceId={activeWorkspace.id}
@@ -2881,6 +3000,7 @@ export function MarketingWorkspace() {
             <ContentEditorDetail
               campaigns={campaignList}
               canEdit={canEdit}
+              canArchive={canArchive}
               canSubmitForReview={canSubmitForReview}
               createDate={editor.createDate}
               filters={filters}
@@ -2888,6 +3008,7 @@ export function MarketingWorkspace() {
               key={editor.key}
               mode={editor.mode}
               onCancel={closeEditor}
+              onArchived={handleArchived}
               onOpenApprovalReview={(approvalRequestId) => {
                 setFocusedApprovalId(approvalRequestId);
                 setActiveTab("approvals");

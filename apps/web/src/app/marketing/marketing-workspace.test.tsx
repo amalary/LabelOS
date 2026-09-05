@@ -17,6 +17,7 @@ let searchParamString = "";
 const mutationMocks = vi.hoisted(() => ({
   approvalDecision: vi.fn(),
   approvalSubmit: vi.fn(),
+  archive: vi.fn(),
   create: vi.fn(),
   status: vi.fn(),
   update: vi.fn(),
@@ -42,6 +43,8 @@ const realtimeHookState = vi.hoisted(() => ({
   }>,
 }));
 const contentHookState = vi.hoisted(() => ({
+  archiveError: null as InstanceType<typeof Error> | null,
+  archiveMutating: false,
   calendarItems: [] as MarketingContentItem[],
   detailData: null as MarketingContentItem | null,
   detailError: null as InstanceType<typeof Error> | null,
@@ -78,6 +81,13 @@ vi.mock("../../lib/marketing-content", async () => {
   );
   return {
     ...actual,
+    useArchiveMarketingContentItem: vi.fn(() => ({
+      data: null,
+      error: contentHookState.archiveError,
+      isMutating: contentHookState.archiveMutating,
+      mutate: mutationMocks.archive,
+      reset: vi.fn(),
+    })),
     useCreateMarketingContentItem: vi.fn(() => ({
       data: null,
       error: null,
@@ -516,6 +526,8 @@ describe("MarketingWorkspace", () => {
     approvalHookState.queueLoading = false;
     approvalHookState.submittedOptions = [];
     contentHookState.calendarItems = [];
+    contentHookState.archiveError = null;
+    contentHookState.archiveMutating = false;
     contentHookState.detailData = null;
     contentHookState.detailError = null;
     contentHookState.detailLoading = false;
@@ -537,6 +549,7 @@ describe("MarketingWorkspace", () => {
     );
     mutationMocks.approvalDecision.mockResolvedValue(approvalDetail());
     mutationMocks.approvalSubmit.mockResolvedValue(approvalDetail());
+    mutationMocks.archive.mockResolvedValue(item({ status: "archived" }));
     mutationMocks.create.mockResolvedValue(item({ status: "draft" }));
     mutationMocks.update.mockResolvedValue(item({ title: "Updated Teaser" }));
     mutationMocks.status.mockResolvedValue(item({ status: "in_review" }));
@@ -1947,9 +1960,7 @@ describe("MarketingWorkspace", () => {
 
     render(<MarketingWorkspace />);
     fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
-    fireEvent.click(
-      screen.getByRole("button", { name: "Submit for approval Row Submit Draft" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "Submit for approval Row Submit Draft" }));
 
     await waitFor(() =>
       expect(mutationMocks.approvalSubmit).toHaveBeenCalledWith({
@@ -1969,6 +1980,128 @@ describe("MarketingWorkspace", () => {
 
     expect(
       screen.queryByRole("button", { name: "Submit for approval No Submit Draft" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("archives a draft row after confirmation and removes it from active Draft Posts", async () => {
+    vi.useRealTimers();
+    const confirm = vi.spyOn(window, "confirm").mockReturnValueOnce(true);
+    const calendarReload = vi.fn().mockResolvedValue({ marketing_content: [], total: 0 });
+    const draftsReload = vi.fn().mockResolvedValue({ marketing_content: [], total: 0 });
+    const draft = item({
+      id: "content_abandoned",
+      status: "draft",
+      title: "Abandoned Draft",
+    });
+    mockWorkspaceProfile(["marketing.content.view", "marketing.content.archive"]);
+    vi.mocked(marketingContent.useWorkspaceCalendarContent).mockReturnValue({
+      data: { marketing_content: [], total: 0, limit: 500, offset: 0 },
+      error: null,
+      isLoading: false,
+      isMutating: false,
+      reload: calendarReload,
+    });
+    mockDrafts([draft], draftsReload);
+    mutationMocks.archive.mockResolvedValueOnce(item({ ...draft, status: "archived" }));
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Archive draft Abandoned Draft" }));
+
+    expect(confirm).toHaveBeenCalledWith(
+      'Archive "Abandoned Draft"? It will be hidden from active Draft Posts and retained in Marketing Content history.',
+    );
+    await waitFor(() => expect(mutationMocks.archive).toHaveBeenCalled());
+    expect(marketingContent.useArchiveMarketingContentItem).toHaveBeenCalledWith(
+      "workspace_01",
+      "campaign_01",
+      "content_abandoned",
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "Open draft Abandoned Draft" }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(screen.getByRole("status")).toHaveTextContent("Archived Abandoned Draft.");
+    expect(draftsReload).toHaveBeenCalled();
+    expect(calendarReload).toHaveBeenCalled();
+  });
+
+  it("cancels draft archive when confirmation is declined", () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValueOnce(false);
+    mockWorkspaceProfile(["marketing.content.view", "marketing.content.archive"]);
+    mockDrafts([item({ id: "content_keep", status: "draft", title: "Keep Draft" })]);
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Archive draft Keep Draft" }));
+
+    expect(confirm).toHaveBeenCalled();
+    expect(mutationMocks.archive).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Open draft Keep Draft" })).toBeInTheDocument();
+  });
+
+  it("enforces archive authorization in Draft Posts actions", () => {
+    mockWorkspaceProfile(["marketing.content.view", "marketing.content.edit"]);
+    mockDrafts([item({ id: "content_no_archive", status: "draft", title: "No Archive Draft" })]);
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+
+    expect(
+      screen.queryByRole("button", { name: "Archive draft No Archive Draft" }),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open draft No Archive Draft" }));
+    const editor = screen.getByRole("region", { name: "Marketing content editor" });
+    expect(within(editor).queryByRole("button", { name: "Archive" })).not.toBeInTheDocument();
+  });
+
+  it("surfaces draft archive API failures clearly", async () => {
+    vi.useRealTimers();
+    vi.spyOn(window, "confirm").mockReturnValueOnce(true);
+    contentHookState.archiveError = new marketingContent.MarketingContentApiError(
+      "forbidden",
+      "You do not have archive access for marketing content.",
+      403,
+    );
+    mutationMocks.archive.mockRejectedValueOnce(contentHookState.archiveError);
+    mockWorkspaceProfile(["marketing.content.view", "marketing.content.archive"]);
+    mockDrafts([item({ id: "content_denied", status: "draft", title: "Denied Draft" })]);
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Archive draft Denied Draft" }));
+
+    await waitFor(() => expect(mutationMocks.archive).toHaveBeenCalled());
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "You do not have archive access for marketing content.",
+    );
+    expect(screen.getByRole("button", { name: "Open draft Denied Draft" })).toBeInTheDocument();
+  });
+
+  it("archives from the draft detail action using the same lifecycle path", async () => {
+    vi.useRealTimers();
+    vi.spyOn(window, "confirm").mockReturnValueOnce(true);
+    const draft = item({ id: "content_detail_archive", status: "draft", title: "Detail Draft" });
+    mockWorkspaceProfile([
+      "marketing.content.view",
+      "marketing.content.edit",
+      "marketing.content.archive",
+    ]);
+    mockDrafts([draft]);
+    mutationMocks.archive.mockResolvedValueOnce(item({ ...draft, status: "archived" }));
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open draft Detail Draft" }));
+    const editor = screen.getByRole("region", { name: "Marketing content editor" });
+    fireEvent.click(within(editor).getByRole("button", { name: "Archive" }));
+
+    await waitFor(() => expect(mutationMocks.archive).toHaveBeenCalled());
+    expect(screen.getByRole("status")).toHaveTextContent("Archived Detail Draft.");
+    expect(
+      screen.queryByRole("region", { name: "Marketing content editor" }),
     ).not.toBeInTheDocument();
   });
 
