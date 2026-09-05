@@ -451,6 +451,7 @@ def test_marketing_content_campaign_crud_and_lifecycle(
     )
     assert approved.status_code == 200
     assert approved.json()["approved_by_profile_id"] == str(seeded.approver_profile_id)
+    assert approved.json()["approval_state"]["can_schedule"] is False
     _set_context(client, seeded)
 
     cannot_schedule = client.patch(
@@ -482,6 +483,7 @@ def test_marketing_content_campaign_crud_and_lifecycle(
         },
     )
     assert approved_multi.status_code == 200
+    assert approved_multi.json()["approval_state"]["can_schedule"] is True
     _set_context(client, seeded)
     scheduled = client.patch(
         f"{base}/{multi_channel['id']}/status",
@@ -1421,7 +1423,9 @@ def test_draft_posts_approval_lifecycle_projects_draft_list_membership(
         submitted = client.post(_approval_submit_base(seeded, content_id), json={})
         assert submitted.status_code == 201
         assert submitted.json()["resource_type"] == "marketing_content_item"
-        assert client.get(f"{_base(seeded)}/{content_id}").json()["status"] == "in_review"
+        assert (
+            client.get(f"{_base(seeded)}/{content_id}").json()["status"] == "in_review"
+        )
         assert content_id not in draft_ids()
         return content_id, submitted.json()["id"]
 
@@ -1433,7 +1437,9 @@ def test_draft_posts_approval_lifecycle_projects_draft_list_membership(
     )
     assert changes.status_code == 200
     submitter()
-    assert client.get(f"{_base(seeded)}/{changes_content_id}").json()["status"] == "draft"
+    assert (
+        client.get(f"{_base(seeded)}/{changes_content_id}").json()["status"] == "draft"
+    )
     assert changes_content_id in draft_ids()
 
     approved_content_id, approved_approval_id = create_and_submit("Approved Projection")
@@ -1444,7 +1450,10 @@ def test_draft_posts_approval_lifecycle_projects_draft_list_membership(
     )
     assert approved.status_code == 200
     submitter()
-    assert client.get(f"{_base(seeded)}/{approved_content_id}").json()["status"] == "approved"
+    assert (
+        client.get(f"{_base(seeded)}/{approved_content_id}").json()["status"]
+        == "approved"
+    )
     assert approved_content_id not in draft_ids()
 
     rejected_content_id, rejected_approval_id = create_and_submit("Rejected Projection")
@@ -1455,18 +1464,99 @@ def test_draft_posts_approval_lifecycle_projects_draft_list_membership(
     )
     assert rejected.status_code == 200
     submitter()
-    assert client.get(f"{_base(seeded)}/{rejected_content_id}").json()["status"] == "draft"
+    assert (
+        client.get(f"{_base(seeded)}/{rejected_content_id}").json()["status"] == "draft"
+    )
     assert rejected_content_id in draft_ids()
 
-    cancelled_content_id, cancelled_approval_id = create_and_submit("Cancelled Projection")
+    cancelled_content_id, cancelled_approval_id = create_and_submit(
+        "Cancelled Projection"
+    )
     submitter()
     cancelled = client.post(
         f"{_approvals_base(seeded)}/{cancelled_approval_id}/decisions",
         json={"action": "cancelled", "reason": "Submitted by mistake"},
     )
     assert cancelled.status_code == 200
-    assert client.get(f"{_base(seeded)}/{cancelled_content_id}").json()["status"] == "cancelled"
+    assert (
+        client.get(f"{_base(seeded)}/{cancelled_content_id}").json()["status"]
+        == "cancelled"
+    )
     assert cancelled_content_id not in draft_ids()
+
+
+def test_unscheduled_draft_posts_remain_listed_until_review_lifecycle_advances(
+    marketing_content_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededMarketingContentApi,
+    ],
+) -> None:
+    client, _sessionmaker, seeded = marketing_content_client
+    _set_context(client, seeded)
+    base = _base(seeded)
+
+    created = client.post(
+        base,
+        json=_draft_payload(seeded, title="Unscheduled Draft Post"),
+    )
+    assert created.status_code == 201
+    content = created.json()
+    assert content["status"] == "draft"
+    assert content["scheduled_at"] is None
+
+    drafts = client.get(
+        f"/api/v1/workspaces/{seeded.workspace_id}/marketing-content",
+        params={"status": "draft"},
+    )
+    assert drafts.status_code == 200
+    assert content["id"] in [
+        entry["id"] for entry in drafts.json()["marketing_content"]
+    ]
+
+    scheduled_at = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+    scheduled_draft = client.patch(
+        f"{base}/{content['id']}",
+        json={"scheduled_at": scheduled_at.isoformat()},
+    )
+    assert scheduled_draft.status_code == 200
+    assert scheduled_draft.json()["status"] == "draft"
+    assert scheduled_draft.json()["scheduled_at"] == "2026-09-10T12:00:00Z"
+
+    still_drafts = client.get(
+        f"/api/v1/workspaces/{seeded.workspace_id}/marketing-content",
+        params={"status": "draft"},
+    )
+    assert content["id"] in [
+        entry["id"] for entry in still_drafts.json()["marketing_content"]
+    ]
+
+    submitted = client.post(_approval_submit_base(seeded, content["id"]), json={})
+    assert submitted.status_code == 201
+    _set_context(
+        client,
+        seeded,
+        user_id=seeded.approver_user_id,
+        email="marketing-approver-profile@example.com",
+        capability_permissions=(
+            Capability.marketing_content_view.value,
+            Capability.marketing_content_approve.value,
+        ),
+        department_access=("marketing",),
+    )
+    approved = client.post(
+        f"{_approvals_base(seeded)}/{submitted.json()['id']}/decisions",
+        json={"action": "approved"},
+    )
+    assert approved.status_code == 200
+    _set_context(client, seeded)
+
+    scheduled = client.patch(
+        f"{base}/{content['id']}/status",
+        json={"status": "scheduled"},
+    )
+    assert scheduled.status_code == 200
+    assert scheduled.json()["status"] == "scheduled"
 
 
 def test_approval_queue_self_agent_stale_duplicate_and_legacy_status_compatibility(

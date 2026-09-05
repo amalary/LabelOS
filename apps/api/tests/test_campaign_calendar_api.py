@@ -646,6 +646,7 @@ def test_campaign_calendar_openapi_contract_exposes_stable_fields(
     schemas = schema["components"]["schemas"]
 
     assert "/api/v1/workspaces/{workspace_id}/campaign-calendar" in paths
+    assert set(paths["/api/v1/workspaces/{workspace_id}/campaign-calendar"]) == {"get"}
     operation = paths["/api/v1/workspaces/{workspace_id}/campaign-calendar"]["get"]
     assert {param["name"] for param in operation["parameters"]} >= {
         "workspace_id",

@@ -293,6 +293,7 @@ def _approval_state(
     can_schedule = (
         item.status == MarketingContentItemStatus.approved
         and approved_revision_is_current
+        and _has_schedule_target(item)
     )
     if item.status in {
         MarketingContentItemStatus.published,
@@ -333,6 +334,13 @@ def _approval_state(
         approved_revision=item.approved_revision,
         approved_revision_is_current=approved_revision_is_current,
         can_schedule=can_schedule,
+    )
+
+
+def _has_schedule_target(item: MarketingContentItem) -> bool:
+    return bool(
+        item.scheduled_at is not None
+        or any(channel.scheduled_at is not None for channel in item.channels)
     )
 
 

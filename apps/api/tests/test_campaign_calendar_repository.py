@@ -282,6 +282,89 @@ def test_campaign_calendar_projects_parent_and_channel_content_schedules(
     ]
 
 
+def test_campaign_calendar_projects_existing_marketing_content_event_types_only(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async def run() -> list[tuple[str, str]]:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            campaign = data["campaign"]
+            assert isinstance(workspace, Organization)
+            assert isinstance(campaign, Campaign)
+            scheduled_item = MarketingContentItem(
+                organization=workspace,
+                campaign=campaign,
+                title="Full Projection",
+                content_type="video",
+                status=MarketingContentItemStatus.published,
+                scheduled_at=datetime(2026, 9, 10, 16, tzinfo=UTC),
+                published_at=datetime(2026, 9, 12, 16, tzinfo=UTC),
+                channels=[
+                    MarketingContentItemChannel(
+                        channel="instagram",
+                        placement="reel",
+                        scheduled_at=datetime(2026, 9, 11, 16, tzinfo=UTC),
+                        published_at=datetime(2026, 9, 13, 16, tzinfo=UTC),
+                    )
+                ],
+            )
+            unscheduled_draft = MarketingContentItem(
+                organization=workspace,
+                campaign=campaign,
+                title="Unscheduled Draft",
+                content_type="caption",
+                status=MarketingContentItemStatus.draft,
+            )
+            session.add_all([scheduled_item, unscheduled_draft])
+            await session.flush()
+            scheduled_item.approval_request = ApprovalRequest(
+                organization=workspace,
+                resource_type=MARKETING_CONTENT_ITEM_RESOURCE_TYPE,
+                resource_id=scheduled_item.id,
+                resource_revision=scheduled_item.content_revision,
+                title="Approve Full Projection",
+                status=ApprovalRequestStatus.approved,
+                submitted_at=datetime(2026, 9, 9, 16, tzinfo=UTC),
+                resolved_at=datetime(2026, 9, 9, 18, tzinfo=UTC),
+            )
+            await session.flush()
+
+            events = await campaign_calendar.list_events(
+                session,
+                workspace.id,
+                CampaignCalendarEventQuery(
+                    event_types=[
+                        campaign_calendar.MARKETING_CONTENT_SCHEDULED,
+                        campaign_calendar.MARKETING_CONTENT_CHANNEL_SCHEDULED,
+                        campaign_calendar.MARKETING_CONTENT_PUBLISHED,
+                        campaign_calendar.MARKETING_CONTENT_CHANNEL_PUBLISHED,
+                        campaign_calendar.MARKETING_CONTENT_APPROVAL_REQUESTED,
+                        campaign_calendar.MARKETING_CONTENT_APPROVED,
+                    ],
+                    range_start=datetime(2026, 9, 9, tzinfo=UTC),
+                    range_end=datetime(2026, 9, 13, 23, 59, tzinfo=UTC),
+                    include_published=True,
+                ),
+            )
+            return [
+                (event.event_type, event.content_item_title or event.title)
+                for event in events
+            ]
+
+    events = asyncio.run(run())
+
+    assert events == [
+        (campaign_calendar.MARKETING_CONTENT_APPROVAL_REQUESTED, "Full Projection"),
+        (campaign_calendar.MARKETING_CONTENT_APPROVED, "Full Projection"),
+        (campaign_calendar.MARKETING_CONTENT_SCHEDULED, "Full Projection"),
+        (campaign_calendar.MARKETING_CONTENT_CHANNEL_SCHEDULED, "Full Projection"),
+        (campaign_calendar.MARKETING_CONTENT_PUBLISHED, "Full Projection"),
+        (campaign_calendar.MARKETING_CONTENT_CHANNEL_PUBLISHED, "Full Projection"),
+    ]
+    assert "Unscheduled Draft" not in [title for _, title in events]
+
+
 def test_campaign_calendar_projects_approval_timestamps_with_fallbacks(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
