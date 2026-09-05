@@ -1420,6 +1420,7 @@ function draftRecentlyUpdated(item: MarketingContentItem, updatedWithinDays: Dra
 
 function DraftsTab({
   canCreate,
+  canSubmitForReview,
   campaigns,
   onCreate,
   onItemClick,
@@ -1427,6 +1428,7 @@ function DraftsTab({
   workspaceId,
 }: {
   canCreate: boolean;
+  canSubmitForReview: boolean;
   campaigns: Campaign[];
   onCreate: () => void;
   onItemClick: (item: MarketingContentItem) => void;
@@ -1700,55 +1702,124 @@ function DraftsTab({
         <Card className="overflow-hidden p-0">
           <div className="divide-y divide-slate-100">
             {draftItems.map((draft) => (
-              <button
-                aria-label={`Open draft ${draft.title}`}
-                className="grid gap-4 px-4 py-4 text-left transition hover:bg-slate-50 md:grid-cols-[minmax(0,1.4fr)_minmax(160px,0.8fr)_minmax(150px,0.7fr)_minmax(150px,0.7fr)]"
+              <DraftRow
+                canSubmitForReview={canSubmitForReview}
+                campaigns={campaigns}
+                draft={draft}
                 key={draft.id}
-                onClick={() => onItemClick(draft)}
-                type="button"
-              >
-                <div className="min-w-0">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <h3 className="truncate text-sm font-semibold text-slate-950">{draft.title}</h3>
-                    <Badge variant={approvalStateVariant(draft)}>{approvalStateLabel(draft)}</Badge>
-                    <Badge>{revisionLabel(draft)}</Badge>
-                  </div>
-                  <p className="mt-2 line-clamp-2 text-sm text-slate-600">{copyPreview(draft)}</p>
-                  <p className="mt-2 truncate text-xs text-slate-500">
-                    {humanize(draft.content_type)} - {channelSummary(draft)}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-xs font-semibold uppercase text-slate-500">Campaign</p>
-                  <p className="mt-1 truncate text-sm font-medium text-slate-800">
-                    {campaignName(campaigns, draft.campaign_id)}
-                  </p>
-                  <p className="mt-1 truncate text-xs text-slate-500">
-                    Artist: {relationshipLabel(draft.artist_id)}
-                  </p>
-                  <p className="truncate text-xs text-slate-500">
-                    Release: {relationshipLabel(draft.release_id)}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-xs font-semibold uppercase text-slate-500">Placements</p>
-                  <p className="mt-1 line-clamp-2 text-sm font-medium text-slate-800">
-                    {channelPlacementSummary(draft)}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-xs font-semibold uppercase text-slate-500">Updated</p>
-                  <p className="mt-1 truncate text-sm font-medium text-slate-800">
-                    {draft.updated_at.slice(0, 10)}
-                  </p>
-                  <p className="mt-1 truncate text-xs text-slate-500">{ownerCreatorLabel(draft)}</p>
-                </div>
-              </button>
+                onItemClick={onItemClick}
+                onSubmitted={() => void drafts.reload().catch(() => undefined)}
+                workspaceId={workspaceId}
+              />
             ))}
           </div>
         </Card>
       )}
     </section>
+  );
+}
+
+function DraftRow({
+  canSubmitForReview,
+  campaigns,
+  draft,
+  onItemClick,
+  onSubmitted,
+  workspaceId,
+}: {
+  canSubmitForReview: boolean;
+  campaigns: Campaign[];
+  draft: MarketingContentItem;
+  onItemClick: (item: MarketingContentItem) => void;
+  onSubmitted: () => void;
+  workspaceId: string;
+}) {
+  const submitApproval = useSubmitMarketingContentForApproval(
+    workspaceId,
+    draft.campaign_id,
+    draft.id,
+  );
+  const approvalState = draft.approval_state?.state ?? draft.status;
+  const canSubmitDraft = canSubmitForReview && draft.status === "draft";
+  const submitLabel =
+    approvalState === "changes_requested" ? "Resubmit for approval" : "Submit for approval";
+
+  async function submitForReview() {
+    try {
+      await submitApproval.mutate({ expected_resource_revision: draft.content_revision });
+      onSubmitted();
+    } catch {
+      // Mutation state renders the existing approval eligibility/capability errors.
+    }
+  }
+
+  return (
+    <article className="grid gap-4 px-4 py-4 transition hover:bg-slate-50 md:grid-cols-[minmax(0,1.4fr)_minmax(160px,0.8fr)_minmax(150px,0.7fr)_minmax(150px,0.7fr)_auto]">
+      <div className="min-w-0">
+        <div className="flex flex-wrap items-center gap-2">
+          <h3 className="truncate text-sm font-semibold text-slate-950">{draft.title}</h3>
+          <Badge variant={approvalStateVariant(draft)}>{approvalStateLabel(draft)}</Badge>
+          <Badge>{revisionLabel(draft)}</Badge>
+        </div>
+        <p className="mt-2 line-clamp-2 text-sm text-slate-600">{copyPreview(draft)}</p>
+        <p className="mt-2 truncate text-xs text-slate-500">
+          {humanize(draft.content_type)} - {channelSummary(draft)}
+        </p>
+      </div>
+      <div>
+        <p className="text-xs font-semibold uppercase text-slate-500">Campaign</p>
+        <p className="mt-1 truncate text-sm font-medium text-slate-800">
+          {campaignName(campaigns, draft.campaign_id)}
+        </p>
+        <p className="mt-1 truncate text-xs text-slate-500">
+          Artist: {relationshipLabel(draft.artist_id)}
+        </p>
+        <p className="truncate text-xs text-slate-500">
+          Release: {relationshipLabel(draft.release_id)}
+        </p>
+      </div>
+      <div>
+        <p className="text-xs font-semibold uppercase text-slate-500">Placements</p>
+        <p className="mt-1 line-clamp-2 text-sm font-medium text-slate-800">
+          {channelPlacementSummary(draft)}
+        </p>
+      </div>
+      <div>
+        <p className="text-xs font-semibold uppercase text-slate-500">Updated</p>
+        <p className="mt-1 truncate text-sm font-medium text-slate-800">
+          {draft.updated_at.slice(0, 10)}
+        </p>
+        <p className="mt-1 truncate text-xs text-slate-500">{ownerCreatorLabel(draft)}</p>
+      </div>
+      <div className="flex flex-wrap items-start gap-2 md:justify-end">
+        <Button
+          aria-label={`Open draft ${draft.title}`}
+          onClick={() => onItemClick(draft)}
+          size="sm"
+          type="button"
+          variant="secondary"
+        >
+          Open
+        </Button>
+        {canSubmitDraft ? (
+          <Button
+            aria-label={`${submitLabel} ${draft.title}`}
+            disabled={submitApproval.isMutating}
+            onClick={submitForReview}
+            size="sm"
+            type="button"
+            variant="secondary"
+          >
+            {submitApproval.isMutating ? "Submitting..." : submitLabel}
+          </Button>
+        ) : null}
+        {submitApproval.error ? (
+          <p className="basis-full text-xs font-medium text-red-700" role="alert">
+            {submitApproval.error.message}
+          </p>
+        ) : null}
+      </div>
+    </article>
   );
 }
 
@@ -2803,6 +2874,7 @@ export function MarketingWorkspace() {
         <>
           <DraftsTab
             canCreate={canCreate}
+            canSubmitForReview={canSubmitForReview}
             campaigns={campaignList}
             onCreate={() => openCreateEditor(null, "drafts")}
             onItemClick={(selectedItem) => openEditEditor(selectedItem, "drafts")}

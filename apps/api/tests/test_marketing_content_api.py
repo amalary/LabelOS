@@ -1375,6 +1375,100 @@ def test_approval_queue_decisions_and_idempotency(
     )
 
 
+def test_draft_posts_approval_lifecycle_projects_draft_list_membership(
+    marketing_content_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededMarketingContentApi,
+    ],
+) -> None:
+    client, _sessionmaker, seeded = marketing_content_client
+
+    def submitter() -> None:
+        _set_context(client, seeded)
+
+    def reviewer() -> None:
+        _set_context(
+            client,
+            seeded,
+            user_id=seeded.approver_user_id,
+            email="marketing-approver-profile@example.com",
+            capability_permissions=(
+                Capability.marketing_content_view.value,
+                Capability.marketing_content_approve.value,
+            ),
+            department_access=("marketing",),
+        )
+
+    def draft_ids() -> set[str]:
+        submitter()
+        response = client.get(
+            f"/api/v1/workspaces/{seeded.workspace_id}/marketing-content",
+            params={"status": "draft"},
+        )
+        assert response.status_code == 200
+        return {entry["id"] for entry in response.json()["marketing_content"]}
+
+    def create_and_submit(title: str) -> tuple[str, str]:
+        submitter()
+        created = client.post(
+            _base(seeded),
+            json=_draft_payload(seeded, title=title),
+        )
+        assert created.status_code == 201
+        content_id = created.json()["id"]
+        assert content_id in draft_ids()
+        submitted = client.post(_approval_submit_base(seeded, content_id), json={})
+        assert submitted.status_code == 201
+        assert submitted.json()["resource_type"] == "marketing_content_item"
+        assert client.get(f"{_base(seeded)}/{content_id}").json()["status"] == "in_review"
+        assert content_id not in draft_ids()
+        return content_id, submitted.json()["id"]
+
+    changes_content_id, changes_approval_id = create_and_submit("Changes Projection")
+    reviewer()
+    changes = client.post(
+        f"{_approvals_base(seeded)}/{changes_approval_id}/decisions",
+        json={"action": "changes_requested", "reason": "Revise CTA"},
+    )
+    assert changes.status_code == 200
+    submitter()
+    assert client.get(f"{_base(seeded)}/{changes_content_id}").json()["status"] == "draft"
+    assert changes_content_id in draft_ids()
+
+    approved_content_id, approved_approval_id = create_and_submit("Approved Projection")
+    reviewer()
+    approved = client.post(
+        f"{_approvals_base(seeded)}/{approved_approval_id}/decisions",
+        json={"action": "approved"},
+    )
+    assert approved.status_code == 200
+    submitter()
+    assert client.get(f"{_base(seeded)}/{approved_content_id}").json()["status"] == "approved"
+    assert approved_content_id not in draft_ids()
+
+    rejected_content_id, rejected_approval_id = create_and_submit("Rejected Projection")
+    reviewer()
+    rejected = client.post(
+        f"{_approvals_base(seeded)}/{rejected_approval_id}/decisions",
+        json={"action": "rejected", "reason": "Off brief"},
+    )
+    assert rejected.status_code == 200
+    submitter()
+    assert client.get(f"{_base(seeded)}/{rejected_content_id}").json()["status"] == "draft"
+    assert rejected_content_id in draft_ids()
+
+    cancelled_content_id, cancelled_approval_id = create_and_submit("Cancelled Projection")
+    submitter()
+    cancelled = client.post(
+        f"{_approvals_base(seeded)}/{cancelled_approval_id}/decisions",
+        json={"action": "cancelled", "reason": "Submitted by mistake"},
+    )
+    assert cancelled.status_code == 200
+    assert client.get(f"{_base(seeded)}/{cancelled_content_id}").json()["status"] == "cancelled"
+    assert cancelled_content_id not in draft_ids()
+
+
 def test_approval_queue_self_agent_stale_duplicate_and_legacy_status_compatibility(
     marketing_content_client: tuple[
         TestClient,

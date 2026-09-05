@@ -1865,6 +1865,49 @@ describe("MarketingWorkspace", () => {
     );
   });
 
+  it("submits eligible draft rows through the existing approval request action", async () => {
+    vi.useRealTimers();
+    const draftsReload = vi.fn();
+    const draft = item({
+      content_revision: 5,
+      id: "content_draft_03",
+      status: "draft",
+      title: "Row Submit Draft",
+    });
+    mockWorkspaceProfile([
+      "marketing.content.view",
+      "marketing.content.edit",
+      "marketing.content.submit_for_review",
+    ]);
+    mockDrafts([draft], draftsReload);
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Submit for approval Row Submit Draft" }),
+    );
+
+    await waitFor(() =>
+      expect(mutationMocks.approvalSubmit).toHaveBeenCalledWith({
+        expected_resource_revision: 5,
+      }),
+    );
+    expect(mutationMocks.status).not.toHaveBeenCalled();
+    expect(draftsReload).toHaveBeenCalled();
+  });
+
+  it("hides draft row submission without the submit-for-review capability", () => {
+    mockWorkspaceProfile(["marketing.content.view", "marketing.content.edit"]);
+    mockDrafts([item({ id: "content_draft_04", status: "draft", title: "No Submit Draft" })]);
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+
+    expect(
+      screen.queryByRole("button", { name: "Submit for approval No Submit Draft" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("filters draft posts with existing API dimensions and local search plus recency", () => {
     vi.mocked(campaignsLib.useCampaigns).mockReturnValue({
       data: {
@@ -2029,6 +2072,14 @@ describe("MarketingWorkspace", () => {
         campaignId: "campaign_01",
         contentItemId: "content_01",
         key: "marketing-content:workspace-list:workspace_01:start:2026-09-01T00:00:00Z",
+        workspaceId: "workspace_01",
+      }),
+    ).toBe(true);
+    expect(
+      marketingContent.shouldInvalidateMarketingContentRealtimeCacheKey({
+        campaignId: "campaign_01",
+        contentItemId: "content_01",
+        key: "marketing-content:workspace-list:workspace_01:limit:500|offset:0|status:draft",
         workspaceId: "workspace_01",
       }),
     ).toBe(true);
