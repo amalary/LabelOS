@@ -38,6 +38,7 @@ import {
   type MarketingContentItemUpdate,
   type MarketingContentListOptions,
   useCreateMarketingContentItem,
+  useMarketingContentItem,
   useTransitionMarketingContentStatus,
   useUpdateMarketingContentItem,
   useWorkspaceMarketingContent,
@@ -596,7 +597,7 @@ function ContentEditor({
   mode: ContentEditorMode;
   onCancel: () => void;
   onOpenApprovalReview: (approvalRequestId: string | null) => void;
-  onSaved: () => void;
+  onSaved: (item: MarketingContentItem | null) => void;
   surface: ContentEditorSurface;
   timeZone: string;
 }) {
@@ -707,7 +708,8 @@ function ContentEditor({
     try {
       const payload = formToPayload(form);
       if (mode === "create") {
-        await create.mutate(payload);
+        const saved = await create.mutate(payload);
+        onSaved(saved);
       } else {
         if (
           isCurrentlyApproved &&
@@ -717,9 +719,9 @@ function ContentEditor({
         ) {
           return;
         }
-        await update.mutate(payload as MarketingContentItemUpdate);
+        const saved = await update.mutate(payload as MarketingContentItemUpdate);
+        onSaved(saved);
       }
-      onSaved();
     } catch (error) {
       if (error instanceof SyntaxError || error instanceof Error) {
         setClientError(error.message);
@@ -734,7 +736,7 @@ function ContentEditor({
     }
     try {
       await submitApproval.mutate({});
-      onSaved();
+      onSaved(null);
     } catch {
       // The mutation state renders API denial and invalid transition messages.
     }
@@ -746,8 +748,8 @@ function ContentEditor({
       return;
     }
     try {
-      await transitionStatus.mutate({ status: "scheduled" });
-      onSaved();
+      const saved = await transitionStatus.mutate({ status: "scheduled" });
+      onSaved(saved);
     } catch {
       // The mutation state renders exact-revision approval failures.
     }
@@ -1078,6 +1080,136 @@ function ContentEditor({
         ) : null}
       </div>
     </Card>
+  );
+}
+
+function contentDetailErrorMessage(code: string | undefined): string {
+  if (code === "unauthorized") {
+    return "Sign in again to open this marketing content.";
+  }
+  if (code === "forbidden") {
+    return "You do not have access to this marketing content.";
+  }
+  if (code === "not_found") {
+    return "This marketing content is missing or was deleted.";
+  }
+  return "Marketing content detail could not be loaded.";
+}
+
+function ContentEditorDetail({
+  campaigns,
+  canEdit,
+  canSubmitForReview,
+  createDate,
+  filters,
+  item,
+  mode,
+  onCancel,
+  onOpenApprovalReview,
+  onSaved,
+  surface,
+  timeZone,
+}: {
+  campaigns: Campaign[];
+  canEdit: boolean;
+  canSubmitForReview: boolean;
+  createDate: string | null;
+  filters: CalendarFilters;
+  item: MarketingContentItem | null;
+  mode: ContentEditorMode;
+  onCancel: () => void;
+  onOpenApprovalReview: (approvalRequestId: string | null) => void;
+  onSaved: (item: MarketingContentItem | null) => void;
+  surface: ContentEditorSurface;
+  timeZone: string;
+}) {
+  const detail = useMarketingContentItem(
+    mode === "edit" ? item?.workspace_id ?? null : null,
+    mode === "edit" ? item?.campaign_id ?? null : null,
+    mode === "edit" ? item?.id ?? null : null,
+  );
+
+  if (mode === "edit") {
+    if (detail.isLoading && !detail.data) {
+      return (
+        <Card className="grid gap-3 p-4" role="region" aria-label="Marketing content editor">
+          <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+            <div>
+              <h2 className="text-lg font-semibold text-slate-950">Edit content</h2>
+              <p className="text-sm text-slate-500">Loading the latest marketing content.</p>
+            </div>
+            <Button onClick={onCancel} size="sm" type="button" variant="secondary">
+              Close
+            </Button>
+          </div>
+          <LoadingState label="Loading marketing content detail" />
+        </Card>
+      );
+    }
+
+    if (detail.error || !detail.data) {
+      return (
+        <Card className="grid gap-4 p-4" role="region" aria-label="Marketing content editor">
+          <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+            <div>
+              <h2 className="text-lg font-semibold text-slate-950">Edit content</h2>
+              <p className="text-sm text-slate-500">
+                {item?.title ?? "Marketing content detail"}
+              </p>
+            </div>
+            <Button onClick={onCancel} size="sm" type="button" variant="secondary">
+              Close
+            </Button>
+          </div>
+          <div
+            className={cn(
+              "rounded-md border px-4 py-3 text-sm",
+              detail.error?.code === "unauthorized" || detail.error?.code === "forbidden"
+                ? "border-amber-200 bg-amber-50 text-amber-900"
+                : "border-red-200 bg-red-50 text-red-900",
+            )}
+            role={
+              detail.error?.code === "unauthorized" || detail.error?.code === "forbidden"
+                ? "status"
+                : "alert"
+            }
+          >
+            {contentDetailErrorMessage(detail.error?.code)}
+          </div>
+          {detail.error?.code !== "not_found" ? (
+            <Button
+              disabled={detail.isLoading}
+              onClick={() => void detail.reload().catch(() => undefined)}
+              size="sm"
+              type="button"
+              variant="secondary"
+            >
+              Retry
+            </Button>
+          ) : null}
+        </Card>
+      );
+    }
+  }
+
+  const canonicalItem = mode === "edit" ? detail.data : item;
+
+  return (
+    <ContentEditor
+      campaigns={campaigns}
+      canEdit={canEdit}
+      canSubmitForReview={canSubmitForReview}
+      createDate={createDate}
+      filters={filters}
+      item={canonicalItem}
+      key={canonicalItem ? `${canonicalItem.id}:${canonicalItem.updated_at}` : undefined}
+      mode={mode}
+      onCancel={onCancel}
+      onOpenApprovalReview={onOpenApprovalReview}
+      onSaved={onSaved}
+      surface={surface}
+      timeZone={timeZone}
+    />
   );
 }
 
@@ -2289,6 +2421,7 @@ export function MarketingWorkspace() {
       : null,
   );
   const [savedRevision, setSavedRevision] = useState(0);
+  const [saveNotice, setSaveNotice] = useState<string | null>(null);
   const [focusedApprovalId, setFocusedApprovalId] = useState<string | null>(
     searchParams.get("approvalRequestId"),
   );
@@ -2370,6 +2503,7 @@ export function MarketingWorkspace() {
 
   const openCreateEditor = useCallback(
     (dateKey: string | null = null, surface: ContentEditorSurface = "calendar") => {
+      setSaveNotice(null);
       setEditor({
         createDate: dateKey,
         item: null,
@@ -2382,14 +2516,34 @@ export function MarketingWorkspace() {
     [filters, updateUrl],
   );
 
+  const openEditEditor = useCallback(
+    (selectedItem: MarketingContentItem, surface: ContentEditorSurface) => {
+      setSaveNotice(null);
+      setEditor({
+        createDate: null,
+        item: selectedItem,
+        key: `edit:${surface}:${selectedItem.id}:${selectedItem.updated_at}`,
+        mode: "edit",
+        surface,
+      });
+    },
+    [],
+  );
+
   const closeEditor = useCallback(() => {
     setEditor(null);
+    setSaveNotice(null);
     updateUrl(filters);
   }, [filters, updateUrl]);
 
-  const handleSaved = useCallback(() => {
+  const handleSaved = useCallback((savedItem: MarketingContentItem | null) => {
     setEditor(null);
     updateUrl(filters);
+    setSaveNotice(
+      savedItem
+        ? `Saved ${savedItem.title}. Revision ${savedItem.content_revision}.`
+        : "Marketing content updated.",
+    );
     setSavedRevision((current) => current + 1);
     void calendarContent.reload().catch(() => undefined);
   }, [calendarContent, filters, updateUrl]);
@@ -2468,6 +2622,15 @@ export function MarketingWorkspace() {
         </div>
       ) : null}
 
+      {saveNotice ? (
+        <div
+          className="rounded-md border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900"
+          role="status"
+        >
+          {saveNotice}
+        </div>
+      ) : null}
+
       {activeTab === "calendar" && canView ? (
         <section className="grid gap-4" aria-label="Marketing content calendar">
           <div className="flex flex-col gap-3 rounded-md border border-slate-200 bg-white p-4 md:flex-row md:items-center md:justify-between">
@@ -2538,7 +2701,7 @@ export function MarketingWorkspace() {
           />
 
           {editor ? (
-            <ContentEditor
+            <ContentEditorDetail
               campaigns={campaignList}
               canEdit={canEdit}
               canSubmitForReview={canSubmitForReview}
@@ -2599,13 +2762,7 @@ export function MarketingWorkspace() {
                 }
               }}
               onItemClick={(selectedItem) =>
-                setEditor({
-                  createDate: null,
-                  item: selectedItem,
-                  key: `edit:${selectedItem.id}:${selectedItem.updated_at}`,
-                  mode: "edit",
-                  surface: "calendar",
-                })
+                openEditEditor(selectedItem, "calendar")
               }
               timeZone={timeZone}
             />
@@ -2614,13 +2771,7 @@ export function MarketingWorkspace() {
               campaigns={campaignList}
               instances={scheduleInstances}
               onItemClick={(selectedItem) =>
-                setEditor({
-                  createDate: null,
-                  item: selectedItem,
-                  key: `edit:${selectedItem.id}:${selectedItem.updated_at}`,
-                  mode: "edit",
-                  surface: "calendar",
-                })
+                openEditEditor(selectedItem, "calendar")
               }
               timeZone={timeZone}
             />
@@ -2643,13 +2794,7 @@ export function MarketingWorkspace() {
             setActiveTab("calendar");
             const selectedItem = items.find((entry) => entry.id === contentItemId);
             if (selectedItem) {
-              setEditor({
-                createDate: null,
-                item: selectedItem,
-                key: `edit:${selectedItem.id}:${selectedItem.updated_at}`,
-                mode: "edit",
-                surface: "calendar",
-              });
+              openEditEditor(selectedItem, "calendar");
             }
           }}
           timeZone={timeZone}
@@ -2664,19 +2809,13 @@ export function MarketingWorkspace() {
             campaigns={campaignList}
             onCreate={() => openCreateEditor(null, "drafts")}
             onItemClick={(selectedItem) =>
-              setEditor({
-                createDate: null,
-                item: selectedItem,
-                key: `edit:${selectedItem.id}:${selectedItem.updated_at}`,
-                mode: "edit",
-                surface: "drafts",
-              })
+              openEditEditor(selectedItem, "drafts")
             }
             savedRevision={savedRevision}
             workspaceId={activeWorkspace.id}
           />
           {editor ? (
-            <ContentEditor
+            <ContentEditorDetail
               campaigns={campaignList}
               canEdit={canEdit}
               canSubmitForReview={canSubmitForReview}

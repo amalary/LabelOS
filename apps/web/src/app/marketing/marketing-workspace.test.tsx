@@ -41,6 +41,14 @@ const realtimeHookState = vi.hoisted(() => ({
     payload: Record<string, unknown>;
   }>,
 }));
+const contentHookState = vi.hoisted(() => ({
+  calendarItems: [] as MarketingContentItem[],
+  detailData: null as MarketingContentItem | null,
+  detailError: null as InstanceType<typeof Error> | null,
+  detailLoading: false,
+  draftItems: [] as MarketingContentItem[],
+  detailReload: vi.fn(),
+}));
 
 vi.mock("next/navigation", () => ({
   usePathname: () => "/marketing",
@@ -77,6 +85,24 @@ vi.mock("../../lib/marketing-content", async () => {
       mutate: mutationMocks.create,
       reset: vi.fn(),
     })),
+    useMarketingContentItem: vi.fn(
+      (_workspaceId: string | null, campaignId: string | null, contentItemId: string | null) => {
+        const selected =
+          contentHookState.detailData ??
+          [...contentHookState.calendarItems, ...contentHookState.draftItems].find(
+            (entry) =>
+              entry.id === contentItemId && (!campaignId || entry.campaign_id === campaignId),
+          ) ??
+          null;
+        return {
+          data: contentHookState.detailError || contentHookState.detailLoading ? null : selected,
+          error: contentHookState.detailError,
+          isLoading: contentHookState.detailLoading,
+          isMutating: false,
+          reload: contentHookState.detailReload,
+        };
+      },
+    ),
     useTransitionMarketingContentStatus: vi.fn(() => ({
       data: null,
       error: null,
@@ -420,6 +446,7 @@ function mockWorkspaceProfile(capabilityList: string[] = ["marketing.content.vie
 }
 
 function mockCalendar(items: MarketingContentItem[] = [item()]) {
+  contentHookState.calendarItems = items;
   vi.mocked(marketingContent.useWorkspaceCalendarContent).mockReturnValue({
     data: {
       marketing_content: items,
@@ -435,6 +462,7 @@ function mockCalendar(items: MarketingContentItem[] = [item()]) {
 }
 
 function mockDrafts(items: MarketingContentItem[] = [item({ status: "draft" })], reload = vi.fn()) {
+  contentHookState.draftItems = items;
   vi.mocked(marketingContent.useWorkspaceMarketingContent).mockReturnValue({
     data: {
       marketing_content: items,
@@ -450,6 +478,7 @@ function mockDrafts(items: MarketingContentItem[] = [item({ status: "draft" })],
 }
 
 function mockDraftsLoading() {
+  contentHookState.draftItems = [];
   vi.mocked(marketingContent.useWorkspaceMarketingContent).mockReturnValue({
     data: null,
     error: null,
@@ -462,6 +491,7 @@ function mockDraftsLoading() {
 function mockDraftsError(
   error = new marketingContent.MarketingContentApiError("network_failure", "Failed"),
 ) {
+  contentHookState.draftItems = [];
   vi.mocked(marketingContent.useWorkspaceMarketingContent).mockReturnValue({
     data: null,
     error,
@@ -485,6 +515,12 @@ describe("MarketingWorkspace", () => {
     approvalHookState.queueError = null;
     approvalHookState.queueLoading = false;
     approvalHookState.submittedOptions = [];
+    contentHookState.calendarItems = [];
+    contentHookState.detailData = null;
+    contentHookState.detailError = null;
+    contentHookState.detailLoading = false;
+    contentHookState.draftItems = [];
+    contentHookState.detailReload = vi.fn();
     realtimeHookState.recentActivityEvents = [];
     vi.mocked(approvalsLib.useApprovalDecision).mockImplementation(
       (_workspaceId: string | null, _approvalRequestId: string | null, action: ApprovalAction) => ({
@@ -1509,6 +1545,191 @@ describe("MarketingWorkspace", () => {
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "Marketing content has validation errors.",
+    );
+  });
+
+  it("loads a canonical draft detail and updates it with the existing marketing content mutation", async () => {
+    vi.useRealTimers();
+    const calendarReload = vi.fn();
+    const draftsReload = vi.fn();
+    const draft = item({
+      asset_refs: [{ id: "asset_existing" }],
+      channels: [
+        channel({
+          asset_refs: [{ id: "channel_asset_existing" }],
+          copy_text_override: "Existing IG copy",
+          placement: "reels",
+        }),
+      ],
+      content_revision: 3,
+      copy_text: "Existing draft copy",
+      id: "content_draft_01",
+      status: "draft",
+      title: "Draft Caption",
+      updated_at: "2026-09-12T10:30:00Z",
+    });
+    mockWorkspaceProfile(["marketing.content.view", "marketing.content.edit"]);
+    vi.mocked(marketingContent.useWorkspaceCalendarContent).mockReturnValue({
+      data: { marketing_content: [], total: 0, limit: 500, offset: 0 },
+      error: null,
+      isLoading: false,
+      isMutating: false,
+      reload: calendarReload,
+    });
+    mockDrafts([draft], draftsReload);
+    mutationMocks.update.mockResolvedValueOnce(
+      item({
+        ...draft,
+        content_revision: 4,
+        copy_text: "Updated canonical copy",
+        title: "Updated Draft Caption",
+      }),
+    );
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open draft Draft Caption" }));
+
+    const editor = screen.getByRole("region", { name: "Marketing content editor" });
+    expect(marketingContent.useMarketingContentItem).toHaveBeenLastCalledWith(
+      "workspace_01",
+      "campaign_01",
+      "content_draft_01",
+    );
+    expect(within(editor).getByDisplayValue("Draft Caption")).toBeInTheDocument();
+    expect(within(editor).getByDisplayValue("Existing draft copy")).toBeInTheDocument();
+    expect(within(editor).getByDisplayValue("reels")).toBeInTheDocument();
+    expect(within(editor).getByDisplayValue("Existing IG copy")).toBeInTheDocument();
+    expect(within(editor).getByText("Current status: Draft - Approval: Draft - Revision 3"))
+      .toBeInTheDocument();
+
+    fireEvent.change(within(editor).getByLabelText("Title"), {
+      target: { value: "Updated Draft Caption" },
+    });
+    fireEvent.change(within(editor).getByLabelText("Core Copy / Caption"), {
+      target: { value: "Updated canonical copy" },
+    });
+    fireEvent.change(within(editor).getByLabelText("Asset references"), {
+      target: { value: '[{"id":"asset_updated"}]' },
+    });
+    fireEvent.change(within(editor).getByLabelText("Channel copy override"), {
+      target: { value: "Updated IG copy" },
+    });
+    fireEvent.click(within(editor).getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => expect(mutationMocks.update).toHaveBeenCalled());
+    expect(mutationMocks.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        asset_refs: [{ id: "asset_updated" }],
+        channels: [
+          expect.objectContaining({
+            asset_refs: [{ id: "channel_asset_existing" }],
+            channel: "instagram",
+            copy_text_override: "Updated IG copy",
+            placement: "reels",
+          }),
+        ],
+        copy_text: "Updated canonical copy",
+        title: "Updated Draft Caption",
+      }),
+    );
+    expect(screen.getByRole("status")).toHaveTextContent("Saved Updated Draft Caption. Revision 4.");
+    expect(calendarReload).toHaveBeenCalled();
+    await waitFor(() => expect(draftsReload).toHaveBeenCalled());
+  });
+
+  it("shows the draft detail loading state after selecting a draft", () => {
+    const draft = item({ id: "content_draft_01", status: "draft", title: "Draft Caption" });
+    contentHookState.detailLoading = true;
+    mockDrafts([draft]);
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open draft Draft Caption" }));
+
+    expect(screen.getByRole("status")).toHaveTextContent("Loading marketing content detail");
+  });
+
+  it("shows missing or deleted draft detail state", () => {
+    const draft = item({ id: "content_draft_01", status: "draft", title: "Draft Caption" });
+    contentHookState.detailError = new marketingContent.MarketingContentApiError(
+      "not_found",
+      "Marketing content was not found.",
+      404,
+    );
+    mockDrafts([draft]);
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open draft Draft Caption" }));
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "This marketing content is missing or was deleted.",
+    );
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+  });
+
+  it("shows draft detail authorization failure without rendering edit controls", () => {
+    const draft = item({ id: "content_draft_01", status: "draft", title: "Draft Caption" });
+    contentHookState.detailError = new marketingContent.MarketingContentApiError(
+      "forbidden",
+      "You do not have access to marketing content.",
+      403,
+    );
+    mockDrafts([draft]);
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open draft Draft Caption" }));
+
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "You do not have access to this marketing content.",
+    );
+    expect(screen.queryByRole("button", { name: "Save changes" })).not.toBeInTheDocument();
+  });
+
+  it("shows validation failures from draft detail saves", async () => {
+    vi.useRealTimers();
+    const draft = item({ id: "content_draft_01", status: "draft", title: "Draft Caption" });
+    mockWorkspaceProfile(["marketing.content.view", "marketing.content.edit"]);
+    mockDrafts([draft]);
+    mutationMocks.update.mockRejectedValueOnce(
+      new marketingContent.MarketingContentApiError(
+        "validation",
+        "Channel asset references must be a JSON array.",
+        422,
+      ),
+    );
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open draft Draft Caption" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Channel asset references must be a JSON array.",
+    );
+  });
+
+  it("shows save failures from draft detail saves", async () => {
+    vi.useRealTimers();
+    const draft = item({ id: "content_draft_01", status: "draft", title: "Draft Caption" });
+    mockWorkspaceProfile(["marketing.content.view", "marketing.content.edit"]);
+    mockDrafts([draft]);
+    mutationMocks.update.mockRejectedValueOnce(
+      new marketingContent.MarketingContentApiError(
+        "network_failure",
+        "Unable to reach the marketing content API.",
+      ),
+    );
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open draft Draft Caption" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Unable to reach the marketing content API.",
     );
   });
 
