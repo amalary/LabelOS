@@ -362,7 +362,30 @@ def test_marketing_content_campaign_crud_and_lifecycle(
 
     created = client.post(base, json=_draft_payload(seeded)).json()
     assert created["status"] == "draft"
+    assert created["scheduled_at"] is None
+    assert created["approval_requested_at"] is None
     assert created["created_by_profile_id"] == str(seeded.owner_profile_id)
+
+    unscheduled_channel = client.post(
+        base,
+        json={
+            **_draft_payload(seeded, title="Unscheduled Channel Draft"),
+            "channels": [
+                {
+                    "channel": "Instagram",
+                    "placement": "Feed",
+                    "copy_text_override": "IG draft copy",
+                    "asset_refs": [{"kind": "image", "id": "ig-draft-1"}],
+                }
+            ],
+        },
+    )
+    assert unscheduled_channel.status_code == 201
+    unscheduled_content = unscheduled_channel.json()
+    assert unscheduled_content["status"] == "draft"
+    assert unscheduled_content["scheduled_at"] is None
+    assert unscheduled_content["channels"][0]["scheduled_at"] is None
+    assert unscheduled_content["channels"][0]["copy_text_override"] == "IG draft copy"
 
     multi_channel = client.post(
         base,
@@ -400,7 +423,7 @@ def test_marketing_content_campaign_crud_and_lifecycle(
 
     listed = client.get(base)
     assert listed.status_code == 200
-    assert listed.json()["total"] == 2
+    assert listed.json()["total"] == 3
 
     submitted = client.patch(
         f"{base}/{created['id']}/status",

@@ -434,7 +434,7 @@ function mockCalendar(items: MarketingContentItem[] = [item()]) {
   });
 }
 
-function mockDrafts(items: MarketingContentItem[] = [item({ status: "draft" })]) {
+function mockDrafts(items: MarketingContentItem[] = [item({ status: "draft" })], reload = vi.fn()) {
   vi.mocked(marketingContent.useWorkspaceMarketingContent).mockReturnValue({
     data: {
       marketing_content: items,
@@ -445,7 +445,7 @@ function mockDrafts(items: MarketingContentItem[] = [item({ status: "draft" })])
     error: null,
     isLoading: false,
     isMutating: false,
-    reload: vi.fn(),
+    reload,
   });
 }
 
@@ -459,7 +459,9 @@ function mockDraftsLoading() {
   });
 }
 
-function mockDraftsError(error = new marketingContent.MarketingContentApiError("network_failure", "Failed")) {
+function mockDraftsError(
+  error = new marketingContent.MarketingContentApiError("network_failure", "Failed"),
+) {
   vi.mocked(marketingContent.useWorkspaceMarketingContent).mockReturnValue({
     data: null,
     error,
@@ -1397,12 +1399,117 @@ describe("MarketingWorkspace", () => {
 
     expect(screen.getByRole("heading", { name: "No draft posts" })).toBeInTheDocument();
     expect(
-      screen.getByText("Draft posts appear here before they are submitted for approval or scheduled."),
+      screen.getByText(
+        "Draft posts appear here before they are submitted for approval or scheduled.",
+      ),
     ).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Create Draft" }));
     expect(screen.getByRole("region", { name: "Marketing content editor" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Create content draft" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Create draft post" })).toBeInTheDocument();
+  });
+
+  it("creates an unscheduled draft from Draft Posts with the existing marketing content mutation", async () => {
+    vi.useRealTimers();
+    const calendarReload = vi.fn();
+    const draftsReload = vi.fn();
+    mockWorkspaceProfile(["marketing.content.view", "marketing.content.create"]);
+    vi.mocked(marketingContent.useWorkspaceCalendarContent).mockReturnValue({
+      data: { marketing_content: [], total: 0, limit: 500, offset: 0 },
+      error: null,
+      isLoading: false,
+      isMutating: false,
+      reload: calendarReload,
+    });
+    mockDrafts(
+      [item({ id: "content_draft_01", status: "draft", title: "Existing Draft" })],
+      draftsReload,
+    );
+    render(<MarketingWorkspace />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create Draft" }));
+    const editor = screen.getByRole("region", { name: "Marketing content editor" });
+    expect(within(editor).queryByLabelText("Planned publish time")).not.toBeInTheDocument();
+    expect(within(editor).queryByLabelText("Channel planned publish time")).not.toBeInTheDocument();
+
+    fireEvent.change(within(editor).getByLabelText("Title"), {
+      target: { value: "Unscheduled launch draft" },
+    });
+    fireEvent.change(within(editor).getByLabelText("Core Copy / Caption"), {
+      target: { value: "Presave starts now." },
+    });
+    fireEvent.change(within(editor).getByLabelText("Asset references"), {
+      target: { value: '[{"id":"asset_draft_01","type":"image"}]' },
+    });
+    fireEvent.change(within(editor).getByLabelText("Channel copy override"), {
+      target: { value: "IG draft copy" },
+    });
+    fireEvent.click(within(editor).getByRole("button", { name: "Save draft" }));
+
+    await waitFor(() => expect(mutationMocks.create).toHaveBeenCalled());
+    expect(mutationMocks.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        artist_id: "artist_01",
+        asset_refs: [{ id: "asset_draft_01", type: "image" }],
+        content_type: "social_post",
+        copy_text: "Presave starts now.",
+        release_id: "release_01",
+        scheduled_at: null,
+        title: "Unscheduled launch draft",
+      }),
+    );
+    expect(mutationMocks.create.mock.calls[0]?.[0]).not.toHaveProperty("status");
+    expect(mutationMocks.create.mock.calls[0]?.[0].channels).toEqual([
+      expect.objectContaining({
+        channel: "instagram",
+        copy_text_override: "IG draft copy",
+        placement: "feed",
+        scheduled_at: null,
+      }),
+    ]);
+    expect(mutationMocks.approvalSubmit).not.toHaveBeenCalled();
+    expect(mutationMocks.status).not.toHaveBeenCalled();
+    expect(calendarReload).toHaveBeenCalled();
+    await waitFor(() => expect(draftsReload).toHaveBeenCalled());
+  });
+
+  it("shows Draft Posts validation errors before creating", () => {
+    vi.useRealTimers();
+    mockWorkspaceProfile(["marketing.content.view", "marketing.content.create"]);
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create Draft" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save draft" }));
+
+    expect(screen.getByRole("alert")).toHaveTextContent("Title is required.");
+    expect(mutationMocks.create).not.toHaveBeenCalled();
+  });
+
+  it("shows Draft Posts API errors from the existing create mutation", async () => {
+    vi.useRealTimers();
+    mutationMocks.create.mockRejectedValueOnce(
+      new marketingContent.MarketingContentApiError(
+        "validation",
+        "Marketing content has validation errors.",
+        422,
+      ),
+    );
+    mockWorkspaceProfile(["marketing.content.view", "marketing.content.create"]);
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create Draft" }));
+    const editor = screen.getByRole("region", { name: "Marketing content editor" });
+    fireEvent.change(within(editor).getByLabelText("Title"), {
+      target: { value: "Rejected draft" },
+    });
+    fireEvent.click(within(editor).getByRole("button", { name: "Save draft" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Marketing content has validation errors.",
+    );
   });
 
   it("shows the drafts loading state", () => {

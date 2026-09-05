@@ -294,6 +294,7 @@ const emptyDraftFilters: DraftFilters = {
 };
 
 type ContentEditorMode = "create" | "edit";
+type ContentEditorSurface = "calendar" | "drafts";
 
 type ChannelFormRow = {
   id: string;
@@ -583,6 +584,7 @@ function ContentEditor({
   onCancel,
   onOpenApprovalReview,
   onSaved,
+  surface,
   timeZone,
 }: {
   campaigns: Campaign[];
@@ -595,6 +597,7 @@ function ContentEditor({
   onCancel: () => void;
   onOpenApprovalReview: (approvalRequestId: string | null) => void;
   onSaved: () => void;
+  surface: ContentEditorSurface;
   timeZone: string;
 }) {
   const [form, setForm] = useState(() =>
@@ -655,6 +658,7 @@ function ContentEditor({
   const approvalState = item?.approval_state?.state ?? item?.status;
   const isCurrentlyApproved = item ? approvedRevisionIsCurrent(item) : false;
   const scheduleEligible = item ? canScheduleApprovedRevision(item) : false;
+  const isDraftCreate = mode === "create" && surface === "drafts";
 
   const setField = (next: Partial<ContentFormState>) => {
     setClientError(null);
@@ -754,11 +758,16 @@ function ContentEditor({
       <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
         <div>
           <h2 className="text-lg font-semibold text-slate-950">
-            {mode === "create" ? "Create content draft" : "Edit content"}
+            {mode === "create"
+              ? surface === "drafts"
+                ? "Create draft post"
+                : "Create content draft"
+              : "Edit content"}
           </h2>
           <p className="text-sm text-slate-500">
-            Schedule for calendar by setting a planned publish time. LabelOS will not automatically
-            publish posts yet.
+            {isDraftCreate
+              ? "Save unscheduled marketing content as a draft. Approval and scheduling stay separate."
+              : "Schedule for calendar by setting a planned publish time. LabelOS will not automatically publish posts yet."}
           </p>
           {item ? (
             <p className="mt-1 text-xs font-medium text-slate-500">
@@ -878,18 +887,22 @@ function ContentEditor({
             ))}
           </select>
         </label>
-        <label className="grid gap-1 text-sm font-medium text-slate-700 md:col-span-2">
-          <span>Planned publish time</span>
-          <input
-            aria-label="Planned publish time"
-            className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950"
-            disabled={!isEditable}
-            onChange={(event) => setField({ scheduledAt: event.target.value })}
-            type="datetime-local"
-            value={form.scheduledAt}
-          />
-          <span className="text-xs font-normal text-slate-500">Calendar timezone: {timeZone}</span>
-        </label>
+        {!isDraftCreate ? (
+          <label className="grid gap-1 text-sm font-medium text-slate-700 md:col-span-2">
+            <span>Planned publish time</span>
+            <input
+              aria-label="Planned publish time"
+              className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950"
+              disabled={!isEditable}
+              onChange={(event) => setField({ scheduledAt: event.target.value })}
+              type="datetime-local"
+              value={form.scheduledAt}
+            />
+            <span className="text-xs font-normal text-slate-500">
+              Calendar timezone: {timeZone}
+            </span>
+          </label>
+        ) : null}
         <label className="grid gap-1 text-sm font-medium text-slate-700 md:col-span-2">
           <span>Core Copy / Caption</span>
           <textarea
@@ -963,17 +976,21 @@ function ContentEditor({
                   value={channel.placement}
                 />
               </label>
-              <label className="grid gap-1 text-sm font-medium text-slate-700">
-                <span>Channel planned publish time</span>
-                <input
-                  aria-label="Channel planned publish time"
-                  className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950"
-                  disabled={!isEditable}
-                  onChange={(event) => setChannel(channel.id, { scheduledAt: event.target.value })}
-                  type="datetime-local"
-                  value={channel.scheduledAt}
-                />
-              </label>
+              {!isDraftCreate ? (
+                <label className="grid gap-1 text-sm font-medium text-slate-700">
+                  <span>Channel planned publish time</span>
+                  <input
+                    aria-label="Channel planned publish time"
+                    className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950"
+                    disabled={!isEditable}
+                    onChange={(event) =>
+                      setChannel(channel.id, { scheduledAt: event.target.value })
+                    }
+                    type="datetime-local"
+                    value={channel.scheduledAt}
+                  />
+                </label>
+              ) : null}
               <Button
                 className="self-end"
                 disabled={!isEditable || form.channels.length === 1}
@@ -1248,11 +1265,7 @@ function draftOwnerOptions(campaigns: Campaign[]) {
 }
 
 function draftSearchText(item: MarketingContentItem): string {
-  return [
-    item.title,
-    item.copy_text,
-    ...item.channels.map((channel) => channel.copy_text_override),
-  ]
+  return [item.title, item.copy_text, ...item.channels.map((channel) => channel.copy_text_override)]
     .filter(Boolean)
     .join(" ")
     .toLowerCase();
@@ -1280,12 +1293,14 @@ function DraftsTab({
   campaigns,
   onCreate,
   onItemClick,
+  savedRevision,
   workspaceId,
 }: {
   canCreate: boolean;
   campaigns: Campaign[];
   onCreate: () => void;
   onItemClick: (item: MarketingContentItem) => void;
+  savedRevision: number;
   workspaceId: string;
 }) {
   const [filters, setFilters] = useState<DraftFilters>(emptyDraftFilters);
@@ -1315,6 +1330,11 @@ function DraftsTab({
     ],
   );
   const drafts = useWorkspaceMarketingContent(workspaceId, draftOptions);
+  useEffect(() => {
+    if (savedRevision > 0) {
+      void Promise.resolve(drafts.reload()).catch(() => undefined);
+    }
+  }, [drafts.reload, savedRevision]);
   const serverDraftItems = (drafts.data?.marketing_content ?? []).filter(
     (draft) => draft.status === "draft",
   );
@@ -1362,10 +1382,17 @@ function DraftsTab({
               Unsubmitted marketing content where status is draft.
             </p>
           </div>
-          <Badge>
-            {draftItems.length}
-            {activeFilters ? ` of ${serverDraftItems.length}` : ""} drafts
-          </Badge>
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge>
+              {draftItems.length}
+              {activeFilters ? ` of ${serverDraftItems.length}` : ""} drafts
+            </Badge>
+            {canCreate ? (
+              <Button onClick={onCreate} size="sm" type="button">
+                Create Draft
+              </Button>
+            ) : null}
+          </div>
         </div>
       </Card>
 
@@ -1535,10 +1562,6 @@ function DraftsTab({
               <Button onClick={resetFilters} type="button" variant="secondary">
                 Clear filters
               </Button>
-            ) : canCreate ? (
-              <Button onClick={onCreate} type="button">
-                Create Draft
-              </Button>
             ) : null
           }
           title={activeFilters ? "No matching draft posts" : "No draft posts"}
@@ -1556,17 +1579,11 @@ function DraftsTab({
               >
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
-                    <h3 className="truncate text-sm font-semibold text-slate-950">
-                      {draft.title}
-                    </h3>
-                    <Badge variant={approvalStateVariant(draft)}>
-                      {approvalStateLabel(draft)}
-                    </Badge>
+                    <h3 className="truncate text-sm font-semibold text-slate-950">{draft.title}</h3>
+                    <Badge variant={approvalStateVariant(draft)}>{approvalStateLabel(draft)}</Badge>
                     <Badge>{revisionLabel(draft)}</Badge>
                   </div>
-                  <p className="mt-2 line-clamp-2 text-sm text-slate-600">
-                    {copyPreview(draft)}
-                  </p>
+                  <p className="mt-2 line-clamp-2 text-sm text-slate-600">{copyPreview(draft)}</p>
                   <p className="mt-2 truncate text-xs text-slate-500">
                     {humanize(draft.content_type)} - {channelSummary(draft)}
                   </p>
@@ -1594,9 +1611,7 @@ function DraftsTab({
                   <p className="mt-1 truncate text-sm font-medium text-slate-800">
                     {draft.updated_at.slice(0, 10)}
                   </p>
-                  <p className="mt-1 truncate text-xs text-slate-500">
-                    {ownerCreatorLabel(draft)}
-                  </p>
+                  <p className="mt-1 truncate text-xs text-slate-500">{ownerCreatorLabel(draft)}</p>
                 </div>
               </button>
             ))}
@@ -2247,12 +2262,33 @@ export function MarketingWorkspace() {
   });
   const [monthDate, setMonthDate] = useState(() => currentCalendarMonthDate(timeZone));
   const [editor, setEditor] = useState<
-    | { key: string; mode: "create"; item: null; createDate: string | null }
-    | { key: string; mode: "edit"; item: MarketingContentItem; createDate: null }
+    | {
+        key: string;
+        mode: "create";
+        item: null;
+        createDate: string | null;
+        surface: ContentEditorSurface;
+      }
+    | {
+        key: string;
+        mode: "edit";
+        item: MarketingContentItem;
+        createDate: null;
+        surface: ContentEditorSurface;
+      }
     | null
   >(() =>
-    createDate ? { createDate, item: null, key: `create:${createDate}`, mode: "create" } : null,
+    createDate
+      ? {
+          createDate,
+          item: null,
+          key: `create:${createDate}`,
+          mode: "create",
+          surface: "calendar",
+        }
+      : null,
   );
+  const [savedRevision, setSavedRevision] = useState(0);
   const [focusedApprovalId, setFocusedApprovalId] = useState<string | null>(
     searchParams.get("approvalRequestId"),
   );
@@ -2333,12 +2369,13 @@ export function MarketingWorkspace() {
   );
 
   const openCreateEditor = useCallback(
-    (dateKey: string | null = null) => {
+    (dateKey: string | null = null, surface: ContentEditorSurface = "calendar") => {
       setEditor({
         createDate: dateKey,
         item: null,
-        key: `create:${dateKey ?? "blank"}:${Date.now()}`,
+        key: `create:${surface}:${dateKey ?? "blank"}:${Date.now()}`,
         mode: "create",
+        surface,
       });
       updateUrl(filters, dateKey ?? undefined);
     },
@@ -2353,6 +2390,7 @@ export function MarketingWorkspace() {
   const handleSaved = useCallback(() => {
     setEditor(null);
     updateUrl(filters);
+    setSavedRevision((current) => current + 1);
     void calendarContent.reload().catch(() => undefined);
   }, [calendarContent, filters, updateUrl]);
 
@@ -2516,6 +2554,7 @@ export function MarketingWorkspace() {
                 setEditor(null);
               }}
               onSaved={handleSaved}
+              surface={editor.surface}
               timeZone={timeZone}
             />
           ) : null}
@@ -2565,6 +2604,7 @@ export function MarketingWorkspace() {
                   item: selectedItem,
                   key: `edit:${selectedItem.id}:${selectedItem.updated_at}`,
                   mode: "edit",
+                  surface: "calendar",
                 })
               }
               timeZone={timeZone}
@@ -2579,6 +2619,7 @@ export function MarketingWorkspace() {
                   item: selectedItem,
                   key: `edit:${selectedItem.id}:${selectedItem.updated_at}`,
                   mode: "edit",
+                  surface: "calendar",
                 })
               }
               timeZone={timeZone}
@@ -2607,6 +2648,7 @@ export function MarketingWorkspace() {
                 item: selectedItem,
                 key: `edit:${selectedItem.id}:${selectedItem.updated_at}`,
                 mode: "edit",
+                surface: "calendar",
               });
             }
           }}
@@ -2620,15 +2662,17 @@ export function MarketingWorkspace() {
           <DraftsTab
             canCreate={canCreate}
             campaigns={campaignList}
-            onCreate={() => openCreateEditor()}
+            onCreate={() => openCreateEditor(null, "drafts")}
             onItemClick={(selectedItem) =>
               setEditor({
                 createDate: null,
                 item: selectedItem,
                 key: `edit:${selectedItem.id}:${selectedItem.updated_at}`,
                 mode: "edit",
+                surface: "drafts",
               })
             }
+            savedRevision={savedRevision}
             workspaceId={activeWorkspace.id}
           />
           {editor ? (
@@ -2648,6 +2692,7 @@ export function MarketingWorkspace() {
                 setEditor(null);
               }}
               onSaved={handleSaved}
+              surface={editor.surface}
               timeZone={timeZone}
             />
           ) : null}
