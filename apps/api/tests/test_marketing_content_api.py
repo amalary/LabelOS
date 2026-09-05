@@ -9,6 +9,8 @@ from fastapi.testclient import TestClient
 from labelos_database.base import Base
 from labelos_database.capabilities import Capability
 from labelos_database.models import (
+    ApprovalRequest,
+    ApprovalRequestStatus,
     Artist,
     Campaign,
     MembershipRole,
@@ -362,7 +364,30 @@ def test_marketing_content_campaign_crud_and_lifecycle(
 
     created = client.post(base, json=_draft_payload(seeded)).json()
     assert created["status"] == "draft"
+    assert created["scheduled_at"] is None
+    assert created["approval_requested_at"] is None
     assert created["created_by_profile_id"] == str(seeded.owner_profile_id)
+
+    unscheduled_channel = client.post(
+        base,
+        json={
+            **_draft_payload(seeded, title="Unscheduled Channel Draft"),
+            "channels": [
+                {
+                    "channel": "Instagram",
+                    "placement": "Feed",
+                    "copy_text_override": "IG draft copy",
+                    "asset_refs": [{"kind": "image", "id": "ig-draft-1"}],
+                }
+            ],
+        },
+    )
+    assert unscheduled_channel.status_code == 201
+    unscheduled_content = unscheduled_channel.json()
+    assert unscheduled_content["status"] == "draft"
+    assert unscheduled_content["scheduled_at"] is None
+    assert unscheduled_content["channels"][0]["scheduled_at"] is None
+    assert unscheduled_content["channels"][0]["copy_text_override"] == "IG draft copy"
 
     multi_channel = client.post(
         base,
@@ -400,7 +425,7 @@ def test_marketing_content_campaign_crud_and_lifecycle(
 
     listed = client.get(base)
     assert listed.status_code == 200
-    assert listed.json()["total"] == 2
+    assert listed.json()["total"] == 3
 
     submitted = client.patch(
         f"{base}/{created['id']}/status",
@@ -426,6 +451,7 @@ def test_marketing_content_campaign_crud_and_lifecycle(
     )
     assert approved.status_code == 200
     assert approved.json()["approved_by_profile_id"] == str(seeded.approver_profile_id)
+    assert approved.json()["approval_state"]["can_schedule"] is False
     _set_context(client, seeded)
 
     cannot_schedule = client.patch(
@@ -457,6 +483,7 @@ def test_marketing_content_campaign_crud_and_lifecycle(
         },
     )
     assert approved_multi.status_code == 200
+    assert approved_multi.json()["approval_state"]["can_schedule"] is True
     _set_context(client, seeded)
     scheduled = client.patch(
         f"{base}/{multi_channel['id']}/status",
@@ -604,6 +631,75 @@ def test_marketing_content_mutations_publish_workspace_scoped_realtime_events(
     )
 
 
+def test_marketing_content_api_rejects_material_edits_to_published_content(
+    marketing_content_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededMarketingContentApi,
+    ],
+) -> None:
+    client, _sessionmaker, seeded = marketing_content_client
+    _set_context(client, seeded)
+    base = _base(seeded)
+    created = client.post(
+        base,
+        json={
+            **_draft_payload(seeded, title="Published Guard"),
+            "scheduled_at": datetime(2026, 9, 10, 12, 0, tzinfo=UTC).isoformat(),
+        },
+    ).json()
+    submitted = client.post(
+        _approval_submit_base(seeded, created["id"]),
+        json={"expected_resource_revision": 1},
+    ).json()
+    _set_context(
+        client,
+        seeded,
+        user_id=seeded.approver_user_id,
+        email="marketing-approver-profile@example.com",
+        capability_permissions=(
+            Capability.marketing_content_view.value,
+            Capability.marketing_content_approve.value,
+        ),
+        department_access=("marketing",),
+    )
+    assert (
+        client.post(
+            f"{_approvals_base(seeded)}/{submitted['id']}/decisions",
+            json={"action": "approved"},
+        ).status_code
+        == 200
+    )
+
+    _set_context(client, seeded)
+    assert (
+        client.patch(
+            f"{base}/{created['id']}/status",
+            json={"status": "scheduled"},
+        ).status_code
+        == 200
+    )
+    assert (
+        client.patch(
+            f"{base}/{created['id']}/status",
+            json={"status": "published"},
+        ).status_code
+        == 200
+    )
+    edited = client.patch(
+        f"{base}/{created['id']}",
+        json={"title": "Published Guard Edited"},
+    )
+    assert edited.status_code == 409
+    assert edited.json()["detail"] == (
+        "Published marketing content cannot receive material edits"
+    )
+    current = client.get(f"{base}/{created['id']}").json()
+    assert current["status"] == "published"
+    assert current["content_revision"] == 1
+    assert current["approved_revision"] == 1
+
+
 def test_marketing_content_does_not_publish_realtime_event_on_failed_mutation(
     marketing_content_client: tuple[
         TestClient,
@@ -689,6 +785,10 @@ def test_marketing_content_workspace_calendar_filters(
     status_filtered = client.get(workspace_base, params={"status": "in_review"})
     channel_filtered = client.get(workspace_base, params={"channel": "TikTok"})
     type_filtered = client.get(workspace_base, params={"content_type": "Video"})
+    owner_filtered = client.get(
+        workspace_base,
+        params={"owner_profile_id": str(seeded.owner_profile_id)},
+    )
 
     assert {item["id"] for item in date_filtered.json()["marketing_content"]} == {
         first["id"],
@@ -708,6 +808,9 @@ def test_marketing_content_workspace_calendar_filters(
     ]
     assert [item["id"] for item in type_filtered.json()["marketing_content"]] == [
         second["id"]
+    ]
+    assert [item["id"] for item in owner_filtered.json()["marketing_content"]] == [
+        first["id"]
     ]
 
 
@@ -775,6 +878,205 @@ def test_marketing_content_authorization_and_scope_errors(
     assert cross_campaign.status_code == 404
 
 
+def test_marketing_content_schedule_and_publish_use_edit_capability_and_agent_guards(
+    marketing_content_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededMarketingContentApi,
+    ],
+) -> None:
+    client, sessionmaker, seeded = marketing_content_client
+    base = _base(seeded)
+    scheduled_at = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+
+    _set_context(client, seeded)
+    created = client.post(
+        base,
+        json={
+            **_draft_payload(seeded, title="Edit Scheduled"),
+            "scheduled_at": scheduled_at.isoformat(),
+        },
+    ).json()
+    submitted = client.post(_approval_submit_base(seeded, created["id"]), json={})
+    assert submitted.status_code == 201
+
+    _set_context(
+        client,
+        seeded,
+        user_id=seeded.approver_user_id,
+        email="marketing-approver-profile@example.com",
+        capability_permissions=(
+            Capability.marketing_content_view.value,
+            Capability.marketing_content_approve.value,
+        ),
+        department_access=("marketing",),
+    )
+    approved = client.post(
+        f"{_approvals_base(seeded)}/{submitted.json()['id']}/decisions",
+        json={"action": "approved"},
+    )
+    assert approved.status_code == 200
+
+    asyncio.run(
+        _set_viewer_capabilities(
+            sessionmaker,
+            seeded,
+            (Capability.marketing_content_view.value,),
+        )
+    )
+    _set_context(
+        client,
+        seeded,
+        user_id=seeded.viewer_user_id,
+        email="marketing-viewer@example.com",
+        workspace_permission=WorkspacePermission.guest,
+        capability_permissions=(Capability.marketing_content_view.value,),
+        department_access=("marketing",),
+    )
+    missing_edit_schedule = client.patch(
+        f"{base}/{created['id']}/status",
+        json={"status": "scheduled"},
+    )
+    assert missing_edit_schedule.status_code == 403
+
+    class AgentContext(CurrentUserContext):
+        @property
+        def authorization_actor(self):
+            from labelos_api.authorization import ActorKind, AuthorizationActor
+
+            return AuthorizationActor(
+                kind=ActorKind.ai_agent,
+                subject=f"agent_{self.user.id}",
+                user_id=self.user.id,
+            )
+
+    async def override_agent_context() -> AgentContext:
+        return AgentContext(
+            user=User(id=seeded.viewer_user_id, email="agent@example.com"),
+            principal=AuthenticatedPrincipal(
+                provider="workos",
+                subject=f"user_{seeded.viewer_user_id}",
+                session_id="session_SECRET",
+                email="agent@example.com",
+                organization_id="org_ALPHA_MARKETING_CONTENT",
+                role=WorkspacePermission.guest.value,
+                roles=(WorkspacePermission.guest.value,),
+            ),
+            memberships=(
+                MembershipContext(
+                    organization_id=seeded.workspace_id,
+                    organization_name="Alpha Label",
+                    organization_slug="alpha-marketing-content-api",
+                    workos_organization_id="org_ALPHA_MARKETING_CONTENT",
+                    workspace_permission=WorkspacePermission.guest,
+                    department_access=("marketing",),
+                    capability_permissions=(
+                        Capability.marketing_content_view.value,
+                        Capability.marketing_content_edit.value,
+                    ),
+                ),
+            ),
+        )
+
+    asyncio.run(
+        _set_viewer_capabilities(
+            sessionmaker,
+            seeded,
+            (
+                Capability.marketing_content_view.value,
+                Capability.marketing_content_edit.value,
+            ),
+        )
+    )
+    client.app.dependency_overrides[get_current_user_context] = override_agent_context
+    agent_schedule = client.patch(
+        f"{base}/{created['id']}/status",
+        json={"status": "scheduled"},
+    )
+    assert agent_schedule.status_code == 409
+    assert agent_schedule.json()["detail"] == (
+        "AI agents cannot schedule or publish marketing content"
+    )
+
+    _set_context(
+        client,
+        seeded,
+        user_id=seeded.viewer_user_id,
+        email="marketing-viewer@example.com",
+        workspace_permission=WorkspacePermission.guest,
+        capability_permissions=(
+            Capability.marketing_content_view.value,
+            Capability.marketing_content_edit.value,
+        ),
+        department_access=("marketing",),
+    )
+    scheduled = client.patch(
+        f"{base}/{created['id']}/status",
+        json={"status": "scheduled"},
+    )
+    assert scheduled.status_code == 200
+
+    asyncio.run(
+        _set_viewer_capabilities(
+            sessionmaker,
+            seeded,
+            (Capability.marketing_content_view.value,),
+        )
+    )
+    _set_context(
+        client,
+        seeded,
+        user_id=seeded.viewer_user_id,
+        email="marketing-viewer@example.com",
+        workspace_permission=WorkspacePermission.guest,
+        capability_permissions=(Capability.marketing_content_view.value,),
+        department_access=("marketing",),
+    )
+    missing_edit_publish = client.patch(
+        f"{base}/{created['id']}/status",
+        json={"status": "published"},
+    )
+    assert missing_edit_publish.status_code == 403
+
+    asyncio.run(
+        _set_viewer_capabilities(
+            sessionmaker,
+            seeded,
+            (
+                Capability.marketing_content_view.value,
+                Capability.marketing_content_edit.value,
+            ),
+        )
+    )
+    client.app.dependency_overrides[get_current_user_context] = override_agent_context
+    agent_publish = client.patch(
+        f"{base}/{created['id']}/status",
+        json={"status": "published"},
+    )
+    assert agent_publish.status_code == 409
+    assert agent_publish.json()["detail"] == (
+        "AI agents cannot schedule or publish marketing content"
+    )
+
+    _set_context(
+        client,
+        seeded,
+        user_id=seeded.viewer_user_id,
+        email="marketing-viewer@example.com",
+        workspace_permission=WorkspacePermission.guest,
+        capability_permissions=(
+            Capability.marketing_content_view.value,
+            Capability.marketing_content_edit.value,
+        ),
+        department_access=("marketing",),
+    )
+    published = client.patch(
+        f"{base}/{created['id']}/status",
+        json={"status": "published"},
+    )
+    assert published.status_code == 200
+
+
 def test_marketing_content_rejects_invalid_input_and_lifecycle(
     marketing_content_client: tuple[
         TestClient,
@@ -802,6 +1104,19 @@ def test_marketing_content_rejects_invalid_input_and_lifecycle(
             "scheduled_at": "2026-09-10T12:00:00",
         },
     )
+    naive_channel_datetime = client.post(
+        base,
+        json={
+            "title": "Naive Channel",
+            "content_type": "Image",
+            "channels": [
+                {
+                    "channel": "Instagram",
+                    "scheduled_at": "2026-09-10T12:00:00",
+                }
+            ],
+        },
+    )
     created = client.post(
         base,
         json={
@@ -822,6 +1137,7 @@ def test_marketing_content_rejects_invalid_input_and_lifecycle(
 
     assert invalid_channel.status_code == 400
     assert naive_datetime.status_code == 422
+    assert naive_channel_datetime.status_code == 422
     assert created.status_code == 400
     assert invalid_transition.status_code == 409
     assert lifecycle_unknown.status_code == 422
@@ -870,12 +1186,119 @@ def test_marketing_content_openapi_contract_exposes_stable_routes(
         "scheduled_at",
         "channels",
     }
+    assert set(schemas["MarketingContentChannelCreateRequest"]["properties"]) == {
+        "channel",
+        "placement",
+        "scheduled_at",
+        "copy_text_override",
+        "asset_refs",
+    }
+    assert "published_at" not in schemas["MarketingContentCreateRequest"]["properties"]
+    assert "published_at" not in schemas["MarketingContentUpdateRequest"]["properties"]
+    channel_create_properties = schemas["MarketingContentChannelCreateRequest"][
+        "properties"
+    ]
+    assert "published_at" not in channel_create_properties
+    assert "external_post_id" not in channel_create_properties
+    assert "external_url" not in channel_create_properties
     assert "approved_at" in schemas["MarketingContentResponse"]["properties"]
     assert "approval_request_id" in schemas["MarketingContentResponse"]["properties"]
     assert "approval_state" in schemas["MarketingContentResponse"]["properties"]
     assert "content_revision" in schemas["MarketingContentResponse"]["properties"]
     assert "approved_revision" in schemas["MarketingContentResponse"]["properties"]
     assert "published_at" in schemas["MarketingContentResponse"]["properties"]
+
+
+def test_marketing_content_draft_authoring_accepts_multi_channel_overrides_only(
+    marketing_content_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededMarketingContentApi,
+    ],
+) -> None:
+    client, _sessionmaker, seeded = marketing_content_client
+    _set_context(client, seeded)
+    scheduled_at = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+    tiktok_scheduled_at = datetime(2026, 9, 11, 16, 30, tzinfo=UTC)
+
+    created = client.post(
+        _base(seeded),
+        json={
+            **_draft_payload(
+                seeded,
+                title="Channel-Aware Draft",
+                scheduled_at=scheduled_at,
+            ),
+            "channels": [
+                {
+                    "channel": "Instagram",
+                    "placement": "Reel",
+                    "copy_text_override": "IG cut",
+                    "asset_refs": [{"kind": "video", "id": "ig-video"}],
+                },
+                {
+                    "channel": "TikTok",
+                    "placement": "Video",
+                    "scheduled_at": tiktok_scheduled_at.isoformat(),
+                    "copy_text_override": "TikTok cut",
+                    "asset_refs": [{"kind": "video", "id": "tt-video"}],
+                },
+            ],
+        },
+    )
+
+    assert created.status_code == 201
+    content = created.json()
+    assert content["status"] == "draft"
+    assert content["scheduled_at"] == "2026-09-10T12:00:00Z"
+    assert [channel["channel"] for channel in content["channels"]] == [
+        "instagram",
+        "tiktok",
+    ]
+    assert content["channels"][0]["placement"] == "reel"
+    assert content["channels"][0]["copy_text_override"] == "IG cut"
+    assert content["channels"][0]["asset_refs"] == [{"kind": "video", "id": "ig-video"}]
+    assert content["channels"][0]["published_at"] is None
+    assert content["channels"][0]["external_post_id"] is None
+    assert content["channels"][0]["external_url"] is None
+    assert content["channels"][1]["scheduled_at"] == "2026-09-11T16:30:00"
+    assert content["channels"][1]["copy_text_override"] == "TikTok cut"
+
+
+def test_marketing_content_draft_authoring_rejects_publishing_result_fields(
+    marketing_content_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededMarketingContentApi,
+    ],
+) -> None:
+    client, _sessionmaker, seeded = marketing_content_client
+    _set_context(client, seeded)
+
+    top_level_published = client.post(
+        _base(seeded),
+        json={
+            **_draft_payload(seeded, title="Published Field Draft"),
+            "published_at": "2026-09-10T12:00:00Z",
+        },
+    )
+    assert top_level_published.status_code == 422
+
+    channel_publishing_result = client.post(
+        _base(seeded),
+        json={
+            **_draft_payload(seeded, title="Channel Result Draft"),
+            "channels": [
+                {
+                    "channel": "Instagram",
+                    "published_at": "2026-09-10T12:00:00Z",
+                    "external_post_id": "post_123",
+                    "external_url": "https://example.com/post_123",
+                }
+            ],
+        },
+    )
+    assert channel_publishing_result.status_code == 422
 
 
 def test_approval_queue_routes_require_authentication(client: TestClient) -> None:
@@ -1056,6 +1479,186 @@ def test_approval_queue_capabilities_and_error_mapping(
     )
 
 
+def test_draft_edit_submit_changes_requested_and_resubmit_revision_lifecycle(
+    marketing_content_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededMarketingContentApi,
+    ],
+) -> None:
+    client, sessionmaker, seeded = marketing_content_client
+    _set_context(client, seeded)
+    base = _base(seeded)
+
+    created = client.post(
+        base,
+        json={
+            **_draft_payload(seeded, title="Draft Lifecycle"),
+            "channels": [{"channel": "Instagram", "placement": "Feed"}],
+        },
+    ).json()
+    edited = client.patch(
+        f"{base}/{created['id']}",
+        json={
+            "title": "Draft Lifecycle Edited",
+            "copy_text": "Updated copy.",
+            "channels": [
+                {
+                    "channel": "Instagram",
+                    "placement": "Reels",
+                    "copy_text_override": "Updated IG.",
+                }
+            ],
+        },
+    )
+    assert edited.status_code == 200
+    assert edited.json()["status"] == "draft"
+    assert edited.json()["content_revision"] == 2
+    assert edited.json()["approval_state"]["current_revision"] == 2
+
+    stale_submit = client.post(
+        _approval_submit_base(seeded, created["id"]),
+        json={"expected_resource_revision": 1},
+    )
+    assert stale_submit.status_code == 409
+
+    submitted = client.post(
+        _approval_submit_base(seeded, created["id"]),
+        json={"expected_resource_revision": 2},
+    )
+    assert submitted.status_code == 201
+    original_approval_id = submitted.json()["id"]
+    assert submitted.json()["submitted_revision"] == 2
+    assert submitted.json()["current_resource_revision"] == 2
+    assert submitted.json()["is_stale"] is False
+
+    _set_context(
+        client,
+        seeded,
+        user_id=seeded.approver_user_id,
+        email="marketing-approver-profile@example.com",
+        capability_permissions=(
+            Capability.marketing_content_view.value,
+            Capability.marketing_content_approve.value,
+        ),
+        department_access=("marketing",),
+    )
+    changes = client.post(
+        f"{_approvals_base(seeded)}/{original_approval_id}/decisions",
+        json={"action": "changes_requested", "reason": "Tighten the CTA."},
+    )
+    assert changes.status_code == 200
+    assert changes.json()["status"] == "changes_requested"
+
+    _set_context(client, seeded)
+    returned = client.get(f"{base}/{created['id']}")
+    assert returned.status_code == 200
+    assert returned.json()["status"] == "draft"
+    assert returned.json()["approval_state"]["state"] == "changes_requested"
+    assert returned.json()["approval_request_id"] == original_approval_id
+    assert returned.json()["content_revision"] == 2
+
+    returned_edit = client.patch(
+        f"{base}/{created['id']}",
+        json={"copy_text": "CTA tightened."},
+    )
+    assert returned_edit.status_code == 200
+    assert returned_edit.json()["status"] == "draft"
+    assert returned_edit.json()["content_revision"] == 3
+    # Existing projection keeps the returned approval context visible until
+    # the next submission replaces it with a current-revision request.
+    assert returned_edit.json()["approval_request_id"] == original_approval_id
+
+    stale_resubmit = client.post(
+        _approval_submit_base(seeded, created["id"]),
+        json={"expected_resource_revision": 2},
+    )
+    assert stale_resubmit.status_code == 409
+
+    resubmitted = client.post(
+        _approval_submit_base(seeded, created["id"]),
+        json={"expected_resource_revision": 3},
+    )
+    assert resubmitted.status_code == 201
+    assert resubmitted.json()["id"] != original_approval_id
+    assert resubmitted.json()["submitted_revision"] == 3
+    assert resubmitted.json()["marketing_content_preview"]["current_revision"] == 3
+
+    async def request_statuses() -> tuple[ApprovalRequestStatus, ApprovalRequestStatus]:
+        async with sessionmaker() as session:
+            original = await session.get(ApprovalRequest, UUID(original_approval_id))
+            latest = await session.get(ApprovalRequest, UUID(resubmitted.json()["id"]))
+            assert original is not None
+            assert latest is not None
+            return original.status, latest.status
+
+    assert asyncio.run(request_statuses()) == (
+        ApprovalRequestStatus.changes_requested,
+        ApprovalRequestStatus.in_review,
+    )
+
+
+def test_approved_material_edit_returns_to_draft_and_preserves_stale_approval_boundary(
+    marketing_content_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededMarketingContentApi,
+    ],
+) -> None:
+    client, _sessionmaker, seeded = marketing_content_client
+    _set_context(client, seeded)
+    base = _base(seeded)
+
+    created = client.post(
+        base,
+        json={
+            **_draft_payload(seeded, title="Approved Lifecycle"),
+            "scheduled_at": datetime(2026, 9, 10, 12, 0, tzinfo=UTC).isoformat(),
+        },
+    ).json()
+    submitted = client.post(
+        _approval_submit_base(seeded, created["id"]),
+        json={"expected_resource_revision": 1},
+    ).json()
+    _set_context(
+        client,
+        seeded,
+        user_id=seeded.approver_user_id,
+        email="marketing-approver-profile@example.com",
+        capability_permissions=(
+            Capability.marketing_content_view.value,
+            Capability.marketing_content_approve.value,
+        ),
+        department_access=("marketing",),
+    )
+    approved = client.post(
+        f"{_approvals_base(seeded)}/{submitted['id']}/decisions",
+        json={"action": "approved"},
+    )
+    assert approved.status_code == 200
+
+    _set_context(client, seeded)
+    edited = client.patch(
+        f"{base}/{created['id']}",
+        json={"title": "Approved Lifecycle Edited"},
+    )
+    assert edited.status_code == 200
+    assert edited.json()["status"] == "draft"
+    assert edited.json()["content_revision"] == 2
+    assert edited.json()["approved_revision"] == 1
+    assert edited.json()["approved_at"] is None
+    assert edited.json()["approved_by_profile_id"] is None
+    assert edited.json()["approval_request_id"] is None
+    assert edited.json()["approval_state"]["state"] == "reapproval_required"
+    assert edited.json()["approval_state"]["approved_revision_is_current"] is False
+
+    schedule = client.patch(
+        f"{base}/{created['id']}/status",
+        json={"status": "scheduled"},
+    )
+    assert schedule.status_code == 409
+
+
 def test_approval_queue_decisions_and_idempotency(
     marketing_content_client: tuple[
         TestClient,
@@ -1161,6 +1764,188 @@ def test_approval_queue_decisions_and_idempotency(
         ).status_code
         == 422
     )
+
+
+def test_draft_posts_approval_lifecycle_projects_draft_list_membership(
+    marketing_content_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededMarketingContentApi,
+    ],
+) -> None:
+    client, _sessionmaker, seeded = marketing_content_client
+
+    def submitter() -> None:
+        _set_context(client, seeded)
+
+    def reviewer() -> None:
+        _set_context(
+            client,
+            seeded,
+            user_id=seeded.approver_user_id,
+            email="marketing-approver-profile@example.com",
+            capability_permissions=(
+                Capability.marketing_content_view.value,
+                Capability.marketing_content_approve.value,
+            ),
+            department_access=("marketing",),
+        )
+
+    def draft_ids() -> set[str]:
+        submitter()
+        response = client.get(
+            f"/api/v1/workspaces/{seeded.workspace_id}/marketing-content",
+            params={"status": "draft"},
+        )
+        assert response.status_code == 200
+        return {entry["id"] for entry in response.json()["marketing_content"]}
+
+    def create_and_submit(title: str) -> tuple[str, str]:
+        submitter()
+        created = client.post(
+            _base(seeded),
+            json=_draft_payload(seeded, title=title),
+        )
+        assert created.status_code == 201
+        content_id = created.json()["id"]
+        assert content_id in draft_ids()
+        submitted = client.post(_approval_submit_base(seeded, content_id), json={})
+        assert submitted.status_code == 201
+        assert submitted.json()["resource_type"] == "marketing_content_item"
+        assert (
+            client.get(f"{_base(seeded)}/{content_id}").json()["status"] == "in_review"
+        )
+        assert content_id not in draft_ids()
+        return content_id, submitted.json()["id"]
+
+    changes_content_id, changes_approval_id = create_and_submit("Changes Projection")
+    reviewer()
+    changes = client.post(
+        f"{_approvals_base(seeded)}/{changes_approval_id}/decisions",
+        json={"action": "changes_requested", "reason": "Revise CTA"},
+    )
+    assert changes.status_code == 200
+    submitter()
+    assert (
+        client.get(f"{_base(seeded)}/{changes_content_id}").json()["status"] == "draft"
+    )
+    assert changes_content_id in draft_ids()
+
+    approved_content_id, approved_approval_id = create_and_submit("Approved Projection")
+    reviewer()
+    approved = client.post(
+        f"{_approvals_base(seeded)}/{approved_approval_id}/decisions",
+        json={"action": "approved"},
+    )
+    assert approved.status_code == 200
+    submitter()
+    assert (
+        client.get(f"{_base(seeded)}/{approved_content_id}").json()["status"]
+        == "approved"
+    )
+    assert approved_content_id not in draft_ids()
+
+    rejected_content_id, rejected_approval_id = create_and_submit("Rejected Projection")
+    reviewer()
+    rejected = client.post(
+        f"{_approvals_base(seeded)}/{rejected_approval_id}/decisions",
+        json={"action": "rejected", "reason": "Off brief"},
+    )
+    assert rejected.status_code == 200
+    submitter()
+    assert (
+        client.get(f"{_base(seeded)}/{rejected_content_id}").json()["status"] == "draft"
+    )
+    assert rejected_content_id in draft_ids()
+
+    cancelled_content_id, cancelled_approval_id = create_and_submit(
+        "Cancelled Projection"
+    )
+    submitter()
+    cancelled = client.post(
+        f"{_approvals_base(seeded)}/{cancelled_approval_id}/decisions",
+        json={"action": "cancelled", "reason": "Submitted by mistake"},
+    )
+    assert cancelled.status_code == 200
+    assert (
+        client.get(f"{_base(seeded)}/{cancelled_content_id}").json()["status"]
+        == "cancelled"
+    )
+    assert cancelled_content_id not in draft_ids()
+
+
+def test_unscheduled_draft_posts_remain_listed_until_review_lifecycle_advances(
+    marketing_content_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededMarketingContentApi,
+    ],
+) -> None:
+    client, _sessionmaker, seeded = marketing_content_client
+    _set_context(client, seeded)
+    base = _base(seeded)
+
+    created = client.post(
+        base,
+        json=_draft_payload(seeded, title="Unscheduled Draft Post"),
+    )
+    assert created.status_code == 201
+    content = created.json()
+    assert content["status"] == "draft"
+    assert content["scheduled_at"] is None
+
+    drafts = client.get(
+        f"/api/v1/workspaces/{seeded.workspace_id}/marketing-content",
+        params={"status": "draft"},
+    )
+    assert drafts.status_code == 200
+    assert content["id"] in [
+        entry["id"] for entry in drafts.json()["marketing_content"]
+    ]
+
+    scheduled_at = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+    scheduled_draft = client.patch(
+        f"{base}/{content['id']}",
+        json={"scheduled_at": scheduled_at.isoformat()},
+    )
+    assert scheduled_draft.status_code == 200
+    assert scheduled_draft.json()["status"] == "draft"
+    assert scheduled_draft.json()["scheduled_at"] == "2026-09-10T12:00:00Z"
+
+    still_drafts = client.get(
+        f"/api/v1/workspaces/{seeded.workspace_id}/marketing-content",
+        params={"status": "draft"},
+    )
+    assert content["id"] in [
+        entry["id"] for entry in still_drafts.json()["marketing_content"]
+    ]
+
+    submitted = client.post(_approval_submit_base(seeded, content["id"]), json={})
+    assert submitted.status_code == 201
+    _set_context(
+        client,
+        seeded,
+        user_id=seeded.approver_user_id,
+        email="marketing-approver-profile@example.com",
+        capability_permissions=(
+            Capability.marketing_content_view.value,
+            Capability.marketing_content_approve.value,
+        ),
+        department_access=("marketing",),
+    )
+    approved = client.post(
+        f"{_approvals_base(seeded)}/{submitted.json()['id']}/decisions",
+        json={"action": "approved"},
+    )
+    assert approved.status_code == 200
+    _set_context(client, seeded)
+
+    scheduled = client.patch(
+        f"{base}/{content['id']}/status",
+        json={"status": "scheduled"},
+    )
+    assert scheduled.status_code == 200
+    assert scheduled.json()["status"] == "scheduled"
 
 
 def test_approval_queue_self_agent_stale_duplicate_and_legacy_status_compatibility(

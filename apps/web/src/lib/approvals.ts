@@ -146,6 +146,7 @@ export type ApprovalListOptions = {
 export type ApprovalSubmitRequest = {
   summary?: string | null;
   metadata?: Record<string, unknown> | null;
+  expected_resource_revision?: number | null;
 };
 
 export type ApprovalDecisionRequest = {

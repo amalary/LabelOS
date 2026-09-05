@@ -17,6 +17,7 @@ let searchParamString = "";
 const mutationMocks = vi.hoisted(() => ({
   approvalDecision: vi.fn(),
   approvalSubmit: vi.fn(),
+  archive: vi.fn(),
   create: vi.fn(),
   status: vi.fn(),
   update: vi.fn(),
@@ -40,6 +41,16 @@ const realtimeHookState = vi.hoisted(() => ({
     entityId: string;
     payload: Record<string, unknown>;
   }>,
+}));
+const contentHookState = vi.hoisted(() => ({
+  archiveError: null as InstanceType<typeof Error> | null,
+  archiveMutating: false,
+  calendarItems: [] as MarketingContentItem[],
+  detailData: null as MarketingContentItem | null,
+  detailError: null as InstanceType<typeof Error> | null,
+  detailLoading: false,
+  draftItems: [] as MarketingContentItem[],
+  detailReload: vi.fn(),
 }));
 
 vi.mock("next/navigation", () => ({
@@ -70,6 +81,13 @@ vi.mock("../../lib/marketing-content", async () => {
   );
   return {
     ...actual,
+    useArchiveMarketingContentItem: vi.fn(() => ({
+      data: null,
+      error: contentHookState.archiveError,
+      isMutating: contentHookState.archiveMutating,
+      mutate: mutationMocks.archive,
+      reset: vi.fn(),
+    })),
     useCreateMarketingContentItem: vi.fn(() => ({
       data: null,
       error: null,
@@ -77,6 +95,24 @@ vi.mock("../../lib/marketing-content", async () => {
       mutate: mutationMocks.create,
       reset: vi.fn(),
     })),
+    useMarketingContentItem: vi.fn(
+      (_workspaceId: string | null, campaignId: string | null, contentItemId: string | null) => {
+        const selected =
+          contentHookState.detailData ??
+          [...contentHookState.calendarItems, ...contentHookState.draftItems].find(
+            (entry) =>
+              entry.id === contentItemId && (!campaignId || entry.campaign_id === campaignId),
+          ) ??
+          null;
+        return {
+          data: contentHookState.detailError || contentHookState.detailLoading ? null : selected,
+          error: contentHookState.detailError,
+          isLoading: contentHookState.detailLoading,
+          isMutating: false,
+          reload: contentHookState.detailReload,
+        };
+      },
+    ),
     useTransitionMarketingContentStatus: vi.fn(() => ({
       data: null,
       error: null,
@@ -92,6 +128,7 @@ vi.mock("../../lib/marketing-content", async () => {
       reset: vi.fn(),
     })),
     useWorkspaceCalendarContent: vi.fn(),
+    useWorkspaceMarketingContent: vi.fn(),
   };
 });
 
@@ -419,6 +456,7 @@ function mockWorkspaceProfile(capabilityList: string[] = ["marketing.content.vie
 }
 
 function mockCalendar(items: MarketingContentItem[] = [item()]) {
+  contentHookState.calendarItems = items;
   vi.mocked(marketingContent.useWorkspaceCalendarContent).mockReturnValue({
     data: {
       marketing_content: items,
@@ -427,6 +465,46 @@ function mockCalendar(items: MarketingContentItem[] = [item()]) {
       offset: 0,
     },
     error: null,
+    isLoading: false,
+    isMutating: false,
+    reload: vi.fn(),
+  });
+}
+
+function mockDrafts(items: MarketingContentItem[] = [item({ status: "draft" })], reload = vi.fn()) {
+  contentHookState.draftItems = items;
+  vi.mocked(marketingContent.useWorkspaceMarketingContent).mockReturnValue({
+    data: {
+      marketing_content: items,
+      total: items.length,
+      limit: 500,
+      offset: 0,
+    },
+    error: null,
+    isLoading: false,
+    isMutating: false,
+    reload,
+  });
+}
+
+function mockDraftsLoading() {
+  contentHookState.draftItems = [];
+  vi.mocked(marketingContent.useWorkspaceMarketingContent).mockReturnValue({
+    data: null,
+    error: null,
+    isLoading: true,
+    isMutating: false,
+    reload: vi.fn(),
+  });
+}
+
+function mockDraftsError(
+  error = new marketingContent.MarketingContentApiError("network_failure", "Failed"),
+) {
+  contentHookState.draftItems = [];
+  vi.mocked(marketingContent.useWorkspaceMarketingContent).mockReturnValue({
+    data: null,
+    error,
     isLoading: false,
     isMutating: false,
     reload: vi.fn(),
@@ -447,6 +525,14 @@ describe("MarketingWorkspace", () => {
     approvalHookState.queueError = null;
     approvalHookState.queueLoading = false;
     approvalHookState.submittedOptions = [];
+    contentHookState.calendarItems = [];
+    contentHookState.archiveError = null;
+    contentHookState.archiveMutating = false;
+    contentHookState.detailData = null;
+    contentHookState.detailError = null;
+    contentHookState.detailLoading = false;
+    contentHookState.draftItems = [];
+    contentHookState.detailReload = vi.fn();
     realtimeHookState.recentActivityEvents = [];
     vi.mocked(approvalsLib.useApprovalDecision).mockImplementation(
       (_workspaceId: string | null, _approvalRequestId: string | null, action: ApprovalAction) => ({
@@ -463,11 +549,13 @@ describe("MarketingWorkspace", () => {
     );
     mutationMocks.approvalDecision.mockResolvedValue(approvalDetail());
     mutationMocks.approvalSubmit.mockResolvedValue(approvalDetail());
+    mutationMocks.archive.mockResolvedValue(item({ status: "archived" }));
     mutationMocks.create.mockResolvedValue(item({ status: "draft" }));
     mutationMocks.update.mockResolvedValue(item({ title: "Updated Teaser" }));
     mutationMocks.status.mockResolvedValue(item({ status: "in_review" }));
     mockWorkspaceProfile();
     mockCalendar();
+    mockDrafts();
     vi.mocked(campaignsLib.useCampaigns).mockReturnValue({
       data: { campaigns: [campaign], total: 1, limit: 500, offset: 0 },
       error: null,
@@ -760,7 +848,11 @@ describe("MarketingWorkspace", () => {
     fireEvent.click(screen.getByRole("button", { name: /Single Teaser/ }));
     fireEvent.click(screen.getByRole("button", { name: "Submit for approval" }));
 
-    await waitFor(() => expect(mutationMocks.approvalSubmit).toHaveBeenCalledWith({}));
+    await waitFor(() =>
+      expect(mutationMocks.approvalSubmit).toHaveBeenCalledWith({
+        expected_resource_revision: 1,
+      }),
+    );
     expect(mutationMocks.status).not.toHaveBeenCalled();
   });
 
@@ -879,6 +971,37 @@ describe("MarketingWorkspace", () => {
 
     expect(screen.getByRole("button", { name: "Schedule" })).toBeDisabled();
     expect(screen.getByText(/Scheduling is blocked/)).toBeInTheDocument();
+  });
+
+  it("hides approved scheduling actions without the edit capability", () => {
+    mockWorkspaceProfile(["marketing.content.view"]);
+    mockCalendar([
+      item({
+        approval_request_id: "approval_01",
+        approval_state: {
+          approval_request_id: "approval_01",
+          approved_revision: 2,
+          approved_revision_is_current: true,
+          can_schedule: true,
+          current_revision: 2,
+          label: "Approved",
+          state: "approved",
+        },
+        approved_revision: 2,
+        content_revision: 2,
+        status: "approved",
+      }),
+    ]);
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: /Single Teaser/ }));
+    const editor = screen.getByRole("region", { name: "Marketing content editor" });
+
+    expect(within(editor).queryByRole("button", { name: "Schedule" })).not.toBeInTheDocument();
+    expect(within(editor).queryByText(/Scheduling is blocked/)).not.toBeInTheDocument();
+    expect(
+      within(editor).getByText("You need edit access to change this content."),
+    ).toBeInTheDocument();
   });
 
   it("warns before material edits to currently approved content", async () => {
@@ -1328,12 +1451,846 @@ describe("MarketingWorkspace", () => {
     expect(screen.getByText(/Realtime refresh: approval.updated/)).toBeInTheDocument();
   });
 
+  it("enables the drafts tab and renders draft posts from marketing content", () => {
+    mockDrafts([
+      item({ id: "content_draft_01", status: "draft", title: "Draft Caption" }),
+      item({ id: "content_scheduled_01", status: "scheduled", title: "Scheduled Caption" }),
+    ]);
+
+    render(<MarketingWorkspace />);
+
+    const draftsTab = screen.getByRole("button", { name: "Drafts" });
+    expect(draftsTab).toBeEnabled();
+
+    fireEvent.click(draftsTab);
+
+    expect(screen.getByRole("region", { name: "Draft posts" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Draft Posts" })).toBeInTheDocument();
+    expect(screen.getByText("Draft Caption")).toBeInTheDocument();
+    expect(screen.queryByText("Scheduled Caption")).not.toBeInTheDocument();
+    expect(marketingContent.useWorkspaceMarketingContent).toHaveBeenLastCalledWith(
+      "workspace_01",
+      expect.objectContaining({ limit: 500, offset: 0, status: "draft" }),
+    );
+  });
+
+  it("shows the drafts empty state with a create action", () => {
+    mockWorkspaceProfile(["marketing.content.view", "marketing.content.create"]);
+    mockDrafts([]);
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+
+    expect(screen.getByRole("heading", { name: "No draft posts" })).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Draft posts appear here before they are submitted for approval or scheduled.",
+      ),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Create Draft" }));
+    expect(screen.getByRole("region", { name: "Marketing content editor" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Create draft post" })).toBeInTheDocument();
+  });
+
+  it("creates a channel-aware draft from Draft Posts with the existing marketing content mutation", async () => {
+    vi.useRealTimers();
+    const calendarReload = vi.fn();
+    const draftsReload = vi.fn();
+    mockWorkspaceProfile(["marketing.content.view", "marketing.content.create"]);
+    vi.mocked(marketingContent.useWorkspaceCalendarContent).mockReturnValue({
+      data: { marketing_content: [], total: 0, limit: 500, offset: 0 },
+      error: null,
+      isLoading: false,
+      isMutating: false,
+      reload: calendarReload,
+    });
+    mockDrafts(
+      [item({ id: "content_draft_01", status: "draft", title: "Existing Draft" })],
+      draftsReload,
+    );
+    render(<MarketingWorkspace />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create Draft" }));
+    const editor = screen.getByRole("region", { name: "Marketing content editor" });
+    expect(within(editor).getByLabelText("Planned publish time")).toBeInTheDocument();
+    expect(within(editor).getByLabelText("Channel planned publish time")).toBeInTheDocument();
+
+    fireEvent.change(within(editor).getByLabelText("Title"), {
+      target: { value: "Channel-aware launch draft" },
+    });
+    fireEvent.change(within(editor).getByLabelText("Planned publish time"), {
+      target: { value: "2026-09-10T09:00" },
+    });
+    fireEvent.change(within(editor).getByLabelText("Core Copy / Caption"), {
+      target: { value: "Presave starts now." },
+    });
+    fireEvent.change(within(editor).getByLabelText("Asset references"), {
+      target: { value: '[{"id":"asset_draft_01","type":"image"}]' },
+    });
+    fireEvent.change(within(editor).getByLabelText("Channel copy override"), {
+      target: { value: "IG draft copy" },
+    });
+    fireEvent.change(within(editor).getByLabelText("Channel planned publish time"), {
+      target: { value: "2026-09-10T10:30" },
+    });
+    fireEvent.click(within(editor).getByRole("button", { name: "Save draft" }));
+
+    await waitFor(() => expect(mutationMocks.create).toHaveBeenCalled());
+    expect(mutationMocks.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        artist_id: "artist_01",
+        asset_refs: [{ id: "asset_draft_01", type: "image" }],
+        content_type: "social_post",
+        copy_text: "Presave starts now.",
+        release_id: "release_01",
+        scheduled_at: new Date("2026-09-10T09:00").toISOString(),
+        title: "Channel-aware launch draft",
+      }),
+    );
+    expect(mutationMocks.create.mock.calls[0]?.[0]).not.toHaveProperty("status");
+    expect(mutationMocks.create.mock.calls[0]?.[0].channels).toEqual([
+      expect.objectContaining({
+        channel: "instagram",
+        copy_text_override: "IG draft copy",
+        placement: "feed",
+        scheduled_at: new Date("2026-09-10T10:30").toISOString(),
+      }),
+    ]);
+    expect(mutationMocks.approvalSubmit).not.toHaveBeenCalled();
+    expect(mutationMocks.status).not.toHaveBeenCalled();
+    expect(calendarReload).toHaveBeenCalled();
+    await waitFor(() => expect(draftsReload).toHaveBeenCalled());
+  });
+
+  it("creates a multi-channel draft with channel overrides from Draft Posts", async () => {
+    vi.useRealTimers();
+    mockWorkspaceProfile(["marketing.content.view", "marketing.content.create"]);
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create Draft" }));
+    const editor = screen.getByRole("region", { name: "Marketing content editor" });
+    fireEvent.change(within(editor).getByLabelText("Title"), {
+      target: { value: "Multi-channel draft" },
+    });
+    fireEvent.click(within(editor).getByRole("button", { name: "Add channel" }));
+
+    const channelSelects = within(editor).getAllByLabelText("Channel");
+    const placements = within(editor).getAllByLabelText("Placement");
+    const plannedTimes = within(editor).getAllByLabelText("Channel planned publish time");
+    const overrides = within(editor).getAllByLabelText("Channel copy override");
+    const channelAssets = within(editor).getAllByLabelText("Channel asset references");
+    fireEvent.change(placements[0]!, { target: { value: "reel" } });
+    fireEvent.change(plannedTimes[0]!, { target: { value: "2026-09-10T11:00" } });
+    fireEvent.change(overrides[0]!, { target: { value: "IG-specific cut" } });
+    fireEvent.change(channelAssets[0]!, {
+      target: { value: '[{"id":"ig_asset","type":"video"}]' },
+    });
+    fireEvent.change(channelSelects[1]!, { target: { value: "tiktok" } });
+    fireEvent.change(placements[1]!, { target: { value: "video" } });
+    fireEvent.change(plannedTimes[1]!, { target: { value: "2026-09-10T12:00" } });
+    fireEvent.change(overrides[1]!, { target: { value: "TikTok-specific cut" } });
+    fireEvent.change(channelAssets[1]!, {
+      target: { value: '[{"id":"tt_asset","type":"video"}]' },
+    });
+
+    fireEvent.click(within(editor).getByRole("button", { name: "Save draft" }));
+
+    await waitFor(() => expect(mutationMocks.create).toHaveBeenCalled());
+    expect(mutationMocks.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        channels: [
+          expect.objectContaining({
+            asset_refs: [{ id: "ig_asset", type: "video" }],
+            channel: "instagram",
+            copy_text_override: "IG-specific cut",
+            placement: "reel",
+            scheduled_at: new Date("2026-09-10T11:00").toISOString(),
+          }),
+          expect.objectContaining({
+            asset_refs: [{ id: "tt_asset", type: "video" }],
+            channel: "tiktok",
+            copy_text_override: "TikTok-specific cut",
+            placement: "video",
+            scheduled_at: new Date("2026-09-10T12:00").toISOString(),
+          }),
+        ],
+        title: "Multi-channel draft",
+      }),
+    );
+  });
+
+  it("shows Draft Posts validation errors before creating", () => {
+    vi.useRealTimers();
+    mockWorkspaceProfile(["marketing.content.view", "marketing.content.create"]);
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create Draft" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save draft" }));
+
+    expect(screen.getByRole("alert")).toHaveTextContent("Title is required.");
+    expect(mutationMocks.create).not.toHaveBeenCalled();
+  });
+
+  it("shows Draft Posts API errors from the existing create mutation", async () => {
+    vi.useRealTimers();
+    mutationMocks.create.mockRejectedValueOnce(
+      new marketingContent.MarketingContentApiError(
+        "validation",
+        "Marketing content has validation errors.",
+        422,
+      ),
+    );
+    mockWorkspaceProfile(["marketing.content.view", "marketing.content.create"]);
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create Draft" }));
+    const editor = screen.getByRole("region", { name: "Marketing content editor" });
+    fireEvent.change(within(editor).getByLabelText("Title"), {
+      target: { value: "Rejected draft" },
+    });
+    fireEvent.click(within(editor).getByRole("button", { name: "Save draft" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Marketing content has validation errors.",
+    );
+  });
+
+  it("loads a canonical draft detail and updates it with the existing marketing content mutation", async () => {
+    vi.useRealTimers();
+    const calendarReload = vi.fn();
+    const draftsReload = vi.fn();
+    const draft = item({
+      asset_refs: [{ id: "asset_existing" }],
+      channels: [
+        channel({
+          asset_refs: [{ id: "channel_asset_existing" }],
+          copy_text_override: "Existing IG copy",
+          placement: "reels",
+        }),
+      ],
+      content_revision: 3,
+      copy_text: "Existing draft copy",
+      id: "content_draft_01",
+      status: "draft",
+      title: "Draft Caption",
+      updated_at: "2026-09-12T10:30:00Z",
+    });
+    mockWorkspaceProfile(["marketing.content.view", "marketing.content.edit"]);
+    vi.mocked(marketingContent.useWorkspaceCalendarContent).mockReturnValue({
+      data: { marketing_content: [], total: 0, limit: 500, offset: 0 },
+      error: null,
+      isLoading: false,
+      isMutating: false,
+      reload: calendarReload,
+    });
+    mockDrafts([draft], draftsReload);
+    mutationMocks.update.mockResolvedValueOnce(
+      item({
+        ...draft,
+        content_revision: 4,
+        copy_text: "Updated canonical copy",
+        title: "Updated Draft Caption",
+      }),
+    );
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open draft Draft Caption" }));
+
+    const editor = screen.getByRole("region", { name: "Marketing content editor" });
+    expect(marketingContent.useMarketingContentItem).toHaveBeenLastCalledWith(
+      "workspace_01",
+      "campaign_01",
+      "content_draft_01",
+    );
+    expect(within(editor).getByDisplayValue("Draft Caption")).toBeInTheDocument();
+    expect(within(editor).getByDisplayValue("Existing draft copy")).toBeInTheDocument();
+    expect(within(editor).getByDisplayValue("reels")).toBeInTheDocument();
+    expect(within(editor).getByDisplayValue("Existing IG copy")).toBeInTheDocument();
+    expect(
+      within(editor).getByText("Current status: Draft - Approval: Draft - Revision 3"),
+    ).toBeInTheDocument();
+
+    fireEvent.change(within(editor).getByLabelText("Title"), {
+      target: { value: "Updated Draft Caption" },
+    });
+    fireEvent.change(within(editor).getByLabelText("Core Copy / Caption"), {
+      target: { value: "Updated canonical copy" },
+    });
+    fireEvent.change(within(editor).getByLabelText("Asset references"), {
+      target: { value: '[{"id":"asset_updated"}]' },
+    });
+    fireEvent.change(within(editor).getByLabelText("Channel copy override"), {
+      target: { value: "Updated IG copy" },
+    });
+    fireEvent.click(within(editor).getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => expect(mutationMocks.update).toHaveBeenCalled());
+    expect(mutationMocks.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        asset_refs: [{ id: "asset_updated" }],
+        channels: [
+          expect.objectContaining({
+            asset_refs: [{ id: "channel_asset_existing" }],
+            channel: "instagram",
+            copy_text_override: "Updated IG copy",
+            placement: "reels",
+          }),
+        ],
+        copy_text: "Updated canonical copy",
+        title: "Updated Draft Caption",
+      }),
+    );
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Saved Updated Draft Caption. Revision 4.",
+    );
+    expect(calendarReload).toHaveBeenCalled();
+    await waitFor(() => expect(draftsReload).toHaveBeenCalled());
+  });
+
+  it("shows the draft detail loading state after selecting a draft", () => {
+    const draft = item({ id: "content_draft_01", status: "draft", title: "Draft Caption" });
+    contentHookState.detailLoading = true;
+    mockDrafts([draft]);
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open draft Draft Caption" }));
+
+    expect(screen.getByRole("status")).toHaveTextContent("Loading marketing content detail");
+  });
+
+  it("shows missing or deleted draft detail state", () => {
+    const draft = item({ id: "content_draft_01", status: "draft", title: "Draft Caption" });
+    contentHookState.detailError = new marketingContent.MarketingContentApiError(
+      "not_found",
+      "Marketing content was not found.",
+      404,
+    );
+    mockDrafts([draft]);
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open draft Draft Caption" }));
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "This marketing content is missing or was deleted.",
+    );
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+  });
+
+  it("shows draft detail authorization failure without rendering edit controls", () => {
+    const draft = item({ id: "content_draft_01", status: "draft", title: "Draft Caption" });
+    contentHookState.detailError = new marketingContent.MarketingContentApiError(
+      "forbidden",
+      "You do not have access to marketing content.",
+      403,
+    );
+    mockDrafts([draft]);
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open draft Draft Caption" }));
+
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "You do not have access to this marketing content.",
+    );
+    expect(screen.queryByRole("button", { name: "Save changes" })).not.toBeInTheDocument();
+  });
+
+  it("shows validation failures from draft detail saves", async () => {
+    vi.useRealTimers();
+    const draft = item({ id: "content_draft_01", status: "draft", title: "Draft Caption" });
+    mockWorkspaceProfile(["marketing.content.view", "marketing.content.edit"]);
+    mockDrafts([draft]);
+    mutationMocks.update.mockRejectedValueOnce(
+      new marketingContent.MarketingContentApiError(
+        "validation",
+        "Channel asset references must be a JSON array.",
+        422,
+      ),
+    );
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open draft Draft Caption" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Channel asset references must be a JSON array.",
+    );
+  });
+
+  it("shows save failures from draft detail saves", async () => {
+    vi.useRealTimers();
+    const draft = item({ id: "content_draft_01", status: "draft", title: "Draft Caption" });
+    mockWorkspaceProfile(["marketing.content.view", "marketing.content.edit"]);
+    mockDrafts([draft]);
+    mutationMocks.update.mockRejectedValueOnce(
+      new marketingContent.MarketingContentApiError(
+        "network_failure",
+        "Unable to reach the marketing content API.",
+      ),
+    );
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open draft Draft Caption" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Unable to reach the marketing content API.",
+    );
+  });
+
+  it("shows the drafts loading state", () => {
+    mockDraftsLoading();
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+
+    expect(screen.getByRole("status")).toHaveTextContent("Loading draft posts");
+  });
+
+  it("shows the drafts error state", () => {
+    mockDraftsError();
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+
+    expect(screen.getByRole("alert")).toHaveTextContent("Draft posts could not be loaded.");
+  });
+
+  it("shows the drafts forbidden error state", () => {
+    mockDraftsError(
+      new marketingContent.MarketingContentApiError(
+        "forbidden",
+        "You do not have access to draft posts.",
+      ),
+    );
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Marketing content access was denied for drafts.",
+    );
+  });
+
+  it("renders populated draft rows with existing marketing content metadata", () => {
+    mockDrafts([
+      item({
+        approval_state: {
+          approval_request_id: "approval_02",
+          approved_revision: 1,
+          approved_revision_is_current: false,
+          can_schedule: false,
+          current_revision: 3,
+          label: "Changes requested",
+          state: "changes_requested",
+        },
+        approved_revision: 1,
+        channels: [
+          channel({ channel: "instagram", placement: "reels" }),
+          channel({ channel: "tiktok", placement: "video" }),
+        ],
+        content_revision: 3,
+        content_type: "short_video",
+        copy_text: "Behind the scenes clip for release week.",
+        created_by_profile_id: "profile_creator",
+        id: "content_draft_01",
+        owner_profile_id: "profile_owner",
+        status: "draft",
+        title: "BTS Draft",
+        updated_at: "2026-09-12T10:30:00Z",
+      }),
+    ]);
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+
+    expect(screen.getByText("BTS Draft")).toBeInTheDocument();
+    expect(screen.getByText("Behind the scenes clip for release week.")).toBeInTheDocument();
+    expect(screen.getByText("Short Video - Instagram / Tiktok")).toBeInTheDocument();
+    expect(screen.getAllByText("Single Rollout").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText("Artist: artist_01")).toBeInTheDocument();
+    expect(screen.getByText("Release: release_01")).toBeInTheDocument();
+    expect(screen.getByText("Instagram / Reels, Tiktok / Video")).toBeInTheDocument();
+    expect(screen.getByText("Revision 3 / approved 1")).toBeInTheDocument();
+    expect(screen.getByText("Changes requested")).toBeInTheDocument();
+    expect(screen.getByText("2026-09-12")).toBeInTheDocument();
+    expect(screen.getByText("Owner profile_owner")).toBeInTheDocument();
+  });
+
+  it("resubmits returned draft content with the current revision from Draft Posts", async () => {
+    vi.useRealTimers();
+    const draft = item({
+      approval_request_id: "approval_02",
+      approval_state: {
+        approval_request_id: "approval_02",
+        approved_revision: null,
+        approved_revision_is_current: false,
+        can_schedule: false,
+        current_revision: 3,
+        label: "Changes requested",
+        state: "changes_requested",
+      },
+      content_revision: 3,
+      id: "content_draft_02",
+      status: "draft",
+      title: "Returned Draft",
+    });
+    mockWorkspaceProfile([
+      "marketing.content.view",
+      "marketing.content.edit",
+      "marketing.content.submit_for_review",
+    ]);
+    mockDrafts([draft]);
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+
+    expect(screen.getByText("Changes requested")).toBeInTheDocument();
+    expect(screen.getByText("Revision 3")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open draft Returned Draft" }));
+    const editor = screen.getByRole("region", { name: "Marketing content editor" });
+    expect(
+      within(editor).getByText("Current status: Draft - Approval: Changes requested - Revision 3"),
+    ).toBeInTheDocument();
+
+    fireEvent.click(within(editor).getByRole("button", { name: "Resubmit for approval" }));
+
+    await waitFor(() =>
+      expect(mutationMocks.approvalSubmit).toHaveBeenCalledWith({
+        expected_resource_revision: 3,
+      }),
+    );
+  });
+
+  it("submits eligible draft rows through the existing approval request action", async () => {
+    vi.useRealTimers();
+    const draftsReload = vi.fn();
+    const draft = item({
+      content_revision: 5,
+      id: "content_draft_03",
+      status: "draft",
+      title: "Row Submit Draft",
+    });
+    mockWorkspaceProfile([
+      "marketing.content.view",
+      "marketing.content.edit",
+      "marketing.content.submit_for_review",
+    ]);
+    mockDrafts([draft], draftsReload);
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Submit for approval Row Submit Draft" }));
+
+    await waitFor(() =>
+      expect(mutationMocks.approvalSubmit).toHaveBeenCalledWith({
+        expected_resource_revision: 5,
+      }),
+    );
+    expect(mutationMocks.status).not.toHaveBeenCalled();
+    expect(draftsReload).toHaveBeenCalled();
+  });
+
+  it("hides draft row submission without the submit-for-review capability", () => {
+    mockWorkspaceProfile(["marketing.content.view", "marketing.content.edit"]);
+    mockDrafts([item({ id: "content_draft_04", status: "draft", title: "No Submit Draft" })]);
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+
+    expect(
+      screen.queryByRole("button", { name: "Submit for approval No Submit Draft" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("archives a draft row after confirmation and removes it from active Draft Posts", async () => {
+    vi.useRealTimers();
+    const confirm = vi.spyOn(window, "confirm").mockReturnValueOnce(true);
+    const calendarReload = vi.fn().mockResolvedValue({ marketing_content: [], total: 0 });
+    const draftsReload = vi.fn().mockResolvedValue({ marketing_content: [], total: 0 });
+    const draft = item({
+      id: "content_abandoned",
+      status: "draft",
+      title: "Abandoned Draft",
+    });
+    mockWorkspaceProfile(["marketing.content.view", "marketing.content.archive"]);
+    vi.mocked(marketingContent.useWorkspaceCalendarContent).mockReturnValue({
+      data: { marketing_content: [], total: 0, limit: 500, offset: 0 },
+      error: null,
+      isLoading: false,
+      isMutating: false,
+      reload: calendarReload,
+    });
+    mockDrafts([draft], draftsReload);
+    mutationMocks.archive.mockResolvedValueOnce(item({ ...draft, status: "archived" }));
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Archive draft Abandoned Draft" }));
+
+    expect(confirm).toHaveBeenCalledWith(
+      'Archive "Abandoned Draft"? It will be hidden from active Draft Posts and retained in Marketing Content history.',
+    );
+    await waitFor(() => expect(mutationMocks.archive).toHaveBeenCalled());
+    expect(marketingContent.useArchiveMarketingContentItem).toHaveBeenCalledWith(
+      "workspace_01",
+      "campaign_01",
+      "content_abandoned",
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "Open draft Abandoned Draft" }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(screen.getByRole("status")).toHaveTextContent("Archived Abandoned Draft.");
+    expect(draftsReload).toHaveBeenCalled();
+    expect(calendarReload).toHaveBeenCalled();
+  });
+
+  it("cancels draft archive when confirmation is declined", () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValueOnce(false);
+    mockWorkspaceProfile(["marketing.content.view", "marketing.content.archive"]);
+    mockDrafts([item({ id: "content_keep", status: "draft", title: "Keep Draft" })]);
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Archive draft Keep Draft" }));
+
+    expect(confirm).toHaveBeenCalled();
+    expect(mutationMocks.archive).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Open draft Keep Draft" })).toBeInTheDocument();
+  });
+
+  it("enforces archive authorization in Draft Posts actions", () => {
+    mockWorkspaceProfile(["marketing.content.view", "marketing.content.edit"]);
+    mockDrafts([item({ id: "content_no_archive", status: "draft", title: "No Archive Draft" })]);
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+
+    expect(
+      screen.queryByRole("button", { name: "Archive draft No Archive Draft" }),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open draft No Archive Draft" }));
+    const editor = screen.getByRole("region", { name: "Marketing content editor" });
+    expect(within(editor).queryByRole("button", { name: "Archive" })).not.toBeInTheDocument();
+  });
+
+  it("surfaces draft archive API failures clearly", async () => {
+    vi.useRealTimers();
+    vi.spyOn(window, "confirm").mockReturnValueOnce(true);
+    contentHookState.archiveError = new marketingContent.MarketingContentApiError(
+      "forbidden",
+      "You do not have archive access for marketing content.",
+      403,
+    );
+    mutationMocks.archive.mockRejectedValueOnce(contentHookState.archiveError);
+    mockWorkspaceProfile(["marketing.content.view", "marketing.content.archive"]);
+    mockDrafts([item({ id: "content_denied", status: "draft", title: "Denied Draft" })]);
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Archive draft Denied Draft" }));
+
+    await waitFor(() => expect(mutationMocks.archive).toHaveBeenCalled());
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "You do not have archive access for marketing content.",
+    );
+    expect(screen.getByRole("button", { name: "Open draft Denied Draft" })).toBeInTheDocument();
+  });
+
+  it("archives from the draft detail action using the same lifecycle path", async () => {
+    vi.useRealTimers();
+    vi.spyOn(window, "confirm").mockReturnValueOnce(true);
+    const draft = item({ id: "content_detail_archive", status: "draft", title: "Detail Draft" });
+    mockWorkspaceProfile([
+      "marketing.content.view",
+      "marketing.content.edit",
+      "marketing.content.archive",
+    ]);
+    mockDrafts([draft]);
+    mutationMocks.archive.mockResolvedValueOnce(item({ ...draft, status: "archived" }));
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open draft Detail Draft" }));
+    const editor = screen.getByRole("region", { name: "Marketing content editor" });
+    fireEvent.click(within(editor).getByRole("button", { name: "Archive" }));
+
+    await waitFor(() => expect(mutationMocks.archive).toHaveBeenCalled());
+    expect(screen.getByRole("status")).toHaveTextContent("Archived Detail Draft.");
+    expect(
+      screen.queryByRole("region", { name: "Marketing content editor" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("filters draft posts with existing API dimensions and local search plus recency", () => {
+    vi.mocked(campaignsLib.useCampaigns).mockReturnValue({
+      data: {
+        campaigns: [
+          {
+            ...campaign,
+            members: [
+              {
+                display_name: "Draft Owner",
+                is_owner: true,
+                participation_status: "active",
+                profile_id: "profile_owner",
+                responsibility_label: null,
+                workspace_membership_id: "membership_owner",
+              },
+            ],
+            owner: { display_name: "Draft Owner", profile_id: "profile_owner" },
+            owner_profile_id: "profile_owner",
+          },
+        ],
+        limit: 500,
+        offset: 0,
+        total: 1,
+      },
+      error: null,
+      isLoading: false,
+      isMutating: false,
+      reload: vi.fn(),
+    });
+    mockDrafts([
+      item({
+        id: "content_bts",
+        channels: [channel({ channel: "tiktok", copy_text_override: "Alt behind clip" })],
+        content_type: "video",
+        copy_text: "Behind the scenes clip.",
+        owner_profile_id: "profile_owner",
+        status: "draft",
+        title: "BTS Draft",
+        updated_at: "2026-09-12T10:30:00Z",
+      }),
+      item({
+        id: "content_radio",
+        channels: [channel({ channel: "instagram" })],
+        content_type: "social_post",
+        copy_text: "Radio push.",
+        owner_profile_id: null,
+        status: "draft",
+        title: "Radio Draft",
+        updated_at: "2026-08-01T10:30:00Z",
+      }),
+    ]);
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+
+    fireEvent.change(screen.getByLabelText("Search title or copy"), {
+      target: { value: "behind" },
+    });
+    fireEvent.change(screen.getByLabelText("Recently updated"), { target: { value: "7" } });
+    fireEvent.change(screen.getByLabelText("Campaign"), { target: { value: "campaign_01" } });
+    fireEvent.change(screen.getByLabelText("Channel"), { target: { value: "tiktok" } });
+    fireEvent.change(screen.getByLabelText("Content type"), { target: { value: "video" } });
+    fireEvent.change(screen.getByLabelText("Artist"), { target: { value: "artist_01" } });
+    fireEvent.change(screen.getByLabelText("Release"), { target: { value: "release_01" } });
+    fireEvent.change(screen.getByLabelText("Owner"), { target: { value: "profile_owner" } });
+
+    expect(screen.getByText("BTS Draft")).toBeInTheDocument();
+    expect(screen.queryByText("Radio Draft")).not.toBeInTheDocument();
+    expect(marketingContent.useWorkspaceMarketingContent).toHaveBeenLastCalledWith(
+      "workspace_01",
+      expect.objectContaining({
+        artist_id: "artist_01",
+        campaign_id: "campaign_01",
+        channel: "tiktok",
+        content_type: "video",
+        limit: 500,
+        offset: 0,
+        owner_profile_id: "profile_owner",
+        release_id: "release_01",
+        status: "draft",
+      }),
+    );
+  });
+
+  it("clears draft filters and restores the default draft query", () => {
+    mockDrafts([
+      item({
+        id: "content_bts",
+        copy_text: "Behind the scenes clip.",
+        status: "draft",
+        title: "BTS Draft",
+        updated_at: "2026-09-12T10:30:00Z",
+      }),
+      item({
+        id: "content_radio",
+        copy_text: "Radio push.",
+        status: "draft",
+        title: "Radio Draft",
+        updated_at: "2026-08-01T10:30:00Z",
+      }),
+    ]);
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+    fireEvent.change(screen.getByLabelText("Search title or copy"), {
+      target: { value: "behind" },
+    });
+
+    expect(screen.getByText("BTS Draft")).toBeInTheDocument();
+    expect(screen.queryByText("Radio Draft")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Clear filters" }));
+
+    expect(screen.getByText("BTS Draft")).toBeInTheDocument();
+    expect(screen.getByText("Radio Draft")).toBeInTheDocument();
+    expect(screen.getByLabelText("Search title or copy")).toHaveValue("");
+    expect(marketingContent.useWorkspaceMarketingContent).toHaveBeenLastCalledWith(
+      "workspace_01",
+      expect.objectContaining({ limit: 500, offset: 0, status: "draft" }),
+    );
+  });
+
+  it("opens the drafts surface directly from navigation query params", () => {
+    getParam.mockImplementation((key: string) => (key === "tab" ? "drafts" : null));
+    mockDrafts([item({ id: "content_draft_01", status: "draft", title: "Draft Caption" })]);
+
+    render(<MarketingWorkspace />);
+
+    expect(screen.getByRole("heading", { name: "Draft Posts" })).toBeInTheDocument();
+    expect(screen.getByText("Draft Caption")).toBeInTheDocument();
+  });
+
+  it("keeps calendar and approval queue navigation working after visiting drafts", () => {
+    mockApprovalQueue([]);
+
+    render(<MarketingWorkspace />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+    expect(screen.getByRole("heading", { name: "Draft Posts" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Calendar" }));
+    expect(screen.getByRole("region", { name: "Marketing content calendar" })).toBeInTheDocument();
+    expect(screen.getByText("Single Teaser")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Approvals" }));
+    expect(screen.getByRole("heading", { name: "Approval Queue" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "No approvals in this queue" })).toBeInTheDocument();
+  });
+
   it("keeps disabled upcoming tabs as lightweight placeholders", () => {
     render(<MarketingWorkspace />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Drafts Upcoming" }));
+    fireEvent.click(screen.getByRole("button", { name: "Accounts Upcoming" }));
 
-    expect(screen.getByRole("heading", { name: "Drafts upcoming" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Accounts upcoming" })).toBeInTheDocument();
     expect(screen.queryByText("Single Teaser")).not.toBeInTheDocument();
   });
 
@@ -1343,6 +2300,14 @@ describe("MarketingWorkspace", () => {
         campaignId: "campaign_01",
         contentItemId: "content_01",
         key: "marketing-content:workspace-list:workspace_01:start:2026-09-01T00:00:00Z",
+        workspaceId: "workspace_01",
+      }),
+    ).toBe(true);
+    expect(
+      marketingContent.shouldInvalidateMarketingContentRealtimeCacheKey({
+        campaignId: "campaign_01",
+        contentItemId: "content_01",
+        key: "marketing-content:workspace-list:workspace_01:limit:500|offset:0|status:draft",
         workspaceId: "workspace_01",
       }),
     ).toBe(true);

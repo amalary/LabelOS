@@ -293,6 +293,7 @@ def _approval_state(
     can_schedule = (
         item.status == MarketingContentItemStatus.approved
         and approved_revision_is_current
+        and _has_schedule_target(item)
     )
     if item.status in {
         MarketingContentItemStatus.published,
@@ -333,6 +334,13 @@ def _approval_state(
         approved_revision=item.approved_revision,
         approved_revision_is_current=approved_revision_is_current,
         can_schedule=can_schedule,
+    )
+
+
+def _has_schedule_target(item: MarketingContentItem) -> bool:
+    return bool(
+        item.scheduled_at is not None
+        or any(channel.scheduled_at is not None for channel in item.channels)
     )
 
 
@@ -414,6 +422,7 @@ async def list_workspace_marketing_content(
     release_id: UUID | None = None,
     status: MarketingContentItemStatus | None = None,
     channel: str | None = None,
+    owner_profile_id: UUID | None = None,
     content_type: str | None = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
@@ -431,6 +440,7 @@ async def list_workspace_marketing_content(
                 release_id=release_id,
                 status=status,
                 channel=channel,
+                owner_profile_id=owner_profile_id,
                 content_type=content_type,
                 scheduled_start=start,
                 scheduled_end=end,
@@ -576,19 +586,21 @@ async def update_marketing_content(
         context=context,
     )
     try:
-        item = await marketing_content_service.update_content_item(
-            session,
-            workspace_id,
-            content_id,
-            _update_payload(payload),
-            actor=context,
-        )
         if payload.channels is not None:
-            item = await marketing_content_service.replace_channels(
+            item = await marketing_content_service.update_content_item_with_channels(
                 session,
                 workspace_id,
                 content_id,
+                _update_payload(payload),
                 [_channel_create(channel) for channel in payload.channels],
+                actor=context,
+            )
+        else:
+            item = await marketing_content_service.update_content_item(
+                session,
+                workspace_id,
+                content_id,
+                _update_payload(payload),
                 actor=context,
             )
     except (

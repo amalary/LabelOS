@@ -102,6 +102,7 @@ export type MarketingContentListOptions = {
   end?: string | null;
   status?: MarketingContentItemStatus | null;
   channel?: string | null;
+  owner_profile_id?: string | null;
   content_type?: string | null;
   limit?: number;
   offset?: number;

@@ -415,6 +415,7 @@ describe("CampaignCalendarWorkspace", () => {
 
   it("navigates campaign events to campaigns and content or approval events to Marketing Hub", () => {
     const campaignStart = event({
+      id: "campaign_start_nav",
       event_type: "campaign.start",
       source_type: "campaign",
       source_id: "campaign_01",
@@ -422,6 +423,7 @@ describe("CampaignCalendarWorkspace", () => {
       title: "Campaign kickoff",
     });
     const approval = event({
+      id: "approval_nav",
       event_type: "marketing.content.approval_requested",
       source_type: "approval_request",
       source_id: "approval_01",
