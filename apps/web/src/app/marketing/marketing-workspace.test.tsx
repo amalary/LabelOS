@@ -1449,7 +1449,7 @@ describe("MarketingWorkspace", () => {
     expect(screen.getByRole("heading", { name: "Create draft post" })).toBeInTheDocument();
   });
 
-  it("creates an unscheduled draft from Draft Posts with the existing marketing content mutation", async () => {
+  it("creates a channel-aware draft from Draft Posts with the existing marketing content mutation", async () => {
     vi.useRealTimers();
     const calendarReload = vi.fn();
     const draftsReload = vi.fn();
@@ -1470,11 +1470,14 @@ describe("MarketingWorkspace", () => {
     fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
     fireEvent.click(screen.getByRole("button", { name: "Create Draft" }));
     const editor = screen.getByRole("region", { name: "Marketing content editor" });
-    expect(within(editor).queryByLabelText("Planned publish time")).not.toBeInTheDocument();
-    expect(within(editor).queryByLabelText("Channel planned publish time")).not.toBeInTheDocument();
+    expect(within(editor).getByLabelText("Planned publish time")).toBeInTheDocument();
+    expect(within(editor).getByLabelText("Channel planned publish time")).toBeInTheDocument();
 
     fireEvent.change(within(editor).getByLabelText("Title"), {
-      target: { value: "Unscheduled launch draft" },
+      target: { value: "Channel-aware launch draft" },
+    });
+    fireEvent.change(within(editor).getByLabelText("Planned publish time"), {
+      target: { value: "2026-09-10T09:00" },
     });
     fireEvent.change(within(editor).getByLabelText("Core Copy / Caption"), {
       target: { value: "Presave starts now." },
@@ -1484,6 +1487,9 @@ describe("MarketingWorkspace", () => {
     });
     fireEvent.change(within(editor).getByLabelText("Channel copy override"), {
       target: { value: "IG draft copy" },
+    });
+    fireEvent.change(within(editor).getByLabelText("Channel planned publish time"), {
+      target: { value: "2026-09-10T10:30" },
     });
     fireEvent.click(within(editor).getByRole("button", { name: "Save draft" }));
 
@@ -1495,8 +1501,8 @@ describe("MarketingWorkspace", () => {
         content_type: "social_post",
         copy_text: "Presave starts now.",
         release_id: "release_01",
-        scheduled_at: null,
-        title: "Unscheduled launch draft",
+        scheduled_at: new Date("2026-09-10T09:00").toISOString(),
+        title: "Channel-aware launch draft",
       }),
     );
     expect(mutationMocks.create.mock.calls[0]?.[0]).not.toHaveProperty("status");
@@ -1505,13 +1511,71 @@ describe("MarketingWorkspace", () => {
         channel: "instagram",
         copy_text_override: "IG draft copy",
         placement: "feed",
-        scheduled_at: null,
+        scheduled_at: new Date("2026-09-10T10:30").toISOString(),
       }),
     ]);
     expect(mutationMocks.approvalSubmit).not.toHaveBeenCalled();
     expect(mutationMocks.status).not.toHaveBeenCalled();
     expect(calendarReload).toHaveBeenCalled();
     await waitFor(() => expect(draftsReload).toHaveBeenCalled());
+  });
+
+  it("creates a multi-channel draft with channel overrides from Draft Posts", async () => {
+    vi.useRealTimers();
+    mockWorkspaceProfile(["marketing.content.view", "marketing.content.create"]);
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create Draft" }));
+    const editor = screen.getByRole("region", { name: "Marketing content editor" });
+    fireEvent.change(within(editor).getByLabelText("Title"), {
+      target: { value: "Multi-channel draft" },
+    });
+    fireEvent.click(within(editor).getByRole("button", { name: "Add channel" }));
+
+    const channelSelects = within(editor).getAllByLabelText("Channel");
+    const placements = within(editor).getAllByLabelText("Placement");
+    const plannedTimes = within(editor).getAllByLabelText("Channel planned publish time");
+    const overrides = within(editor).getAllByLabelText("Channel copy override");
+    const channelAssets = within(editor).getAllByLabelText("Channel asset references");
+    fireEvent.change(placements[0]!, { target: { value: "reel" } });
+    fireEvent.change(plannedTimes[0]!, { target: { value: "2026-09-10T11:00" } });
+    fireEvent.change(overrides[0]!, { target: { value: "IG-specific cut" } });
+    fireEvent.change(channelAssets[0]!, {
+      target: { value: '[{"id":"ig_asset","type":"video"}]' },
+    });
+    fireEvent.change(channelSelects[1]!, { target: { value: "tiktok" } });
+    fireEvent.change(placements[1]!, { target: { value: "video" } });
+    fireEvent.change(plannedTimes[1]!, { target: { value: "2026-09-10T12:00" } });
+    fireEvent.change(overrides[1]!, { target: { value: "TikTok-specific cut" } });
+    fireEvent.change(channelAssets[1]!, {
+      target: { value: '[{"id":"tt_asset","type":"video"}]' },
+    });
+
+    fireEvent.click(within(editor).getByRole("button", { name: "Save draft" }));
+
+    await waitFor(() => expect(mutationMocks.create).toHaveBeenCalled());
+    expect(mutationMocks.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        channels: [
+          expect.objectContaining({
+            asset_refs: [{ id: "ig_asset", type: "video" }],
+            channel: "instagram",
+            copy_text_override: "IG-specific cut",
+            placement: "reel",
+            scheduled_at: new Date("2026-09-10T11:00").toISOString(),
+          }),
+          expect.objectContaining({
+            asset_refs: [{ id: "tt_asset", type: "video" }],
+            channel: "tiktok",
+            copy_text_override: "TikTok-specific cut",
+            placement: "video",
+            scheduled_at: new Date("2026-09-10T12:00").toISOString(),
+          }),
+        ],
+        title: "Multi-channel draft",
+      }),
+    );
   });
 
   it("shows Draft Posts validation errors before creating", () => {

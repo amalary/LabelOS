@@ -659,7 +659,7 @@ function ContentEditor({
   const approvalState = item?.approval_state?.state ?? item?.status;
   const isCurrentlyApproved = item ? approvedRevisionIsCurrent(item) : false;
   const scheduleEligible = item ? canScheduleApprovedRevision(item) : false;
-  const isDraftCreate = mode === "create" && surface === "drafts";
+  const isDraftSurface = surface === "drafts";
 
   const setField = (next: Partial<ContentFormState>) => {
     setClientError(null);
@@ -767,8 +767,8 @@ function ContentEditor({
               : "Edit content"}
           </h2>
           <p className="text-sm text-slate-500">
-            {isDraftCreate
-              ? "Save unscheduled marketing content as a draft. Approval and scheduling stay separate."
+            {isDraftSurface
+              ? "Author channel-specific draft copy, assets, placements, and optional planned times before approval."
               : "Schedule for calendar by setting a planned publish time. LabelOS will not automatically publish posts yet."}
           </p>
           {item ? (
@@ -889,22 +889,20 @@ function ContentEditor({
             ))}
           </select>
         </label>
-        {!isDraftCreate ? (
-          <label className="grid gap-1 text-sm font-medium text-slate-700 md:col-span-2">
-            <span>Planned publish time</span>
-            <input
-              aria-label="Planned publish time"
-              className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950"
-              disabled={!isEditable}
-              onChange={(event) => setField({ scheduledAt: event.target.value })}
-              type="datetime-local"
-              value={form.scheduledAt}
-            />
-            <span className="text-xs font-normal text-slate-500">
-              Calendar timezone: {timeZone}
-            </span>
-          </label>
-        ) : null}
+        <label className="grid gap-1 text-sm font-medium text-slate-700 md:col-span-2">
+          <span>Planned publish time</span>
+          <input
+            aria-label="Planned publish time"
+            className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950"
+            disabled={!isEditable}
+            onChange={(event) => setField({ scheduledAt: event.target.value })}
+            type="datetime-local"
+            value={form.scheduledAt}
+          />
+          <span className="text-xs font-normal text-slate-500">
+            Calendar timezone: {timeZone}
+          </span>
+        </label>
         <label className="grid gap-1 text-sm font-medium text-slate-700 md:col-span-2">
           <span>Core Copy / Caption</span>
           <textarea
@@ -978,21 +976,19 @@ function ContentEditor({
                   value={channel.placement}
                 />
               </label>
-              {!isDraftCreate ? (
-                <label className="grid gap-1 text-sm font-medium text-slate-700">
-                  <span>Channel planned publish time</span>
-                  <input
-                    aria-label="Channel planned publish time"
-                    className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950"
-                    disabled={!isEditable}
-                    onChange={(event) =>
-                      setChannel(channel.id, { scheduledAt: event.target.value })
-                    }
-                    type="datetime-local"
-                    value={channel.scheduledAt}
-                  />
-                </label>
-              ) : null}
+              <label className="grid gap-1 text-sm font-medium text-slate-700">
+                <span>Channel planned publish time</span>
+                <input
+                  aria-label="Channel planned publish time"
+                  className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950"
+                  disabled={!isEditable}
+                  onChange={(event) =>
+                    setChannel(channel.id, { scheduledAt: event.target.value })
+                  }
+                  type="datetime-local"
+                  value={channel.scheduledAt}
+                />
+              </label>
               <Button
                 className="self-end"
                 disabled={!isEditable || form.channels.length === 1}

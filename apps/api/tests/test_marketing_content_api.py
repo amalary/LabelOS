@@ -836,6 +836,19 @@ def test_marketing_content_rejects_invalid_input_and_lifecycle(
             "scheduled_at": "2026-09-10T12:00:00",
         },
     )
+    naive_channel_datetime = client.post(
+        base,
+        json={
+            "title": "Naive Channel",
+            "content_type": "Image",
+            "channels": [
+                {
+                    "channel": "Instagram",
+                    "scheduled_at": "2026-09-10T12:00:00",
+                }
+            ],
+        },
+    )
     created = client.post(
         base,
         json={
@@ -856,6 +869,7 @@ def test_marketing_content_rejects_invalid_input_and_lifecycle(
 
     assert invalid_channel.status_code == 400
     assert naive_datetime.status_code == 422
+    assert naive_channel_datetime.status_code == 422
     assert created.status_code == 400
     assert invalid_transition.status_code == 409
     assert lifecycle_unknown.status_code == 422
@@ -904,12 +918,118 @@ def test_marketing_content_openapi_contract_exposes_stable_routes(
         "scheduled_at",
         "channels",
     }
+    assert set(schemas["MarketingContentChannelCreateRequest"]["properties"]) == {
+        "channel",
+        "placement",
+        "scheduled_at",
+        "copy_text_override",
+        "asset_refs",
+    }
+    assert "published_at" not in schemas["MarketingContentCreateRequest"]["properties"]
+    assert "published_at" not in schemas["MarketingContentUpdateRequest"]["properties"]
+    assert "published_at" not in schemas["MarketingContentChannelCreateRequest"]["properties"]
+    assert "external_post_id" not in schemas["MarketingContentChannelCreateRequest"]["properties"]
+    assert "external_url" not in schemas["MarketingContentChannelCreateRequest"]["properties"]
     assert "approved_at" in schemas["MarketingContentResponse"]["properties"]
     assert "approval_request_id" in schemas["MarketingContentResponse"]["properties"]
     assert "approval_state" in schemas["MarketingContentResponse"]["properties"]
     assert "content_revision" in schemas["MarketingContentResponse"]["properties"]
     assert "approved_revision" in schemas["MarketingContentResponse"]["properties"]
     assert "published_at" in schemas["MarketingContentResponse"]["properties"]
+
+
+def test_marketing_content_draft_authoring_accepts_multi_channel_overrides_only(
+    marketing_content_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededMarketingContentApi,
+    ],
+) -> None:
+    client, _sessionmaker, seeded = marketing_content_client
+    _set_context(client, seeded)
+    scheduled_at = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+    tiktok_scheduled_at = datetime(2026, 9, 11, 16, 30, tzinfo=UTC)
+
+    created = client.post(
+        _base(seeded),
+        json={
+            **_draft_payload(
+                seeded,
+                title="Channel-Aware Draft",
+                scheduled_at=scheduled_at,
+            ),
+            "channels": [
+                {
+                    "channel": "Instagram",
+                    "placement": "Reel",
+                    "copy_text_override": "IG cut",
+                    "asset_refs": [{"kind": "video", "id": "ig-video"}],
+                },
+                {
+                    "channel": "TikTok",
+                    "placement": "Video",
+                    "scheduled_at": tiktok_scheduled_at.isoformat(),
+                    "copy_text_override": "TikTok cut",
+                    "asset_refs": [{"kind": "video", "id": "tt-video"}],
+                },
+            ],
+        },
+    )
+
+    assert created.status_code == 201
+    content = created.json()
+    assert content["status"] == "draft"
+    assert content["scheduled_at"] == "2026-09-10T12:00:00Z"
+    assert [channel["channel"] for channel in content["channels"]] == [
+        "instagram",
+        "tiktok",
+    ]
+    assert content["channels"][0]["placement"] == "reel"
+    assert content["channels"][0]["copy_text_override"] == "IG cut"
+    assert content["channels"][0]["asset_refs"] == [
+        {"kind": "video", "id": "ig-video"}
+    ]
+    assert content["channels"][0]["published_at"] is None
+    assert content["channels"][0]["external_post_id"] is None
+    assert content["channels"][0]["external_url"] is None
+    assert content["channels"][1]["scheduled_at"] == "2026-09-11T16:30:00"
+    assert content["channels"][1]["copy_text_override"] == "TikTok cut"
+
+
+def test_marketing_content_draft_authoring_rejects_publishing_result_fields(
+    marketing_content_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededMarketingContentApi,
+    ],
+) -> None:
+    client, _sessionmaker, seeded = marketing_content_client
+    _set_context(client, seeded)
+
+    top_level_published = client.post(
+        _base(seeded),
+        json={
+            **_draft_payload(seeded, title="Published Field Draft"),
+            "published_at": "2026-09-10T12:00:00Z",
+        },
+    )
+    assert top_level_published.status_code == 422
+
+    channel_publishing_result = client.post(
+        _base(seeded),
+        json={
+            **_draft_payload(seeded, title="Channel Result Draft"),
+            "channels": [
+                {
+                    "channel": "Instagram",
+                    "published_at": "2026-09-10T12:00:00Z",
+                    "external_post_id": "post_123",
+                    "external_url": "https://example.com/post_123",
+                }
+            ],
+        },
+    )
+    assert channel_publishing_result.status_code == 422
 
 
 def test_approval_queue_routes_require_authentication(client: TestClient) -> None:
