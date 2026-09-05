@@ -1082,7 +1082,7 @@ function ContentEditor({
             Open Approval Review
           </Button>
         ) : null}
-        {item?.status === "approved" ? (
+        {item?.status === "approved" && canEdit ? (
           <Button
             disabled={isMutating || !scheduleEligible}
             onClick={scheduleApproved}
@@ -1091,7 +1091,7 @@ function ContentEditor({
             Schedule
           </Button>
         ) : null}
-        {item?.status === "approved" && !scheduleEligible ? (
+        {item?.status === "approved" && canEdit && !scheduleEligible ? (
           <span className="text-sm text-amber-700">
             Scheduling is blocked until approval matches the current revision.
           </span>

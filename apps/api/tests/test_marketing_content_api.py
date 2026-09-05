@@ -809,6 +809,205 @@ def test_marketing_content_authorization_and_scope_errors(
     assert cross_campaign.status_code == 404
 
 
+def test_marketing_content_schedule_and_publish_use_edit_capability_and_agent_guards(
+    marketing_content_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededMarketingContentApi,
+    ],
+) -> None:
+    client, sessionmaker, seeded = marketing_content_client
+    base = _base(seeded)
+    scheduled_at = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+
+    _set_context(client, seeded)
+    created = client.post(
+        base,
+        json={
+            **_draft_payload(seeded, title="Edit Scheduled"),
+            "scheduled_at": scheduled_at.isoformat(),
+        },
+    ).json()
+    submitted = client.post(_approval_submit_base(seeded, created["id"]), json={})
+    assert submitted.status_code == 201
+
+    _set_context(
+        client,
+        seeded,
+        user_id=seeded.approver_user_id,
+        email="marketing-approver-profile@example.com",
+        capability_permissions=(
+            Capability.marketing_content_view.value,
+            Capability.marketing_content_approve.value,
+        ),
+        department_access=("marketing",),
+    )
+    approved = client.post(
+        f"{_approvals_base(seeded)}/{submitted.json()['id']}/decisions",
+        json={"action": "approved"},
+    )
+    assert approved.status_code == 200
+
+    asyncio.run(
+        _set_viewer_capabilities(
+            sessionmaker,
+            seeded,
+            (Capability.marketing_content_view.value,),
+        )
+    )
+    _set_context(
+        client,
+        seeded,
+        user_id=seeded.viewer_user_id,
+        email="marketing-viewer@example.com",
+        workspace_permission=WorkspacePermission.guest,
+        capability_permissions=(Capability.marketing_content_view.value,),
+        department_access=("marketing",),
+    )
+    missing_edit_schedule = client.patch(
+        f"{base}/{created['id']}/status",
+        json={"status": "scheduled"},
+    )
+    assert missing_edit_schedule.status_code == 403
+
+    class AgentContext(CurrentUserContext):
+        @property
+        def authorization_actor(self):
+            from labelos_api.authorization import ActorKind, AuthorizationActor
+
+            return AuthorizationActor(
+                kind=ActorKind.ai_agent,
+                subject=f"agent_{self.user.id}",
+                user_id=self.user.id,
+            )
+
+    async def override_agent_context() -> AgentContext:
+        return AgentContext(
+            user=User(id=seeded.viewer_user_id, email="agent@example.com"),
+            principal=AuthenticatedPrincipal(
+                provider="workos",
+                subject=f"user_{seeded.viewer_user_id}",
+                session_id="session_SECRET",
+                email="agent@example.com",
+                organization_id="org_ALPHA_MARKETING_CONTENT",
+                role=WorkspacePermission.guest.value,
+                roles=(WorkspacePermission.guest.value,),
+            ),
+            memberships=(
+                MembershipContext(
+                    organization_id=seeded.workspace_id,
+                    organization_name="Alpha Label",
+                    organization_slug="alpha-marketing-content-api",
+                    workos_organization_id="org_ALPHA_MARKETING_CONTENT",
+                    workspace_permission=WorkspacePermission.guest,
+                    department_access=("marketing",),
+                    capability_permissions=(
+                        Capability.marketing_content_view.value,
+                        Capability.marketing_content_edit.value,
+                    ),
+                ),
+            ),
+        )
+
+    asyncio.run(
+        _set_viewer_capabilities(
+            sessionmaker,
+            seeded,
+            (
+                Capability.marketing_content_view.value,
+                Capability.marketing_content_edit.value,
+            ),
+        )
+    )
+    client.app.dependency_overrides[get_current_user_context] = override_agent_context
+    agent_schedule = client.patch(
+        f"{base}/{created['id']}/status",
+        json={"status": "scheduled"},
+    )
+    assert agent_schedule.status_code == 409
+    assert agent_schedule.json()["detail"] == (
+        "AI agents cannot schedule or publish marketing content"
+    )
+
+    _set_context(
+        client,
+        seeded,
+        user_id=seeded.viewer_user_id,
+        email="marketing-viewer@example.com",
+        workspace_permission=WorkspacePermission.guest,
+        capability_permissions=(
+            Capability.marketing_content_view.value,
+            Capability.marketing_content_edit.value,
+        ),
+        department_access=("marketing",),
+    )
+    scheduled = client.patch(
+        f"{base}/{created['id']}/status",
+        json={"status": "scheduled"},
+    )
+    assert scheduled.status_code == 200
+
+    asyncio.run(
+        _set_viewer_capabilities(
+            sessionmaker,
+            seeded,
+            (Capability.marketing_content_view.value,),
+        )
+    )
+    _set_context(
+        client,
+        seeded,
+        user_id=seeded.viewer_user_id,
+        email="marketing-viewer@example.com",
+        workspace_permission=WorkspacePermission.guest,
+        capability_permissions=(Capability.marketing_content_view.value,),
+        department_access=("marketing",),
+    )
+    missing_edit_publish = client.patch(
+        f"{base}/{created['id']}/status",
+        json={"status": "published"},
+    )
+    assert missing_edit_publish.status_code == 403
+
+    asyncio.run(
+        _set_viewer_capabilities(
+            sessionmaker,
+            seeded,
+            (
+                Capability.marketing_content_view.value,
+                Capability.marketing_content_edit.value,
+            ),
+        )
+    )
+    client.app.dependency_overrides[get_current_user_context] = override_agent_context
+    agent_publish = client.patch(
+        f"{base}/{created['id']}/status",
+        json={"status": "published"},
+    )
+    assert agent_publish.status_code == 409
+    assert agent_publish.json()["detail"] == (
+        "AI agents cannot schedule or publish marketing content"
+    )
+
+    _set_context(
+        client,
+        seeded,
+        user_id=seeded.viewer_user_id,
+        email="marketing-viewer@example.com",
+        workspace_permission=WorkspacePermission.guest,
+        capability_permissions=(
+            Capability.marketing_content_view.value,
+            Capability.marketing_content_edit.value,
+        ),
+        department_access=("marketing",),
+    )
+    published = client.patch(
+        f"{base}/{created['id']}/status",
+        json={"status": "published"},
+    )
+    assert published.status_code == 200
+
+
 def test_marketing_content_rejects_invalid_input_and_lifecycle(
     marketing_content_client: tuple[
         TestClient,
@@ -927,9 +1126,12 @@ def test_marketing_content_openapi_contract_exposes_stable_routes(
     }
     assert "published_at" not in schemas["MarketingContentCreateRequest"]["properties"]
     assert "published_at" not in schemas["MarketingContentUpdateRequest"]["properties"]
-    assert "published_at" not in schemas["MarketingContentChannelCreateRequest"]["properties"]
-    assert "external_post_id" not in schemas["MarketingContentChannelCreateRequest"]["properties"]
-    assert "external_url" not in schemas["MarketingContentChannelCreateRequest"]["properties"]
+    channel_create_properties = schemas["MarketingContentChannelCreateRequest"][
+        "properties"
+    ]
+    assert "published_at" not in channel_create_properties
+    assert "external_post_id" not in channel_create_properties
+    assert "external_url" not in channel_create_properties
     assert "approved_at" in schemas["MarketingContentResponse"]["properties"]
     assert "approval_request_id" in schemas["MarketingContentResponse"]["properties"]
     assert "approval_state" in schemas["MarketingContentResponse"]["properties"]

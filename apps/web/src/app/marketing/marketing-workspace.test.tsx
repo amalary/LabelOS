@@ -973,6 +973,37 @@ describe("MarketingWorkspace", () => {
     expect(screen.getByText(/Scheduling is blocked/)).toBeInTheDocument();
   });
 
+  it("hides approved scheduling actions without the edit capability", () => {
+    mockWorkspaceProfile(["marketing.content.view"]);
+    mockCalendar([
+      item({
+        approval_request_id: "approval_01",
+        approval_state: {
+          approval_request_id: "approval_01",
+          approved_revision: 2,
+          approved_revision_is_current: true,
+          can_schedule: true,
+          current_revision: 2,
+          label: "Approved",
+          state: "approved",
+        },
+        approved_revision: 2,
+        content_revision: 2,
+        status: "approved",
+      }),
+    ]);
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: /Single Teaser/ }));
+    const editor = screen.getByRole("region", { name: "Marketing content editor" });
+
+    expect(within(editor).queryByRole("button", { name: "Schedule" })).not.toBeInTheDocument();
+    expect(within(editor).queryByText(/Scheduling is blocked/)).not.toBeInTheDocument();
+    expect(
+      within(editor).getByText("You need edit access to change this content."),
+    ).toBeInTheDocument();
+  });
+
   it("warns before material edits to currently approved content", async () => {
     vi.useRealTimers();
     const confirm = vi
