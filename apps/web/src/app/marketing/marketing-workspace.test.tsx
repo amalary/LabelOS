@@ -10,6 +10,10 @@ import type {
 } from "../../lib/approvals";
 import type { Campaign } from "../../lib/campaigns";
 import type { MarketingContentItem } from "../../lib/marketing-content";
+import type {
+  SocialAccountConnection,
+  SocialAccountConnectionsList,
+} from "../../lib/social-account-connections";
 
 const replace = vi.fn();
 const getParam = vi.fn<(key: string) => string | null>((key) => (key === "campaignId" ? "" : null));
@@ -19,6 +23,9 @@ const mutationMocks = vi.hoisted(() => ({
   approvalSubmit: vi.fn(),
   archive: vi.fn(),
   create: vi.fn(),
+  socialCreate: vi.fn(),
+  socialDisconnect: vi.fn(),
+  socialUpdate: vi.fn(),
   status: vi.fn(),
   update: vi.fn(),
 }));
@@ -51,6 +58,18 @@ const contentHookState = vi.hoisted(() => ({
   detailLoading: false,
   draftItems: [] as MarketingContentItem[],
   detailReload: vi.fn(),
+}));
+const socialHookState = vi.hoisted(() => ({
+  createError: null as Error | null,
+  createMutating: false,
+  disconnectError: null as Error | null,
+  disconnectMutating: false,
+  list: null as SocialAccountConnectionsList | null,
+  listError: null as Error | null,
+  listLoading: false,
+  listReload: vi.fn(),
+  updateError: null as Error | null,
+  updateMutating: false,
 }));
 
 vi.mock("next/navigation", () => ({
@@ -176,6 +195,43 @@ vi.mock("../../lib/approvals", async () => {
   };
 });
 
+vi.mock("../../lib/social-account-connections", async () => {
+  const actual = await vi.importActual<typeof import("../../lib/social-account-connections")>(
+    "../../lib/social-account-connections",
+  );
+  return {
+    ...actual,
+    useCreateAssistedSocialAccountConnection: vi.fn(() => ({
+      data: null,
+      error: socialHookState.createError,
+      isMutating: socialHookState.createMutating,
+      mutate: mutationMocks.socialCreate,
+      reset: vi.fn(),
+    })),
+    useDisconnectSocialAccountConnection: vi.fn(() => ({
+      data: null,
+      error: socialHookState.disconnectError,
+      isMutating: socialHookState.disconnectMutating,
+      mutate: mutationMocks.socialDisconnect,
+      reset: vi.fn(),
+    })),
+    useSocialAccountConnections: vi.fn(() => ({
+      data: socialHookState.listLoading || socialHookState.listError ? null : socialHookState.list,
+      error: socialHookState.listError,
+      isLoading: socialHookState.listLoading,
+      isMutating: false,
+      reload: socialHookState.listReload,
+    })),
+    useUpdateSocialAccountConnection: vi.fn(() => ({
+      data: null,
+      error: socialHookState.updateError,
+      isMutating: socialHookState.updateMutating,
+      mutate: mutationMocks.socialUpdate,
+      reset: vi.fn(),
+    })),
+  };
+});
+
 vi.mock("../../lib/realtime/use-organization-realtime", () => ({
   useOrganizationRealtimeContext: () => ({
     connectionState: "connected",
@@ -190,6 +246,7 @@ const workspaceContext = await import("../../lib/workspace-context");
 const approvalsLib = await import("../../lib/approvals");
 const campaignsLib = await import("../../lib/campaigns");
 const marketingContent = await import("../../lib/marketing-content");
+const socialAccounts = await import("../../lib/social-account-connections");
 
 const campaign: Campaign = {
   id: "campaign_01",
@@ -291,6 +348,68 @@ function humanizedStatus(value: string): string {
 
 function channel(overrides: Partial<MarketingContentItem["channels"][number]> = {}) {
   return { ...item().channels[0]!, ...overrides };
+}
+
+function socialConnection(
+  overrides: Partial<SocialAccountConnection> = {},
+): SocialAccountConnection {
+  const base: SocialAccountConnection = {
+    artist_association: {
+      artist_id: "artist_01",
+      artist_name: "Mira",
+      artist_profile_id: "artist_profile_01",
+      stage_name: "Mira",
+    },
+    capabilities: ["manual_publish"],
+    connection_method: "assisted",
+    created_at: "2026-09-05T12:00:00Z",
+    display_name: "Mira Official",
+    external_account_id: null,
+    handle: "@mira",
+    id: "connection_01",
+    last_error_code: null,
+    last_error_message: null,
+    last_health_checked_at: "2026-09-05T12:05:00Z",
+    last_synced_at: null,
+    profile_url: "https://instagram.com/mira",
+    provider: "instagram",
+    provider_metadata: { source: "artist-submitted" },
+    resolved_capabilities: {
+      can_auto_publish: false,
+      can_read_account_analytics: false,
+      can_read_post_analytics: false,
+      requires_manual_publish: true,
+      supports_manual_metrics: false,
+    },
+    status: "connected",
+    token_expires_at: null,
+    updated_at: "2026-09-05T12:00:00Z",
+    workspace_id: "workspace_01",
+  };
+  return { ...base, ...overrides };
+}
+
+function mockSocialAccounts(connections: SocialAccountConnection[] = []) {
+  socialHookState.list = {
+    limit: 100,
+    offset: 0,
+    social_account_connections: connections,
+    total: connections.length,
+  };
+  socialHookState.listError = null;
+  socialHookState.listLoading = false;
+}
+
+function mockSocialAccountsLoading() {
+  socialHookState.list = null;
+  socialHookState.listError = null;
+  socialHookState.listLoading = true;
+}
+
+function mockSocialAccountsError(error: Error) {
+  socialHookState.list = null;
+  socialHookState.listError = error;
+  socialHookState.listLoading = false;
 }
 
 function approvalSummary(overrides: Partial<ApprovalRequestSummary> = {}): ApprovalRequestSummary {
@@ -533,6 +652,15 @@ describe("MarketingWorkspace", () => {
     contentHookState.detailLoading = false;
     contentHookState.draftItems = [];
     contentHookState.detailReload = vi.fn();
+    socialHookState.createError = null;
+    socialHookState.createMutating = false;
+    socialHookState.disconnectError = null;
+    socialHookState.disconnectMutating = false;
+    socialHookState.listError = null;
+    socialHookState.listLoading = false;
+    socialHookState.listReload = vi.fn();
+    socialHookState.updateError = null;
+    socialHookState.updateMutating = false;
     realtimeHookState.recentActivityEvents = [];
     vi.mocked(approvalsLib.useApprovalDecision).mockImplementation(
       (_workspaceId: string | null, _approvalRequestId: string | null, action: ApprovalAction) => ({
@@ -551,11 +679,15 @@ describe("MarketingWorkspace", () => {
     mutationMocks.approvalSubmit.mockResolvedValue(approvalDetail());
     mutationMocks.archive.mockResolvedValue(item({ status: "archived" }));
     mutationMocks.create.mockResolvedValue(item({ status: "draft" }));
+    mutationMocks.socialCreate.mockResolvedValue(socialConnection());
+    mutationMocks.socialDisconnect.mockResolvedValue(socialConnection({ status: "disconnected" }));
+    mutationMocks.socialUpdate.mockResolvedValue(socialConnection({ display_name: "Mira Final" }));
     mutationMocks.update.mockResolvedValue(item({ title: "Updated Teaser" }));
     mutationMocks.status.mockResolvedValue(item({ status: "in_review" }));
     mockWorkspaceProfile();
     mockCalendar();
     mockDrafts();
+    mockSocialAccounts();
     vi.mocked(campaignsLib.useCampaigns).mockReturnValue({
       data: { campaigns: [campaign], total: 1, limit: 500, offset: 0 },
       error: null,
@@ -2285,13 +2417,216 @@ describe("MarketingWorkspace", () => {
     expect(screen.getByRole("heading", { name: "No approvals in this queue" })).toBeInTheDocument();
   });
 
-  it("keeps disabled upcoming tabs as lightweight placeholders", () => {
+  it("renders the social accounts empty state and supported provider display", () => {
+    mockWorkspaceProfile(["marketing.content.view", "marketing.account.view"]);
+
     render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Accounts" }));
 
-    fireEvent.click(screen.getByRole("button", { name: "Accounts Upcoming" }));
+    expect(screen.getByRole("heading", { name: "Social Account Connections" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "No social accounts registered" }),
+    ).toBeInTheDocument();
+    for (const provider of ["Instagram", "Facebook", "TikTok", "YouTube", "Spotify", "X"]) {
+      expect(screen.getByText(provider)).toBeInTheDocument();
+    }
+    expect(screen.getAllByText("Direct connection not yet available").length).toBeGreaterThan(0);
+    expect(socialAccounts.useSocialAccountConnections).toHaveBeenLastCalledWith("workspace_01", {
+      include_disconnected: true,
+      limit: 100,
+      offset: 0,
+    });
+  });
 
-    expect(screen.getByRole("heading", { name: "Accounts upcoming" })).toBeInTheDocument();
-    expect(screen.queryByText("Single Teaser")).not.toBeInTheDocument();
+  it("registers an assisted social account with safe metadata", async () => {
+    vi.useRealTimers();
+    mockWorkspaceProfile([
+      "marketing.content.view",
+      "marketing.account.view",
+      "marketing.account.manage",
+    ]);
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Accounts" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Register Account" })[0]!);
+
+    const form = screen.getByRole("region", { name: "Assisted account registration" });
+    fireEvent.change(within(form).getByLabelText("Provider"), { target: { value: "tiktok" } });
+    fireEvent.change(within(form).getByLabelText("Handle"), { target: { value: "@mira" } });
+    fireEvent.change(within(form).getByLabelText("Display name"), {
+      target: { value: "Mira Official" },
+    });
+    fireEvent.change(within(form).getByPlaceholderText("artist_profile_..."), {
+      target: { value: "artist_profile_01" },
+    });
+    fireEvent.change(within(form).getByLabelText("Profile URL"), {
+      target: { value: "https://tiktok.com/@mira" },
+    });
+    fireEvent.click(within(form).getByLabelText("Manual metrics entry"));
+    fireEvent.change(within(form).getByLabelText("Provider metadata JSON"), {
+      target: { value: '{"source":"artist-submitted"}' },
+    });
+    fireEvent.click(within(form).getByRole("button", { name: "Register Assisted Account" }));
+
+    await waitFor(() =>
+      expect(mutationMocks.socialCreate).toHaveBeenCalledWith({
+        artist_profile_id: "artist_profile_01",
+        capabilities: ["manual_publish", "manual_metrics"],
+        display_name: "Mira Official",
+        handle: "@mira",
+        profile_url: "https://tiktok.com/@mira",
+        provider: "tiktok",
+        provider_metadata: { source: "artist-submitted" },
+      }),
+    );
+    expect(socialHookState.listReload).toHaveBeenCalled();
+  });
+
+  it("renders account cards with provider, artist, status, mode, and capabilities", () => {
+    mockWorkspaceProfile(["marketing.content.view", "marketing.account.view"]);
+    mockSocialAccounts([
+      socialConnection({
+        capabilities: ["manual_publish", "manual_metrics"],
+        provider: "tiktok",
+        status: "limited",
+      }),
+      socialConnection({
+        artist_association: null,
+        capabilities: ["post_analytics_read"],
+        handle: "@mira-archive",
+        id: "connection_02",
+        provider: "x",
+        status: "reconnect_required",
+      }),
+    ]);
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Accounts" }));
+
+    expect(screen.getByText("@mira")).toBeInTheDocument();
+    expect(screen.getAllByText("TikTok").length).toBeGreaterThan(0);
+    expect(screen.getByText("Limited")).toBeInTheDocument();
+    expect(screen.getAllByText("Assisted Publishing").length).toBeGreaterThan(0);
+    expect(screen.getByText("Mira")).toBeInTheDocument();
+    expect(
+      screen.getByText("Assisted publishing checklist, Manual metrics entry"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("@mira-archive")).toBeInTheDocument();
+    expect(screen.getByText("Reconnect Required")).toBeInTheDocument();
+    expect(screen.getByText("Needs reconnect")).toBeInTheDocument();
+    expect(screen.getByText("Post analytics reference")).toBeInTheDocument();
+  });
+
+  it("edits social account metadata without changing connection mode", async () => {
+    vi.useRealTimers();
+    mockWorkspaceProfile([
+      "marketing.content.view",
+      "marketing.account.view",
+      "marketing.account.manage",
+    ]);
+    mockSocialAccounts([socialConnection()]);
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Accounts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+
+    fireEvent.change(screen.getByLabelText("Display name"), { target: { value: "Mira Final" } });
+    fireEvent.change(screen.getByLabelText("Provider metadata JSON"), {
+      target: { value: '{"notes":"verified by manager"}' },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() =>
+      expect(mutationMocks.socialUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          display_name: "Mira Final",
+          provider_metadata: { notes: "verified by manager" },
+        }),
+      ),
+    );
+    expect(mutationMocks.socialUpdate).toHaveBeenCalledWith(
+      expect.not.objectContaining({ connection_method: expect.anything() }),
+    );
+  });
+
+  it("disconnects an account and keeps it visible as disconnected history", async () => {
+    vi.useRealTimers();
+    const confirm = vi.spyOn(window, "confirm").mockReturnValueOnce(true);
+    mockWorkspaceProfile([
+      "marketing.content.view",
+      "marketing.account.view",
+      "marketing.account.manage",
+    ]);
+    mockSocialAccounts([socialConnection()]);
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Accounts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Disconnect" }));
+
+    expect(confirm).toHaveBeenCalledWith(
+      "Disconnect Instagram @mira? It will remain visible in social account history.",
+    );
+    await waitFor(() => expect(mutationMocks.socialDisconnect).toHaveBeenCalled());
+    expect(screen.getByText("@mira")).toBeInTheDocument();
+    expect(screen.getAllByText("Disconnected").length).toBeGreaterThan(0);
+    expect(socialHookState.listReload).toHaveBeenCalled();
+  });
+
+  it("shows account view while hiding manage UI without manage access", () => {
+    mockWorkspaceProfile(["marketing.content.view", "marketing.account.view"]);
+    mockSocialAccounts([socialConnection()]);
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Accounts" }));
+
+    expect(screen.getByText("@mira")).toBeInTheDocument();
+    expect(
+      screen.getByText(/need marketing account manage access to register, edit, or disconnect/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Register Account" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Edit" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Disconnect" })).not.toBeInTheDocument();
+  });
+
+  it("blocks unauthorized social account view access", () => {
+    mockWorkspaceProfile(["marketing.content.view"]);
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Accounts" }));
+
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "You need marketing account view access to open Social Account Connections.",
+    );
+    expect(
+      screen.queryByRole("heading", { name: "Social Account Connections" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows social account API errors", () => {
+    mockWorkspaceProfile(["marketing.content.view", "marketing.account.view"]);
+    mockSocialAccountsError(
+      new socialAccounts.SocialAccountConnectionApiError(
+        "network_failure",
+        "Unable to reach the social account connections API.",
+      ),
+    );
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Accounts" }));
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Social account connections could not be loaded.",
+    );
+  });
+
+  it("shows the social accounts loading state", () => {
+    mockWorkspaceProfile(["marketing.content.view", "marketing.account.view"]);
+    mockSocialAccountsLoading();
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Accounts" }));
+
+    expect(screen.getByText("Loading social account connections")).toBeInTheDocument();
   });
 
   it("invalidates workspace calendar queries for marketing realtime events", () => {
