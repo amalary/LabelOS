@@ -18,6 +18,11 @@ from labelos_api.authorization import (
     authorization_service,
 )
 from labelos_api.repositories import social_accounts
+from labelos_api.social_accounts.providers import (
+    SocialAccountConnectionProvider,
+    SocialAccountIdentity,
+    resolve_social_account_provider,
+)
 
 
 class SocialAccountServiceError(ValueError):
@@ -183,7 +188,13 @@ def _json_object(value: dict | None, field_name: str) -> dict:
     return value
 
 
-def _normalize_capabilities(capabilities: Sequence[str] | None) -> list[str]:
+def _normalize_capabilities(
+    capabilities: Sequence[str] | None,
+    *,
+    adapter: SocialAccountConnectionProvider | None = None,
+) -> list[str]:
+    if adapter is not None:
+        return adapter.normalize_capabilities(capabilities)
     if capabilities is None:
         return []
     normalized: list[str] = []
@@ -290,32 +301,45 @@ def can_read_post_analytics(
 
 
 def _create_values(payload: SocialAccountConnectionCreate) -> dict[str, object]:
-    values: dict[str, object] = {
-        "provider": _normalize_text(payload.provider, "provider").lower(),
-        "connection_method": _coerce_method(payload.connection_method),
-        "status": _coerce_status(payload.status),
-        "capabilities": _normalize_capabilities(payload.capabilities),
-        "provider_metadata": _json_object(
+    method = _coerce_method(payload.connection_method)
+    adapter = resolve_social_account_provider(payload.provider, method)
+    validation_result = adapter.validate_account_input(
+        SocialAccountIdentity(
+            provider=payload.provider,
+            external_account_id=payload.external_account_id,
+            username=payload.username,
+            display_name=payload.display_name,
+            profile_url=payload.profile_url,
+        ),
+        provider_metadata=_json_object(
             payload.provider_metadata,
             "provider_metadata",
         ),
+    )
+    identity = validation_result.identity
+    values: dict[str, object] = {
+        "provider": identity.provider,
+        "connection_method": method,
+        "status": _coerce_status(payload.status),
+        "capabilities": _normalize_capabilities(payload.capabilities, adapter=adapter),
+        "provider_metadata": validation_result.provider_metadata,
     }
     _set_if_not_none(values, "artist_profile_id", payload.artist_profile_id)
     _set_if_not_none(
         values,
         "external_account_id",
-        _normalize_optional_text(payload.external_account_id),
+        identity.external_account_id,
     )
-    _set_if_not_none(values, "username", _normalize_optional_text(payload.username))
+    _set_if_not_none(values, "username", identity.username)
     _set_if_not_none(
         values,
         "display_name",
-        _normalize_optional_text(payload.display_name),
+        identity.display_name,
     )
     _set_if_not_none(
         values,
         "profile_url",
-        _normalize_optional_text(payload.profile_url),
+        identity.profile_url,
     )
     _set_if_not_none(
         values,
@@ -344,7 +368,11 @@ def _create_values(payload: SocialAccountConnectionCreate) -> dict[str, object]:
     return values
 
 
-def _update_values(payload: SocialAccountConnectionUpdate) -> dict[str, object]:
+def _update_values(
+    payload: SocialAccountConnectionUpdate,
+    *,
+    adapter: SocialAccountConnectionProvider | None = None,
+) -> dict[str, object]:
     values: dict[str, object] = {}
     _set_if_not_none(values, "artist_profile_id", payload.artist_profile_id)
     _set_if_not_none(values, "username", _normalize_optional_text(payload.username))
@@ -359,7 +387,10 @@ def _update_values(payload: SocialAccountConnectionUpdate) -> dict[str, object]:
         _normalize_optional_text(payload.profile_url),
     )
     if payload.capabilities is not None:
-        values["capabilities"] = _normalize_capabilities(payload.capabilities)
+        values["capabilities"] = _normalize_capabilities(
+            payload.capabilities,
+            adapter=adapter,
+        )
     _set_if_not_none(values, "token_expires_at", payload.token_expires_at)
     _set_if_not_none(values, "last_synced_at", payload.last_synced_at)
     _set_if_not_none(
@@ -645,7 +676,11 @@ async def update_connection(
         workspace_id=workspace_id,
         capability=Capability.marketing_account_manage,
     )
-    values = _update_values(payload)
+    adapter = resolve_social_account_provider(
+        connection.provider,
+        connection.connection_method,
+    )
+    values = _update_values(payload, adapter=adapter)
     if not values:
         return connection
     await _validate_relationships(session, workspace_id, values)
