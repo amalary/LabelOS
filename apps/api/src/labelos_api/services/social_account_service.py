@@ -7,6 +7,7 @@ from labelos_database.models import (
     SocialAccountConnection,
     SocialAccountConnectionMethod,
     SocialAccountConnectionStatus,
+    User,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,6 +18,7 @@ from labelos_api.authorization import (
     ResourceKind,
     authorization_service,
 )
+from labelos_api.realtime import RealtimeEventType, RealtimePublisher
 from labelos_api.repositories import social_accounts
 from labelos_api.social_accounts.providers import (
     SocialAccountConnectionProvider,
@@ -67,6 +69,13 @@ ACTIVE_SOCIAL_ACCOUNT_STATUSES = frozenset(
         SocialAccountConnectionStatus.limited,
         SocialAccountConnectionStatus.reconnect_required,
         SocialAccountConnectionStatus.error,
+    }
+)
+
+SENSITIVE_SOCIAL_ACCOUNT_EVENT_FIELDS = frozenset(
+    {
+        "credential_ref",
+        "token_expires_at",
     }
 )
 
@@ -171,6 +180,90 @@ class SocialAccountConnectionQuery:
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+def _actor_user(actor: AuthorizationActorInput | None) -> User | None:
+    if isinstance(actor, User):
+        return actor
+    user = getattr(actor, "user", None)
+    return user if isinstance(user, User) else None
+
+
+def _status_value(status: SocialAccountConnectionStatus | str) -> str:
+    return (
+        status.value
+        if isinstance(status, SocialAccountConnectionStatus)
+        else str(status)
+    )
+
+
+def _method_value(method: SocialAccountConnectionMethod | str) -> str:
+    return (
+        method.value
+        if isinstance(method, SocialAccountConnectionMethod)
+        else str(method)
+    )
+
+
+def _social_account_event_payload(
+    connection: SocialAccountConnection,
+    *,
+    action: str,
+    changed_fields: list[str] | None = None,
+    previous_status: str | None = None,
+    previous_capabilities: Sequence[str] | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "action": action,
+        "connectionId": str(connection.id),
+        "provider": connection.provider,
+        "artistProfileId": (
+            str(connection.artist_profile_id)
+            if connection.artist_profile_id is not None
+            else None
+        ),
+        "connectionMethod": _method_value(connection.connection_method),
+        "status": _status_value(connection.status),
+        "externalAccountId": connection.external_account_id,
+        "handle": connection.username,
+        "displayName": connection.display_name,
+        "profileUrl": connection.profile_url,
+        "capabilities": list(connection.capabilities or []),
+    }
+    if changed_fields is not None:
+        payload["changedFields"] = ",".join(
+            field
+            for field in changed_fields
+            if field not in SENSITIVE_SOCIAL_ACCOUNT_EVENT_FIELDS
+        )
+    if previous_status is not None:
+        payload["previousStatus"] = previous_status
+    if previous_capabilities is not None:
+        current = set(connection.capabilities or [])
+        previous = set(previous_capabilities)
+        payload["addedCapabilities"] = sorted(current - previous)
+        payload["removedCapabilities"] = sorted(previous - current)
+    return payload
+
+
+async def _publish_social_account_event(
+    session: AsyncSession,
+    *,
+    workspace_id: UUID,
+    event_type: RealtimeEventType,
+    actor: AuthorizationActorInput | None,
+    connection: SocialAccountConnection,
+    payload: dict[str, object] | None = None,
+) -> None:
+    await RealtimePublisher(session).publish(
+        organization_id=workspace_id,
+        event_type=event_type,
+        actor=_actor_user(actor),
+        entity_type="social_account_connection",
+        entity_id=connection.id,
+        payload=payload
+        or _social_account_event_payload(connection, action=event_type.value),
+    )
 
 
 def _normalize_text(value: str | None, field_name: str) -> str:
@@ -650,6 +743,26 @@ async def create_connection(
     )
     await _validate_relationships(session, workspace_id, values)
     connection = await social_accounts.create_connection(session, workspace_id, values)
+    event_type = (
+        RealtimeEventType.marketing_social_account_connected
+        if connection.status == SocialAccountConnectionStatus.connected
+        else RealtimeEventType.marketing_social_account_updated
+    )
+    await _publish_social_account_event(
+        session,
+        workspace_id=workspace_id,
+        event_type=event_type,
+        actor=actor,
+        connection=connection,
+        payload=_social_account_event_payload(
+            connection,
+            action=(
+                "connected"
+                if event_type == RealtimeEventType.marketing_social_account_connected
+                else "created"
+            ),
+        ),
+    )
     await session.commit()
     return await _load_connection_for_workspace(session, workspace_id, connection.id)
 
@@ -678,6 +791,14 @@ async def register_assisted_connection(
     await _validate_relationships(session, workspace_id, values)
     await _assert_no_reasonable_duplicate(session, workspace_id, values)
     connection = await social_accounts.create_connection(session, workspace_id, values)
+    await _publish_social_account_event(
+        session,
+        workspace_id=workspace_id,
+        event_type=RealtimeEventType.marketing_social_account_connected,
+        actor=actor,
+        connection=connection,
+        payload=_social_account_event_payload(connection, action="connected"),
+    )
     await session.commit()
     return await _load_connection_for_workspace(session, workspace_id, connection.id)
 
@@ -782,6 +903,11 @@ async def update_connection(
     changed_fields = _changed_fields(connection, values)
     if not changed_fields:
         return connection
+    previous_capabilities = (
+        list(connection.capabilities or [])
+        if "capabilities" in changed_fields
+        else None
+    )
     updated = await social_accounts.update_connection(
         session,
         workspace_id,
@@ -790,6 +916,19 @@ async def update_connection(
     )
     if updated is None:
         raise SocialAccountNotFoundError("Social account connection not found")
+    await _publish_social_account_event(
+        session,
+        workspace_id=workspace_id,
+        event_type=RealtimeEventType.marketing_social_account_updated,
+        actor=actor,
+        connection=updated,
+        payload=_social_account_event_payload(
+            updated,
+            action="updated",
+            changed_fields=sorted(changed_fields),
+            previous_capabilities=previous_capabilities,
+        ),
+    )
     await session.commit()
     return updated
 
@@ -843,6 +982,7 @@ async def transition_status(
     )
     if next_status == connection.status:
         return connection
+    previous_status = _status_value(connection.status)
     values: dict[str, object] = {"status": next_status}
     if next_status == SocialAccountConnectionStatus.disconnected:
         values.update(
@@ -872,6 +1012,27 @@ async def transition_status(
     )
     if updated is None:
         raise SocialAccountNotFoundError("Social account connection not found")
+    await _publish_social_account_event(
+        session,
+        workspace_id=workspace_id,
+        event_type=(
+            RealtimeEventType.marketing_social_account_disconnected
+            if next_status == SocialAccountConnectionStatus.disconnected
+            else RealtimeEventType.marketing_social_account_health_changed
+        ),
+        actor=actor,
+        connection=updated,
+        payload=_social_account_event_payload(
+            updated,
+            action=(
+                "disconnected"
+                if next_status == SocialAccountConnectionStatus.disconnected
+                else "health_changed"
+            ),
+            changed_fields=sorted(values),
+            previous_status=previous_status,
+        ),
+    )
     await session.commit()
     return updated
 

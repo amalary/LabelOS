@@ -1,6 +1,6 @@
 import asyncio
 from collections.abc import Iterator
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from labelos_database.base import Base
@@ -11,12 +11,14 @@ from labelos_database.models import (
     MembershipRole,
     Organization,
     OrganizationMembership,
+    RealtimeEvent,
     SocialAccountConnectionStatus,
     UniversalProfile,
     User,
     WorkspaceMembership,
     WorkspacePermission,
 )
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -158,6 +160,18 @@ async def _seed_actor(
     session.add_all([user, profile, membership, workspace_membership])
     await session.flush()
     return user
+
+
+async def _realtime_events(
+    session: AsyncSession,
+    organization_id: UUID,
+) -> list[RealtimeEvent]:
+    rows = await session.scalars(
+        select(RealtimeEvent)
+        .where(RealtimeEvent.organization_id == organization_id)
+        .order_by(RealtimeEvent.created_at.asc(), RealtimeEvent.id.asc())
+    )
+    return list(rows.all())
 
 
 def test_social_account_repository_create_get_list_update_and_scope(
@@ -619,6 +633,48 @@ def test_assisted_connection_disconnect_and_health_semantics(
     assert result["disconnected"] == SocialAccountConnectionStatus.disconnected
     assert result["disconnected_health_healthy"] is False
     assert result["disconnected_health_status"] == "disconnected"
+
+
+def test_social_account_status_transition_publishes_health_changed_event(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async def run() -> dict[str, object]:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            assert isinstance(workspace, Organization)
+
+            connection = await register_assisted_connection(
+                session,
+                workspace.id,
+                SocialAccountConnectionCreate(provider="tiktok", username="alpha"),
+            )
+            limited = await transition_status(
+                session,
+                workspace.id,
+                connection.id,
+                SocialAccountConnectionStatus.limited,
+            )
+            records = await _realtime_events(session, workspace.id)
+            return {
+                "status": limited.status,
+                "types": [record.event_type for record in records],
+                "entity_types": [record.entity_type for record in records],
+                "health_payload": records[-1].payload,
+            }
+
+    result = asyncio.run(run())
+    assert result["status"] == SocialAccountConnectionStatus.limited
+    assert result["types"] == [
+        "marketing.social_account.connected",
+        "marketing.social_account.health_changed",
+    ]
+    assert result["entity_types"] == [
+        "social_account_connection",
+        "social_account_connection",
+    ]
+    assert result["health_payload"]["previousStatus"] == "connected"
+    assert result["health_payload"]["status"] == "limited"
 
 
 def test_social_account_service_rejects_invalid_and_cross_workspace_artists(

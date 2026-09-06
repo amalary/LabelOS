@@ -1,4 +1,5 @@
 import asyncio
+import json
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -14,6 +15,7 @@ from labelos_database.models import (
     MembershipRole,
     Organization,
     OrganizationMembership,
+    RealtimeEvent,
     SocialAccountConnection,
     SocialAccountConnectionMethod,
     SocialAccountConnectionStatus,
@@ -22,6 +24,7 @@ from labelos_database.models import (
     WorkspaceMembership,
     WorkspacePermission,
 )
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -273,6 +276,19 @@ def _outside_base(seeded: SeededSocialAccountConnectionsApi) -> str:
     )
 
 
+async def _realtime_events(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    organization_id: UUID,
+) -> list[RealtimeEvent]:
+    async with sessionmaker() as session:
+        rows = await session.scalars(
+            select(RealtimeEvent)
+            .where(RealtimeEvent.organization_id == organization_id)
+            .order_by(RealtimeEvent.created_at.asc(), RealtimeEvent.id.asc())
+        )
+        return list(rows.all())
+
+
 def _payload(
     seeded: SeededSocialAccountConnectionsApi,
     *,
@@ -354,6 +370,191 @@ def test_social_account_connection_list_get_create_update_and_disconnect(
     active_only = client.get(base, params={"include_disconnected": False})
     assert active_only.status_code == 200
     assert active_only.json()["total"] == 0
+
+
+def test_social_account_connection_mutations_publish_workspace_scoped_activity_events(
+    social_account_connections_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededSocialAccountConnectionsApi,
+    ],
+) -> None:
+    client, sessionmaker, seeded = social_account_connections_client
+    _set_context(client, seeded)
+    base = _base(seeded)
+
+    created_response = client.post(
+        base,
+        json={
+            **_payload(seeded),
+            "provider_metadata": {
+                "source": "artist-submitted",
+                "access_token": "SECRET",
+                "nested": {"refresh_token": "SECRET"},
+            },
+        },
+    )
+    assert created_response.status_code == 201
+    connection_id = created_response.json()["id"]
+
+    updated = client.patch(
+        f"{base}/{connection_id}",
+        json={
+            "display_name": "Alpha Evented",
+        },
+    )
+    disconnected = client.post(f"{base}/{connection_id}/disconnect")
+
+    assert updated.status_code == 200
+    assert disconnected.status_code == 200
+
+    records = asyncio.run(_realtime_events(sessionmaker, seeded.workspace_id))
+    assert [record.event_type for record in records] == [
+        "marketing.social_account.connected",
+        "marketing.social_account.updated",
+        "marketing.social_account.disconnected",
+    ]
+    assert all(record.entity_type == "social_account_connection" for record in records)
+    assert all(record.entity_id == connection_id for record in records)
+    assert all(record.organization_id == seeded.workspace_id for record in records)
+    assert all(
+        record.channel == f"organization:{seeded.workspace_id}" for record in records
+    )
+    assert all(record.actor_user_id == seeded.owner_user_id for record in records)
+
+    created_payload = records[0].payload
+    assert created_payload["connectionId"] == connection_id
+    assert created_payload["provider"] == "instagram"
+    assert created_payload["artistProfileId"] == str(seeded.artist_profile_id)
+    assert created_payload["connectionMethod"] == "assisted"
+    assert created_payload["status"] == "connected"
+    assert created_payload["handle"] == "alphaartist"
+    assert created_payload["displayName"] == "Alpha Artist"
+    assert created_payload["externalAccountId"] == "ig-alpha-1"
+
+    updated_payload = records[1].payload
+    assert updated_payload["changedFields"] == "display_name"
+
+    disconnected_payload = records[2].payload
+    assert disconnected_payload["previousStatus"] == "connected"
+    assert disconnected_payload["status"] == "disconnected"
+    assert (
+        "credential_ref"
+        not in json.dumps(
+            [record.payload for record in records],
+            default=str,
+        ).lower()
+    )
+    assert (
+        "access_token"
+        not in json.dumps(
+            [record.payload for record in records],
+            default=str,
+        ).lower()
+    )
+    assert (
+        "refresh_token"
+        not in json.dumps(
+            [record.payload for record in records],
+            default=str,
+        ).lower()
+    )
+    assert (
+        "secret"
+        not in json.dumps(
+            [record.payload for record in records],
+            default=str,
+        ).lower()
+    )
+
+
+def test_social_account_connection_failed_mutations_do_not_publish_events(
+    social_account_connections_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededSocialAccountConnectionsApi,
+    ],
+) -> None:
+    client, sessionmaker, seeded = social_account_connections_client
+    _set_context(client, seeded)
+    base = _base(seeded)
+    created = client.post(base, json=_payload(seeded))
+    assert created.status_code == 201
+    connection_id = created.json()["id"]
+
+    _set_context(
+        client,
+        seeded,
+        user_id=seeded.viewer_user_id,
+        email="social-viewer@example.com",
+        workspace_permission=WorkspacePermission.guest,
+        capability_permissions=(Capability.marketing_account_view.value,),
+        department_access=("marketing",),
+    )
+    unauthorized_update = client.patch(
+        f"{base}/{connection_id}",
+        json={"display_name": "Denied"},
+    )
+    unauthorized_create = client.post(base, json=_payload(seeded, handle="denied"))
+
+    _set_context(client, seeded)
+    duplicate = client.post(base, json=_payload(seeded))
+    invalid_artist = client.patch(
+        f"{base}/{connection_id}",
+        json={"artist_profile_id": str(seeded.outside_artist_profile_id)},
+    )
+
+    assert unauthorized_update.status_code == 403
+    assert unauthorized_create.status_code == 403
+    assert duplicate.status_code == 409
+    assert invalid_artist.status_code == 400
+
+    records = asyncio.run(_realtime_events(sessionmaker, seeded.workspace_id))
+    assert [record.event_type for record in records] == [
+        "marketing.social_account.connected",
+    ]
+
+
+def test_social_account_connection_activity_events_preserve_workspace_isolation(
+    social_account_connections_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededSocialAccountConnectionsApi,
+    ],
+) -> None:
+    client, sessionmaker, seeded = social_account_connections_client
+    _set_context(client, seeded)
+    alpha = client.post(_base(seeded), json=_payload(seeded))
+    assert alpha.status_code == 201
+
+    _set_context(
+        client,
+        seeded,
+        user_id=seeded.outside_user_id,
+        email="social-outside@example.com",
+        workspace_id=seeded.outside_workspace_id,
+        workos_organization_id="org_BETA_SOCIAL_API",
+        workspace_permission=WorkspacePermission.owner,
+    )
+    beta = client.post(
+        _outside_base(seeded),
+        json={
+            "provider": "TikTok",
+            "handle": "betaartist",
+            "display_name": "Beta Artist",
+            "profile_url": "https://tiktok.com/@betaartist",
+        },
+    )
+    assert beta.status_code == 201
+
+    alpha_records = asyncio.run(_realtime_events(sessionmaker, seeded.workspace_id))
+    beta_records = asyncio.run(
+        _realtime_events(sessionmaker, seeded.outside_workspace_id)
+    )
+    assert [record.entity_id for record in alpha_records] == [alpha.json()["id"]]
+    assert [record.entity_id for record in beta_records] == [beta.json()["id"]]
+    assert alpha_records[0].channel == f"organization:{seeded.workspace_id}"
+    assert beta_records[0].channel == f"organization:{seeded.outside_workspace_id}"
 
 
 def test_social_account_connection_view_only_user_cannot_mutate(
