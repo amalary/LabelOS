@@ -46,6 +46,7 @@ from labelos_database.models import (
     MembershipDepartmentAccess,
     MembershipProfessionalRole,
     MembershipRole,
+    OAuthAuthorizationState,
     Organization,
     OrganizationMembership,
     ProfessionalRole,
@@ -111,6 +112,7 @@ def test_foundational_models_are_registered() -> None:
         MarketingContentItem.__tablename__,
         MarketingContentItemChannel.__tablename__,
         SocialAccountConnection.__tablename__,
+        OAuthAuthorizationState.__tablename__,
         ApprovalRequest.__tablename__,
         ApprovalRequestStage.__tablename__,
         ApprovalDecision.__tablename__,
@@ -154,6 +156,7 @@ def test_foundational_models_are_registered() -> None:
         "marketing_content_items",
         "marketing_content_item_channels",
         "social_account_connections",
+        "oauth_authorization_states",
         "approval_requests",
         "approval_request_stages",
         "approval_decisions",
@@ -2583,6 +2586,7 @@ def test_label_owned_resources_define_organization_boundary() -> None:
         AnalyticsObservation,
         AIAgent,
         TeamSetting,
+        OAuthAuthorizationState,
     )
 
     for model in models:

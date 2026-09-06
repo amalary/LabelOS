@@ -168,6 +168,12 @@ class SocialAccountConnectionStatus(StrEnum):
     error = "error"
 
 
+class OAuthAuthorizationStateStatus(StrEnum):
+    pending = "pending"
+    consumed = "consumed"
+    expired = "expired"
+
+
 def workspace_permission_from_role(role: MembershipRole) -> WorkspacePermission:
     if role == MembershipRole.artist:
         return WorkspacePermission.member
@@ -218,6 +224,11 @@ class User(Base, TimestampMixin):
             back_populates="created_by_user",
             foreign_keys="SocialAccountConnection.created_by_user_id",
         )
+    )
+    oauth_authorization_states: Mapped[list["OAuthAuthorizationState"]] = relationship(
+        back_populates="actor_user",
+        cascade="all, delete-orphan",
+        foreign_keys="OAuthAuthorizationState.actor_user_id",
     )
 
     __table_args__ = (
@@ -651,6 +662,10 @@ class Organization(Base, TimestampMixin):
         cascade="all, delete-orphan",
     )
     social_account_connections: Mapped[list["SocialAccountConnection"]] = relationship(
+        back_populates="organization",
+        cascade="all, delete-orphan",
+    )
+    oauth_authorization_states: Mapped[list["OAuthAuthorizationState"]] = relationship(
         back_populates="organization",
         cascade="all, delete-orphan",
     )
@@ -2703,6 +2718,105 @@ class MarketingContentItemChannel(Base, TimestampMixin):
             "ix_marketing_content_item_channels_channel_scheduled_at",
             "channel",
             "scheduled_at",
+        ),
+    )
+
+
+class OAuthAuthorizationState(Base, TimestampMixin, OrganizationOwnedMixin):
+    __tablename__ = "oauth_authorization_states"
+
+    id: Mapped[UUIDPrimaryKey]
+    state_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    actor_user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    provider: Mapped[str] = mapped_column(String(80), nullable=False)
+    connection_method: Mapped[SocialAccountConnectionMethod] = mapped_column(
+        Enum(
+            SocialAccountConnectionMethod,
+            name="social_account_connection_method",
+            values_callable=lambda methods: [method.value for method in methods],
+        ),
+        nullable=False,
+    )
+    status: Mapped[OAuthAuthorizationStateStatus] = mapped_column(
+        Enum(
+            OAuthAuthorizationStateStatus,
+            name="oauth_authorization_state_status",
+            values_callable=lambda statuses: [status.value for status in statuses],
+        ),
+        nullable=False,
+        default=OAuthAuthorizationStateStatus.pending,
+        server_default=OAuthAuthorizationStateStatus.pending.value,
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    safe_redirect_path: Mapped[str] = mapped_column(String(2048), nullable=False)
+    pkce_credential_ref: Mapped[str | None] = mapped_column(String(500))
+
+    organization: Mapped[Organization] = relationship(
+        back_populates="oauth_authorization_states"
+    )
+    actor_user: Mapped[User] = relationship(
+        back_populates="oauth_authorization_states",
+        foreign_keys=[actor_user_id],
+    )
+
+    @validates("state_hash")
+    def _validate_state_hash(self, key: str, value: str | None) -> str:
+        normalized = _required_text(value, key)
+        if len(normalized) != 64 or not all(
+            character in "0123456789abcdef" for character in normalized
+        ):
+            raise ValueError("state_hash must be a lowercase SHA-256 hex digest")
+        return normalized
+
+    @validates("provider")
+    def _validate_provider(self, key: str, value: str | None) -> str:
+        return _required_text(value, key).lower()
+
+    @validates("safe_redirect_path")
+    def _validate_safe_redirect_path(self, key: str, value: str | None) -> str:
+        normalized = _required_text(value, key)
+        parsed = urlparse(normalized)
+        if (
+            parsed.scheme
+            or parsed.netloc
+            or not normalized.startswith("/")
+            or normalized.startswith("//")
+            or "\\" in normalized
+        ):
+            raise ValueError("safe_redirect_path must be a relative application path")
+        return normalized
+
+    @validates("pkce_credential_ref")
+    def _validate_pkce_credential_ref(
+        self,
+        _key: str,
+        value: str | None,
+    ) -> str | None:
+        return _optional_text(value)
+
+    __table_args__ = (
+        UniqueConstraint("state_hash", name="uq_oauth_authorization_states_hash"),
+        Index("ix_oauth_authorization_states_organization_id", "organization_id"),
+        Index(
+            "ix_oauth_authorization_states_org_provider_method",
+            "organization_id",
+            "provider",
+            "connection_method",
+        ),
+        Index(
+            "ix_oauth_authorization_states_actor_user_id",
+            "actor_user_id",
+        ),
+        Index(
+            "ix_oauth_authorization_states_status_expires_at",
+            "status",
+            "expires_at",
         ),
     )
 
