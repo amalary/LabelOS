@@ -27,6 +27,8 @@ class Settings(DatabaseSettings):
     credential_store_backend: str = "memory"
     credential_store_gcp_project_id: str | None = None
     credential_store_secret_prefix: str = "labelos-credential"
+    youtube_oauth_client_id: str | None = None
+    youtube_oauth_client_secret: str | None = None
 
     @field_validator("allowed_frontend_origins", mode="before")
     @classmethod
@@ -124,4 +126,6 @@ def get_settings() -> Settings:
             "CREDENTIAL_STORE_SECRET_PREFIX",
             "labelos-credential",
         ),
+        youtube_oauth_client_id=os.getenv("YOUTUBE_OAUTH_CLIENT_ID") or None,
+        youtube_oauth_client_secret=os.getenv("YOUTUBE_OAUTH_CLIENT_SECRET") or None,
     )

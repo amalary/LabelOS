@@ -39,7 +39,7 @@ from labelos_api.services.social_account_service import (
 from labelos_api.social_accounts.providers import (
     SocialAccountProviderError,
     SocialAccountProviderRegistry,
-    provider_registry,
+    social_account_provider_registry_from_settings,
 )
 
 router = APIRouter(prefix="/workspaces", tags=["social-account-connections"])
@@ -181,14 +181,24 @@ def _conflict(detail: str) -> HTTPException:
     return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail)
 
 
-def get_social_account_provider_registry() -> SocialAccountProviderRegistry:
-    return provider_registry
-
-
 def get_credential_store_dependency(
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> CredentialStore:
     return build_credential_store(settings)
+
+
+def get_social_account_provider_registry(
+    settings: Annotated[Settings, Depends(get_settings)],
+    credential_store: Annotated[
+        CredentialStore,
+        Depends(get_credential_store_dependency),
+    ],
+) -> SocialAccountProviderRegistry:
+    return social_account_provider_registry_from_settings(
+        youtube_client_id=settings.youtube_oauth_client_id,
+        youtube_client_secret=settings.youtube_oauth_client_secret,
+        credential_store=credential_store,
+    )
 
 
 def _raise_capability_denial(reason: str) -> NoReturn:
@@ -602,6 +612,10 @@ async def disconnect_social_account_connection(
     connection_id: UUID,
     session: SessionDep,
     context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
+    registry: Annotated[
+        SocialAccountProviderRegistry,
+        Depends(get_social_account_provider_registry),
+    ],
 ) -> SocialAccountConnectionResponse:
     try:
         connection = await social_account_service.disconnect_connection(
@@ -609,11 +623,13 @@ async def disconnect_social_account_connection(
             workspace_id,
             connection_id,
             actor=context,
+            provider_registry=registry,
         )
     except (
         SocialAccountAuthorizationError,
         SocialAccountLifecycleError,
         SocialAccountNotFoundError,
+        SocialAccountProviderError,
     ) as exc:
         _service_error(exc)
     return _connection_response(connection)

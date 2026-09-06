@@ -24,6 +24,7 @@ from labelos_api.social_accounts.providers import (
     SocialAccountConnectionProvider,
     SocialAccountHealth,
     SocialAccountIdentity,
+    SocialAccountProviderRegistry,
     resolve_social_account_provider,
 )
 
@@ -1063,7 +1064,33 @@ async def disconnect_connection(
     connection_id: UUID,
     *,
     actor: AuthorizationActorInput | None = None,
+    provider_registry: SocialAccountProviderRegistry | None = None,
 ) -> SocialAccountConnection:
+    connection = await _load_connection_for_workspace(
+        session,
+        workspace_id,
+        connection_id,
+    )
+    await _require_capability(
+        session,
+        actor=actor,
+        workspace_id=workspace_id,
+        capability=Capability.marketing_account_manage,
+    )
+    if connection.status == SocialAccountConnectionStatus.disconnected:
+        return connection
+    adapter = (
+        provider_registry.resolve(connection.provider, connection.connection_method)
+        if provider_registry is not None
+        else resolve_social_account_provider(
+            connection.provider,
+            connection.connection_method,
+        )
+    )
+    await adapter.disconnect(
+        credential_ref=connection.credential_ref,
+        provider_metadata=connection.provider_metadata,
+    )
     return await transition_status(
         session,
         workspace_id,

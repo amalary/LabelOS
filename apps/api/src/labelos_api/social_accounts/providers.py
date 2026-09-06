@@ -1,11 +1,19 @@
 from abc import ABC
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
+import httpx
 from labelos_database.models import SocialAccountConnectionMethod
+
+from labelos_api.services.credential_store import (
+    CredentialNotFoundError,
+    CredentialPayload,
+    CredentialStore,
+    CredentialStoreError,
+)
 
 
 class SocialAccountProviderKey(StrEnum):
@@ -26,6 +34,7 @@ class SocialAccountProviderErrorCode(StrEnum):
     credential_expired = "credential_expired"
     account_not_found = "account_not_found"
     malformed_provider_response = "malformed_provider_response"
+    rate_limited = "rate_limited"
 
 
 class SocialAccountProviderError(ValueError):
@@ -451,6 +460,572 @@ class FakeOAuthSocialAccountConnectionProvider(SocialAccountConnectionProvider):
         )
 
 
+@dataclass(frozen=True, kw_only=True)
+class YouTubeDirectProviderConfig:
+    client_id: str
+    client_secret: str
+    authorization_endpoint: str = "https://accounts.google.com/o/oauth2/v2/auth"
+    token_endpoint: str = "https://oauth2.googleapis.com/token"
+    revoke_endpoint: str = "https://oauth2.googleapis.com/revoke"
+    channels_endpoint: str = "https://www.googleapis.com/youtube/v3/channels"
+    timeout_seconds: float = 10.0
+
+    def __post_init__(self) -> None:
+        if not self.client_id.strip():
+            raise ValueError("YouTube OAuth client_id is required")
+        if not self.client_secret.strip():
+            raise ValueError("YouTube OAuth client_secret is required")
+
+
+class YouTubeDirectSocialAccountConnectionProvider(SocialAccountConnectionProvider):
+    """Direct OAuth adapter for YouTube channel account connections.
+
+    This adapter intentionally resolves connection capabilities only. It does
+    not upload videos, publish posts, or retrieve analytics reports.
+    """
+
+    provider = SocialAccountProviderKey.youtube
+    connection_method = SocialAccountConnectionMethod.direct_api
+
+    SCOPE_YOUTUBE_READONLY = "https://www.googleapis.com/auth/youtube.readonly"
+    SCOPE_YOUTUBE_UPLOAD = "https://www.googleapis.com/auth/youtube.upload"
+    SCOPE_YT_ANALYTICS_READONLY = (
+        "https://www.googleapis.com/auth/yt-analytics.readonly"
+    )
+
+    _scope_capabilities = {
+        SCOPE_YOUTUBE_UPLOAD: ("content_publish",),
+        SCOPE_YT_ANALYTICS_READONLY: (
+            "account_analytics_read",
+            "post_analytics_read",
+        ),
+    }
+
+    _default_scopes = (SCOPE_YOUTUBE_READONLY,)
+    _supported_scopes = frozenset(
+        {
+            SCOPE_YOUTUBE_READONLY,
+            SCOPE_YOUTUBE_UPLOAD,
+            SCOPE_YT_ANALYTICS_READONLY,
+        }
+    )
+
+    def __init__(
+        self,
+        *,
+        config: YouTubeDirectProviderConfig,
+        credential_store: CredentialStore | None = None,
+        http_client: httpx.AsyncClient | None = None,
+    ) -> None:
+        self.config = config
+        self.credential_store = credential_store
+        self._http_client = http_client
+
+    def default_capabilities(self) -> tuple[str, ...]:
+        return (
+            "content_publish",
+            "account_analytics_read",
+            "post_analytics_read",
+        )
+
+    def normalize_account_identity(
+        self,
+        identity: SocialAccountIdentity,
+    ) -> SocialAccountIdentity:
+        normalized = super().normalize_account_identity(identity)
+        return SocialAccountIdentity(
+            provider=normalized.provider,
+            external_account_id=normalized.external_account_id,
+            username=_optional_text(normalized.username),
+            display_name=normalized.display_name,
+            profile_url=_validate_profile_url(normalized.profile_url),
+        )
+
+    def normalize_capabilities(self, capabilities: Sequence[str] | None) -> list[str]:
+        if capabilities is None:
+            requested = self.default_capabilities()
+        else:
+            requested = capabilities
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for capability in requested:
+            if not isinstance(capability, str) or not capability.strip():
+                raise SocialAccountProviderError(
+                    SocialAccountProviderErrorCode.malformed_provider_response,
+                    "Social account capabilities must be non-empty strings",
+                    provider=self.provider,
+                    connection_method=self.connection_method,
+                )
+            key = capability.strip()
+            if key not in seen:
+                normalized.append(key)
+                seen.add(key)
+        allowed = {
+            capability
+            for capabilities_for_scope in self._scope_capabilities.values()
+            for capability in capabilities_for_scope
+        }
+        unsupported = [
+            capability for capability in normalized if capability not in allowed
+        ]
+        if unsupported:
+            raise SocialAccountProviderError(
+                SocialAccountProviderErrorCode.malformed_provider_response,
+                "Provider returned unsupported social account capabilities",
+                provider=self.provider,
+                connection_method=self.connection_method,
+            )
+        return normalized
+
+    async def build_authorization_request(
+        self,
+        *,
+        redirect_uri: str,
+        state: str,
+        scopes: Sequence[str] = (),
+        provider_metadata: Mapping[str, object] | None = None,
+    ) -> SocialAccountAuthorizationRequest:
+        requested_scopes = self._normalize_requested_scopes(scopes)
+        query = urlencode(
+            {
+                "client_id": self.config.client_id,
+                "redirect_uri": redirect_uri,
+                "response_type": "code",
+                "scope": " ".join(requested_scopes),
+                "state": state,
+                "access_type": "offline",
+                "include_granted_scopes": "true",
+                "prompt": "consent",
+            }
+        )
+        return SocialAccountAuthorizationRequest(
+            authorization_url=f"{self.config.authorization_endpoint}?{query}",
+            state=state,
+            scopes=requested_scopes,
+            metadata={"access_type": "offline", "include_granted_scopes": True},
+        )
+
+    async def complete_oauth_exchange(
+        self,
+        *,
+        code: str,
+        redirect_uri: str,
+        provider_metadata: Mapping[str, object] | None = None,
+    ) -> SocialAccountCredentialResult:
+        if not code.strip():
+            raise SocialAccountProviderError(
+                SocialAccountProviderErrorCode.authorization_failed,
+                "OAuth authorization code is required",
+                provider=self.provider,
+                connection_method=self.connection_method,
+            )
+        body = await self._post_form_json(
+            self.config.token_endpoint,
+            data={
+                "code": code,
+                "client_id": self.config.client_id,
+                "client_secret": self.config.client_secret,
+                "redirect_uri": redirect_uri,
+                "grant_type": "authorization_code",
+            },
+        )
+        credential_payload, granted_scopes, expires_at = self._credential_result(body)
+        identity = await self._fetch_identity(credential_payload["access_token"])
+        return SocialAccountCredentialResult(
+            credential_payload=credential_payload,
+            token_expires_at=expires_at,
+            granted_scopes=granted_scopes,
+            provider_metadata=identity.provider_metadata,
+        )
+
+    async def refresh_credentials(
+        self,
+        *,
+        credential_ref: str,
+        provider_metadata: Mapping[str, object] | None = None,
+    ) -> SocialAccountCredentialResult:
+        if self.credential_store is None:
+            raise SocialAccountProviderError(
+                SocialAccountProviderErrorCode.provider_unavailable,
+                "Credential store is required for YouTube credential refresh",
+                provider=self.provider,
+                connection_method=self.connection_method,
+            )
+        credentials = await self._stored_credentials(credential_ref)
+        refresh_token = credentials.get("refresh_token")
+        if not isinstance(refresh_token, str) or not refresh_token.strip():
+            raise SocialAccountProviderError(
+                SocialAccountProviderErrorCode.credential_expired,
+                "YouTube refresh token is missing",
+                provider=self.provider,
+                connection_method=self.connection_method,
+            )
+        body = await self._post_form_json(
+            self.config.token_endpoint,
+            data={
+                "client_id": self.config.client_id,
+                "client_secret": self.config.client_secret,
+                "refresh_token": refresh_token,
+                "grant_type": "refresh_token",
+            },
+        )
+        refreshed_payload, granted_scopes, expires_at = self._credential_result(
+            {**credentials, **body, "refresh_token": refresh_token}
+        )
+        await self.credential_store.replace(
+            credential_ref,
+            CredentialPayload(refreshed_payload),
+        )
+        return SocialAccountCredentialResult(
+            credential_ref=credential_ref,
+            token_expires_at=expires_at,
+            granted_scopes=granted_scopes,
+            provider_metadata=dict(provider_metadata or {}),
+        )
+
+    async def retrieve_account_identity(
+        self,
+        *,
+        credential_ref: str | None,
+        provider_metadata: Mapping[str, object] | None = None,
+    ) -> SocialAccountIdentity:
+        metadata = dict(provider_metadata or {})
+        external_account_id = metadata.get("external_account_id")
+        if isinstance(external_account_id, str) and external_account_id.strip():
+            return self.normalize_account_identity(
+                SocialAccountIdentity(
+                    provider=self.provider,
+                    external_account_id=external_account_id,
+                    username=(
+                        metadata.get("handle")
+                        if isinstance(metadata.get("handle"), str)
+                        else None
+                    ),
+                    display_name=(
+                        metadata.get("display_name")
+                        if isinstance(metadata.get("display_name"), str)
+                        else None
+                    ),
+                    profile_url=(
+                        metadata.get("profile_url")
+                        if isinstance(metadata.get("profile_url"), str)
+                        else None
+                    ),
+                )
+            )
+        if self.credential_store is None or credential_ref is None:
+            raise SocialAccountProviderError(
+                SocialAccountProviderErrorCode.malformed_provider_response,
+                "YouTube account identity is unavailable",
+                provider=self.provider,
+                connection_method=self.connection_method,
+            )
+        credentials = await self._stored_credentials(credential_ref)
+        access_token = credentials.get("access_token")
+        if not isinstance(access_token, str) or not access_token.strip():
+            raise SocialAccountProviderError(
+                SocialAccountProviderErrorCode.credential_expired,
+                "YouTube access token is missing",
+                provider=self.provider,
+                connection_method=self.connection_method,
+            )
+        identity = await self._fetch_identity(access_token)
+        return identity.identity
+
+    async def check_connection_health(
+        self,
+        *,
+        credential_ref: str | None,
+        token_expires_at: datetime | None = None,
+        provider_metadata: Mapping[str, object] | None = None,
+    ) -> SocialAccountHealth:
+        if token_expires_at is not None and token_expires_at <= datetime.now(UTC):
+            return SocialAccountHealth(
+                healthy=False,
+                status="expired",
+                error_code=SocialAccountProviderErrorCode.credential_expired,
+                error_message="YouTube access token has expired",
+            )
+        try:
+            await self.retrieve_account_identity(
+                credential_ref=credential_ref,
+                provider_metadata=provider_metadata,
+            )
+        except SocialAccountProviderError as exc:
+            return SocialAccountHealth(
+                healthy=False,
+                status="unhealthy",
+                error_code=exc.code,
+                error_message=str(exc),
+            )
+        return SocialAccountHealth(healthy=True, status="connected")
+
+    async def disconnect(
+        self,
+        *,
+        credential_ref: str | None,
+        provider_metadata: Mapping[str, object] | None = None,
+    ) -> None:
+        if self.credential_store is None or credential_ref is None:
+            return None
+        credentials = await self._stored_credentials(credential_ref)
+        token = credentials.get("refresh_token") or credentials.get("access_token")
+        if isinstance(token, str) and token.strip():
+            await self._post_form_json(
+                self.config.revoke_endpoint,
+                data={"token": token},
+                accepts_empty_response=True,
+            )
+        try:
+            await self.credential_store.delete(credential_ref)
+        except CredentialNotFoundError:
+            return None
+        return None
+
+    def capabilities_for_scopes(self, scopes: Sequence[str]) -> list[str]:
+        capabilities: list[str] = []
+        for scope in self._normalize_granted_scopes(scopes):
+            capabilities.extend(self._scope_capabilities.get(scope, ()))
+        return self.normalize_capabilities(capabilities)
+
+    def _normalize_requested_scopes(self, scopes: Sequence[str]) -> tuple[str, ...]:
+        requested = tuple(scopes or self._default_scopes)
+        unknown = [
+            scope
+            for scope in requested
+            if not isinstance(scope, str) or scope.strip() not in self._supported_scopes
+        ]
+        if unknown:
+            raise SocialAccountProviderError(
+                SocialAccountProviderErrorCode.insufficient_scope,
+                "Unsupported YouTube OAuth scope requested",
+                provider=self.provider,
+                connection_method=self.connection_method,
+            )
+        return tuple(dict.fromkeys(scope.strip() for scope in requested))
+
+    def _normalize_granted_scopes(self, scopes: Sequence[str]) -> tuple[str, ...]:
+        expanded: list[str] = []
+        for scope in scopes:
+            if isinstance(scope, str):
+                expanded.extend(part for part in scope.split() if part)
+        return tuple(dict.fromkeys(expanded))
+
+    def _credential_result(
+        self,
+        body: Mapping[str, object],
+    ) -> tuple[dict[str, object], tuple[str, ...], datetime | None]:
+        access_token = body.get("access_token")
+        token_type = body.get("token_type")
+        if not isinstance(access_token, str) or not access_token.strip():
+            raise SocialAccountProviderError(
+                SocialAccountProviderErrorCode.malformed_provider_response,
+                "YouTube token response did not include an access token",
+                provider=self.provider,
+                connection_method=self.connection_method,
+            )
+        if isinstance(token_type, str) and token_type.lower() != "bearer":
+            raise SocialAccountProviderError(
+                SocialAccountProviderErrorCode.malformed_provider_response,
+                "YouTube token response used an unsupported token type",
+                provider=self.provider,
+                connection_method=self.connection_method,
+            )
+        granted_scopes = self._normalize_granted_scopes(
+            (body.get("scope"),) if isinstance(body.get("scope"), str) else ()
+        )
+        credential_payload: dict[str, object] = {
+            "access_token": access_token,
+            "token_type": token_type or "Bearer",
+            "scope": " ".join(granted_scopes),
+        }
+        refresh_token = body.get("refresh_token")
+        if isinstance(refresh_token, str) and refresh_token.strip():
+            credential_payload["refresh_token"] = refresh_token
+        expires_in = body.get("expires_in")
+        expires_at = None
+        if isinstance(expires_in, int) and expires_in > 0:
+            expires_at = datetime.now(UTC) + timedelta(seconds=expires_in)
+            credential_payload["expires_in"] = expires_in
+        return credential_payload, granted_scopes, expires_at
+
+    async def _fetch_identity(self, access_token: str) -> SocialAccountValidationResult:
+        body = await self._get_json(
+            self.config.channels_endpoint,
+            params={"part": "snippet", "mine": "true", "maxResults": "1"},
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        items = body.get("items")
+        if not isinstance(items, list):
+            raise SocialAccountProviderError(
+                SocialAccountProviderErrorCode.malformed_provider_response,
+                "YouTube channel response is malformed",
+                provider=self.provider,
+                connection_method=self.connection_method,
+            )
+        if not items:
+            raise SocialAccountProviderError(
+                SocialAccountProviderErrorCode.account_not_found,
+                "Authenticated Google account has no YouTube channel",
+                provider=self.provider,
+                connection_method=self.connection_method,
+            )
+        first = items[0]
+        if not isinstance(first, Mapping):
+            raise SocialAccountProviderError(
+                SocialAccountProviderErrorCode.malformed_provider_response,
+                "YouTube channel item is malformed",
+                provider=self.provider,
+                connection_method=self.connection_method,
+            )
+        channel_id = first.get("id")
+        snippet = first.get("snippet")
+        if not isinstance(channel_id, str) or not channel_id.strip():
+            raise SocialAccountProviderError(
+                SocialAccountProviderErrorCode.malformed_provider_response,
+                "YouTube channel id is missing",
+                provider=self.provider,
+                connection_method=self.connection_method,
+            )
+        snippet_map = snippet if isinstance(snippet, Mapping) else {}
+        handle = snippet_map.get("customUrl")
+        title = snippet_map.get("title")
+        thumbnails = snippet_map.get("thumbnails")
+        metadata = {
+            "external_account_id": channel_id,
+            "handle": handle if isinstance(handle, str) else None,
+            "display_name": title if isinstance(title, str) else None,
+            "profile_url": f"https://www.youtube.com/channel/{channel_id}",
+            "thumbnail_url": _default_thumbnail_url(thumbnails),
+        }
+        return self.validate_account_input(
+            SocialAccountIdentity(
+                provider=self.provider,
+                external_account_id=metadata["external_account_id"],
+                username=metadata["handle"],
+                display_name=metadata["display_name"],
+                profile_url=metadata["profile_url"],
+            ),
+            provider_metadata={
+                key: value for key, value in metadata.items() if value is not None
+            },
+        )
+
+    async def _stored_credentials(self, credential_ref: str) -> dict[str, object]:
+        try:
+            if self.credential_store is None:
+                raise CredentialNotFoundError()
+            return (await self.credential_store.get(credential_ref)).expose()
+        except CredentialStoreError as exc:
+            raise SocialAccountProviderError(
+                SocialAccountProviderErrorCode.credential_expired,
+                "Stored YouTube credential material is unavailable",
+                provider=self.provider,
+                connection_method=self.connection_method,
+            ) from exc
+
+    async def _post_form_json(
+        self,
+        url: str,
+        *,
+        data: Mapping[str, str],
+        accepts_empty_response: bool = False,
+    ) -> Mapping[str, object]:
+        response = await self._request(
+            "POST",
+            url,
+            data=data,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        if accepts_empty_response and not response.content:
+            return {}
+        return self._response_json(response)
+
+    async def _get_json(
+        self,
+        url: str,
+        *,
+        params: Mapping[str, str],
+        headers: Mapping[str, str],
+    ) -> Mapping[str, object]:
+        response = await self._request("GET", url, params=params, headers=headers)
+        return self._response_json(response)
+
+    async def _request(self, method: str, url: str, **kwargs: object) -> httpx.Response:
+        client = self._http_client
+        if client is not None:
+            response = await client.request(method, url, **kwargs)
+        else:
+            async with httpx.AsyncClient(
+                timeout=self.config.timeout_seconds,
+            ) as transient_client:
+                response = await transient_client.request(method, url, **kwargs)
+        if response.status_code in {400, 401}:
+            raise SocialAccountProviderError(
+                SocialAccountProviderErrorCode.credential_expired,
+                "YouTube credential is expired or invalid",
+                provider=self.provider,
+                connection_method=self.connection_method,
+            )
+        if response.status_code == 403:
+            raise SocialAccountProviderError(
+                SocialAccountProviderErrorCode.insufficient_scope,
+                "YouTube credential is missing a required permission",
+                provider=self.provider,
+                connection_method=self.connection_method,
+            )
+        if response.status_code == 404:
+            raise SocialAccountProviderError(
+                SocialAccountProviderErrorCode.account_not_found,
+                "YouTube account was not found",
+                provider=self.provider,
+                connection_method=self.connection_method,
+            )
+        if response.status_code == 429:
+            raise SocialAccountProviderError(
+                SocialAccountProviderErrorCode.rate_limited,
+                "YouTube API rate limit was reached",
+                provider=self.provider,
+                connection_method=self.connection_method,
+            )
+        if response.status_code >= 500:
+            raise SocialAccountProviderError(
+                SocialAccountProviderErrorCode.provider_unavailable,
+                "YouTube provider is temporarily unavailable",
+                provider=self.provider,
+                connection_method=self.connection_method,
+            )
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise SocialAccountProviderError(
+                SocialAccountProviderErrorCode.provider_unavailable,
+                "YouTube provider request failed",
+                provider=self.provider,
+                connection_method=self.connection_method,
+            ) from exc
+        return response
+
+    def _response_json(self, response: httpx.Response) -> Mapping[str, object]:
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise SocialAccountProviderError(
+                SocialAccountProviderErrorCode.malformed_provider_response,
+                "YouTube provider returned malformed JSON",
+                provider=self.provider,
+                connection_method=self.connection_method,
+            ) from exc
+        if not isinstance(body, Mapping):
+            raise SocialAccountProviderError(
+                SocialAccountProviderErrorCode.malformed_provider_response,
+                "YouTube provider returned an unexpected response",
+                provider=self.provider,
+                connection_method=self.connection_method,
+            )
+        return body
+
+
 class SocialAccountProviderRegistry:
     def __init__(
         self,
@@ -553,6 +1128,40 @@ def default_social_account_provider_registry() -> SocialAccountProviderRegistry:
     )
 
 
+def youtube_direct_provider_from_settings(
+    *,
+    client_id: str | None,
+    client_secret: str | None,
+    credential_store: CredentialStore | None = None,
+) -> YouTubeDirectSocialAccountConnectionProvider | None:
+    if not client_id or not client_secret:
+        return None
+    return YouTubeDirectSocialAccountConnectionProvider(
+        config=YouTubeDirectProviderConfig(
+            client_id=client_id,
+            client_secret=client_secret,
+        ),
+        credential_store=credential_store,
+    )
+
+
+def social_account_provider_registry_from_settings(
+    *,
+    youtube_client_id: str | None,
+    youtube_client_secret: str | None,
+    credential_store: CredentialStore | None = None,
+) -> SocialAccountProviderRegistry:
+    registry = default_social_account_provider_registry()
+    youtube = youtube_direct_provider_from_settings(
+        client_id=youtube_client_id,
+        client_secret=youtube_client_secret,
+        credential_store=credential_store,
+    )
+    if youtube is not None:
+        registry.register(youtube)
+    return registry
+
+
 def _coerce_provider_key(
     provider: SocialAccountProviderKey | str,
 ) -> SocialAccountProviderKey:
@@ -608,6 +1217,16 @@ def _validate_profile_url(value: str | None) -> str | None:
             "profile_url must be an absolute HTTP(S) URL without embedded credentials",
         )
     return normalized
+
+
+def _default_thumbnail_url(value: object) -> str | None:
+    if not isinstance(value, Mapping):
+        return None
+    default = value.get("default")
+    if not isinstance(default, Mapping):
+        return None
+    url = default.get("url")
+    return url if isinstance(url, str) and url.strip() else None
 
 
 provider_registry = default_social_account_provider_registry()
