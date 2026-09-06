@@ -685,9 +685,13 @@ async def _assert_no_reasonable_duplicate(
     values: Mapping[str, object],
 ) -> None:
     provider = values.get("provider")
+    connection_method = values.get("connection_method")
     username = values.get("username")
     external_account_id = values.get("external_account_id")
-    if not isinstance(provider, str):
+    if not isinstance(provider, str) or not isinstance(
+        connection_method,
+        SocialAccountConnectionMethod,
+    ):
         return
 
     if isinstance(username, str):
@@ -696,6 +700,7 @@ async def _assert_no_reasonable_duplicate(
                 session,
                 workspace_id,
                 provider=provider,
+                connection_method=connection_method,
                 username=username,
             )
         )
@@ -711,6 +716,7 @@ async def _assert_no_reasonable_duplicate(
                 session,
                 workspace_id,
                 provider=provider,
+                connection_method=connection_method,
                 external_account_id=external_account_id,
             )
         )

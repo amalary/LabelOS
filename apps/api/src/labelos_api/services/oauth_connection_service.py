@@ -196,13 +196,14 @@ async def complete_oauth_connection(
         identity,
         provider_metadata=_connection_metadata(exchange.provider_metadata),
     )
+    connection_method = SocialAccountConnectionMethod(payload.connection_method)
     values = {
         "provider": validation.identity.provider,
         "external_account_id": validation.identity.external_account_id,
         "username": validation.identity.username,
         "display_name": validation.identity.display_name,
         "profile_url": validation.identity.profile_url,
-        "connection_method": payload.connection_method,
+        "connection_method": connection_method,
         "status": status,
         "capabilities": adapter.normalize_capabilities(capabilities),
         "credential_ref": credential_ref,
@@ -259,14 +260,20 @@ async def _create_or_update_connection(
     actor: CurrentUserContext,
 ) -> tuple[SocialAccountConnection, bool]:
     provider = values["provider"]
+    connection_method = values["connection_method"]
     external_account_id = values.get("external_account_id")
     existing = None
-    if isinstance(provider, str) and isinstance(external_account_id, str):
+    if (
+        isinstance(provider, str)
+        and isinstance(connection_method, SocialAccountConnectionMethod)
+        and isinstance(external_account_id, str)
+    ):
         existing = (
             await social_accounts.find_active_connection_by_provider_external_account(
                 session,
                 workspace_id,
                 provider=provider,
+                connection_method=connection_method,
                 external_account_id=external_account_id,
             )
         )

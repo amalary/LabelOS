@@ -14,6 +14,8 @@ from labelos_api.services.credential_store import (
 )
 from labelos_api.social_accounts.providers import (
     AssistedSocialAccountConnectionProvider,
+    FakeOAuthSocialAccountConnectionProvider,
+    FakeThirdPartySocialAccountConnectionProvider,
     SocialAccountConnectionProvider,
     SocialAccountHealth,
     SocialAccountIdentity,
@@ -65,14 +67,17 @@ def test_provider_registry_registers_and_resolves_by_provider_and_method() -> No
     assisted = AssistedSocialAccountConnectionProvider(
         SocialAccountProviderKey.instagram
     )
-    direct = FakeDirectInstagramProvider()
-    registry = SocialAccountProviderRegistry([assisted, direct])
+    direct = FakeOAuthSocialAccountConnectionProvider()
+    third_party = FakeThirdPartySocialAccountConnectionProvider()
+    registry = SocialAccountProviderRegistry([assisted, direct, third_party])
 
     assert registry.resolve("instagram", "assisted") is assisted
     assert registry.resolve("Instagram", "direct_api") is direct
+    assert registry.resolve("instagram", "third_party") is third_party
     assert registry.supported_connection_methods("instagram") == (
         SocialAccountConnectionMethod.assisted,
         SocialAccountConnectionMethod.direct_api,
+        SocialAccountConnectionMethod.third_party,
     )
 
 
@@ -102,6 +107,75 @@ def test_default_registry_exposes_safe_provider_keys_without_direct_api_support(
             exc_info.value.code
             == SocialAccountProviderErrorCode.unsupported_connection_method
         )
+        with pytest.raises(SocialAccountProviderError) as third_party_exc_info:
+            registry.resolve(provider, SocialAccountConnectionMethod.third_party)
+        assert (
+            third_party_exc_info.value.code
+            == SocialAccountProviderErrorCode.unsupported_connection_method
+        )
+
+
+def test_fake_third_party_provider_normalizes_identity_capabilities_and_metadata() -> (
+    None
+):
+    adapter = FakeThirdPartySocialAccountConnectionProvider("Instagram")
+
+    async def run() -> dict[str, object]:
+        authorization = await adapter.build_authorization_request(
+            redirect_uri="https://labelos.test/social/callback",
+            state="third-party-state",
+            scopes=["publish", "post_metrics"],
+        )
+        exchange = await adapter.complete_oauth_exchange(
+            code="success",
+            redirect_uri="https://labelos.test/social/callback",
+            provider_metadata={"third_party": {"region": "test"}},
+        )
+        identity = await adapter.retrieve_account_identity(
+            credential_ref="memory://credentials/fake",
+            provider_metadata=exchange.provider_metadata,
+        )
+        validation = adapter.validate_account_input(
+            identity,
+            provider_metadata=exchange.provider_metadata,
+        )
+        return {
+            "authorization_url": authorization.authorization_url,
+            "authorization_scopes": authorization.scopes,
+            "capabilities": adapter.capabilities_for_scopes(exchange.granted_scopes),
+            "identity": validation.identity,
+            "metadata": validation.provider_metadata,
+            "health": await adapter.check_connection_health(
+                credential_ref="memory://credentials/fake",
+                provider_metadata=validation.provider_metadata,
+            ),
+        }
+
+    result = asyncio.run(run())
+    assert result["authorization_url"].startswith(
+        "https://fake-third-party.labelos.test/connect?"
+    )
+    assert result["authorization_scopes"] == ("publish", "post_metrics")
+    assert result["capabilities"] == [
+        "content_publish",
+        "account_analytics_read",
+        "post_analytics_read",
+    ]
+    assert result["identity"] == SocialAccountIdentity(
+        provider="instagram",
+        external_account_id="instagram-third-party-success",
+        username="third_party_success",
+        display_name="Fake Third-Party Account",
+        profile_url="https://fake-third-party.labelos.test/instagram/success",
+    )
+    assert result["metadata"]["third_party"] == {
+        "adapter_key": "fake_test",
+        "external_integration_account_id": "fake-integration-success",
+        "external_connection_id": "fake-connection-success",
+    }
+    assert result["metadata"]["external_account_id"] == "instagram-third-party-success"
+    assert result["health"].healthy is True
+    assert result["health"].status == "connected"
 
 
 def test_configured_registry_exposes_youtube_direct_provider() -> None:

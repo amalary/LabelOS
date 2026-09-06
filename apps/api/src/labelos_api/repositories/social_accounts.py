@@ -6,6 +6,7 @@ from labelos_database.models import (
     Artist,
     ArtistProfile,
     SocialAccountConnection,
+    SocialAccountConnectionMethod,
     SocialAccountConnectionStatus,
     UniversalProfile,
     WorkspaceMembership,
@@ -125,6 +126,7 @@ async def find_active_connection_by_provider_username(
     workspace_id: UUID,
     *,
     provider: str,
+    connection_method: SocialAccountConnectionMethod,
     username: str,
 ) -> SocialAccountConnection | None:
     return await session.scalar(
@@ -132,10 +134,10 @@ async def find_active_connection_by_provider_username(
         .options(*_connection_load_options())
         .where(SocialAccountConnection.organization_id == workspace_id)
         .where(SocialAccountConnection.provider == provider)
+        .where(SocialAccountConnection.connection_method == connection_method)
         .where(SocialAccountConnection.username == username)
         .where(
-            SocialAccountConnection.status
-            != SocialAccountConnectionStatus.disconnected
+            SocialAccountConnection.status != SocialAccountConnectionStatus.disconnected
         )
         .order_by(
             SocialAccountConnection.updated_at.desc(),
@@ -151,6 +153,7 @@ async def find_active_connection_by_provider_external_account(
     workspace_id: UUID,
     *,
     provider: str,
+    connection_method: SocialAccountConnectionMethod,
     external_account_id: str,
 ) -> SocialAccountConnection | None:
     return await session.scalar(
@@ -158,10 +161,10 @@ async def find_active_connection_by_provider_external_account(
         .options(*_connection_load_options())
         .where(SocialAccountConnection.organization_id == workspace_id)
         .where(SocialAccountConnection.provider == provider)
+        .where(SocialAccountConnection.connection_method == connection_method)
         .where(SocialAccountConnection.external_account_id == external_account_id)
         .where(
-            SocialAccountConnection.status
-            != SocialAccountConnectionStatus.disconnected
+            SocialAccountConnection.status != SocialAccountConnectionStatus.disconnected
         )
         .order_by(
             SocialAccountConnection.updated_at.desc(),

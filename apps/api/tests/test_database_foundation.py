@@ -1982,6 +1982,12 @@ def test_social_account_connections_enforce_external_account_uniqueness() -> Non
                     provider="tiktok",
                     external_account_id="ig_123",
                 ),
+                SocialAccountConnection(
+                    organization=first_org,
+                    provider="instagram",
+                    external_account_id="ig_123",
+                    connection_method=SocialAccountConnectionMethod.direct_api,
+                ),
             ]
         )
         session.commit()
@@ -2142,6 +2148,11 @@ def test_social_account_connection_schema_indexes_and_migration_contract() -> No
         / "packages/database/alembic/versions"
         / "202609051900_social_account_connections.py"
     ).read_text()
+    identity_migration = (
+        REPO_ROOT
+        / "packages/database/alembic/versions"
+        / "202609061500_social_account_connection_method_identity.py"
+    ).read_text()
 
     assert column_names == {
         "id",
@@ -2176,6 +2187,12 @@ def test_social_account_connection_schema_indexes_and_migration_contract() -> No
         "uq_social_account_connections_org_provider_external",
     }
     assert unique_index.unique is True
+    assert [column.name for column in unique_index.columns] == [
+        "organization_id",
+        "provider",
+        "connection_method",
+        "external_account_id",
+    ]
     assert unique_index.dialect_options["sqlite"]["where"] is not None
     assert unique_index.dialect_options["postgresql"]["where"] is not None
     assert foreign_key_deletions == {
@@ -2185,8 +2202,11 @@ def test_social_account_connection_schema_indexes_and_migration_contract() -> No
         "created_by_profile_id": "SET NULL",
     }
     assert 'down_revision: str | None = "202609031500"' in migration
+    assert 'down_revision: str | None = "202609061300"' in identity_migration
     assert "external_account_id IS NOT NULL" in migration
+    assert '"connection_method"' in identity_migration
     assert "status != 'disconnected'" in migration
+    assert "status != 'disconnected'" in identity_migration
     assert '"access_token"' not in migration
     assert '"refresh_token"' not in migration
     assert '"provider_password"' not in migration

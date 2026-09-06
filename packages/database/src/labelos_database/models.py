@@ -1839,6 +1839,7 @@ class SocialAccountConnection(Base, TimestampMixin, OrganizationOwnedMixin):
             "uq_social_account_connections_org_provider_external",
             "organization_id",
             "provider",
+            "connection_method",
             "external_account_id",
             unique=True,
             postgresql_where=(

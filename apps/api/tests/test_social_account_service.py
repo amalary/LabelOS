@@ -12,6 +12,7 @@ from labelos_database.models import (
     Organization,
     OrganizationMembership,
     RealtimeEvent,
+    SocialAccountConnectionMethod,
     SocialAccountConnectionStatus,
     UniversalProfile,
     User,
@@ -49,7 +50,14 @@ from labelos_api.services.social_account_service import (
     transition_status,
     update_connection,
 )
-from labelos_api.social_accounts.providers import SocialAccountProviderError
+from labelos_api.social_accounts.providers import (
+    AssistedSocialAccountConnectionProvider,
+    FakeOAuthSocialAccountConnectionProvider,
+    FakeThirdPartySocialAccountConnectionProvider,
+    SocialAccountProviderError,
+    SocialAccountProviderKey,
+    SocialAccountProviderRegistry,
+)
 
 
 @pytest.fixture
@@ -701,6 +709,108 @@ def test_assisted_connection_disconnect_and_health_semantics(
     assert result["disconnected"] == SocialAccountConnectionStatus.disconnected
     assert result["disconnected_health_healthy"] is False
     assert result["disconnected_health_status"] == "disconnected"
+
+
+def test_instagram_connections_are_distinct_by_connection_method(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = SocialAccountProviderRegistry(
+        [
+            AssistedSocialAccountConnectionProvider(SocialAccountProviderKey.instagram),
+            FakeOAuthSocialAccountConnectionProvider(),
+            FakeThirdPartySocialAccountConnectionProvider(),
+        ]
+    )
+    monkeypatch.setattr(
+        "labelos_api.social_accounts.providers.provider_registry",
+        registry,
+    )
+
+    async def run() -> dict[str, object]:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            assert isinstance(workspace, Organization)
+
+            assisted = await register_assisted_connection(
+                session,
+                workspace.id,
+                SocialAccountConnectionCreate(
+                    provider="instagram",
+                    external_account_id="ig_same_account",
+                    username="@artist",
+                ),
+            )
+            direct_api = await create_connection(
+                session,
+                workspace.id,
+                SocialAccountConnectionCreate(
+                    provider="instagram",
+                    external_account_id="ig_same_account",
+                    username="@artist",
+                    connection_method=SocialAccountConnectionMethod.direct_api,
+                    status=SocialAccountConnectionStatus.connected,
+                ),
+            )
+            third_party = await create_connection(
+                session,
+                workspace.id,
+                SocialAccountConnectionCreate(
+                    provider="instagram",
+                    external_account_id="ig_same_account",
+                    username="@artist",
+                    connection_method=SocialAccountConnectionMethod.third_party,
+                    status=SocialAccountConnectionStatus.connected,
+                    provider_metadata={
+                        "third_party": {
+                            "external_integration_account_id": "vendor-account-1",
+                            "external_connection_id": "vendor-connection-1",
+                        }
+                    },
+                ),
+            )
+            page = await list_connections(
+                session,
+                workspace.id,
+                query=SocialAccountConnectionQuery(provider="instagram"),
+            )
+            return {
+                "total": page.total,
+                "methods": sorted(
+                    connection.connection_method.value for connection in page.items
+                ),
+                "providers": {connection.provider for connection in page.items},
+                "external_ids": {
+                    connection.external_account_id for connection in page.items
+                },
+                "third_party_metadata": third_party.provider_metadata,
+                "assisted_capabilities": assisted.capabilities,
+                "direct_capabilities": direct_api.capabilities,
+                "third_party_capabilities": third_party.capabilities,
+            }
+
+    result = asyncio.run(run())
+    assert result["total"] == 3
+    assert result["methods"] == ["assisted", "direct_api", "third_party"]
+    assert result["providers"] == {"instagram"}
+    assert result["external_ids"] == {"ig_same_account"}
+    assert result["assisted_capabilities"] == ["manual_publish"]
+    assert result["direct_capabilities"] == [
+        "content_publish",
+        "account_analytics_read",
+        "post_analytics_read",
+    ]
+    assert result["third_party_capabilities"] == [
+        "content_publish",
+        "account_analytics_read",
+        "post_analytics_read",
+    ]
+    assert result["third_party_metadata"]["third_party"] == {
+        "adapter_key": "fake_test",
+        "external_integration_account_id": "vendor-account-1",
+        "external_connection_id": "vendor-connection-1",
+    }
 
 
 def test_social_account_status_transition_publishes_health_changed_event(

@@ -460,6 +460,283 @@ class FakeOAuthSocialAccountConnectionProvider(SocialAccountConnectionProvider):
         )
 
 
+class ThirdPartySocialAccountConnectionProvider(SocialAccountConnectionProvider):
+    """Vendor-neutral boundary for social integration service account links.
+
+    The canonical SocialAccountConnection fields remain provider/account-centric:
+    provider, connection_method, capabilities, identity, and status. Integration
+    service identifiers are adapter-owned metadata and must stay out of draft
+    posts, calendars, scheduling code, and other downstream domain surfaces.
+    """
+
+    connection_method = SocialAccountConnectionMethod.third_party
+
+    _allowed_capabilities = frozenset(
+        {
+            "content_publish",
+            "account_analytics_read",
+            "post_analytics_read",
+        }
+    )
+
+    def __init__(
+        self,
+        provider: SocialAccountProviderKey | str,
+        *,
+        adapter_key: str,
+    ) -> None:
+        self.provider = SocialAccountProviderKey(canonical_provider_key(provider))
+        self.adapter_key = _required_adapter_key(adapter_key)
+
+    def supported_connection_methods(self) -> tuple[SocialAccountConnectionMethod, ...]:
+        return (SocialAccountConnectionMethod.third_party,)
+
+    def default_capabilities(self) -> tuple[str, ...]:
+        return (
+            "content_publish",
+            "account_analytics_read",
+            "post_analytics_read",
+        )
+
+    def normalize_account_identity(
+        self,
+        identity: SocialAccountIdentity,
+    ) -> SocialAccountIdentity:
+        normalized = super().normalize_account_identity(identity)
+        if normalized.provider != self.provider.value:
+            raise SocialAccountProviderError(
+                SocialAccountProviderErrorCode.malformed_provider_response,
+                "Third-party adapter returned a mismatched social account provider",
+                provider=self.provider,
+                connection_method=self.connection_method,
+            )
+        return SocialAccountIdentity(
+            provider=normalized.provider,
+            external_account_id=_optional_text(normalized.external_account_id),
+            username=_normalize_handle(normalized.username),
+            display_name=normalized.display_name,
+            profile_url=_validate_profile_url(normalized.profile_url),
+        )
+
+    def validate_account_input(
+        self,
+        identity: SocialAccountIdentity,
+        *,
+        provider_metadata: Mapping[str, object] | None = None,
+    ) -> SocialAccountValidationResult:
+        normalized = self.normalize_account_identity(identity)
+        if normalized.external_account_id is None:
+            raise SocialAccountProviderError(
+                SocialAccountProviderErrorCode.malformed_provider_response,
+                "Third-party social account identity requires external_account_id",
+                provider=self.provider,
+                connection_method=self.connection_method,
+            )
+        metadata = self._adapter_metadata(provider_metadata)
+        return SocialAccountValidationResult(
+            identity=normalized,
+            provider_metadata=metadata,
+        )
+
+    def normalize_capabilities(self, capabilities: Sequence[str] | None) -> list[str]:
+        normalized = super().normalize_capabilities(capabilities)
+        unsupported = [
+            capability
+            for capability in normalized
+            if capability not in self._allowed_capabilities
+        ]
+        if unsupported:
+            raise SocialAccountProviderError(
+                SocialAccountProviderErrorCode.malformed_provider_response,
+                "Third-party adapter returned unsupported social account capabilities",
+                provider=self.provider,
+                connection_method=self.connection_method,
+            )
+        return normalized
+
+    async def check_connection_health(
+        self,
+        *,
+        credential_ref: str | None,
+        token_expires_at: datetime | None = None,
+        provider_metadata: Mapping[str, object] | None = None,
+    ) -> SocialAccountHealth:
+        metadata = self._adapter_metadata(provider_metadata)
+        third_party = metadata["third_party"]
+        if isinstance(third_party, Mapping) and third_party.get("adapter_key"):
+            return SocialAccountHealth(healthy=True, status="connected")
+        return SocialAccountHealth(
+            healthy=False,
+            status="reconnect_required",
+            error_code=SocialAccountProviderErrorCode.credential_expired,
+            error_message="Third-party integration metadata is missing",
+        )
+
+    def _adapter_metadata(
+        self,
+        provider_metadata: Mapping[str, object] | None,
+    ) -> dict[str, object]:
+        metadata = dict(provider_metadata or {})
+        raw_third_party = metadata.get("third_party")
+        third_party = (
+            dict(raw_third_party) if isinstance(raw_third_party, Mapping) else {}
+        )
+        third_party["adapter_key"] = self.adapter_key
+        metadata["third_party"] = third_party
+        return metadata
+
+
+class FakeThirdPartySocialAccountConnectionProvider(
+    ThirdPartySocialAccountConnectionProvider
+):
+    """Deterministic test adapter for the future third-party integration path."""
+
+    _scope_capabilities = {
+        "publish": "content_publish",
+        "account_metrics": "account_analytics_read",
+        "post_metrics": "post_analytics_read",
+    }
+
+    def __init__(
+        self,
+        provider: SocialAccountProviderKey | str = SocialAccountProviderKey.instagram,
+    ) -> None:
+        super().__init__(provider, adapter_key="fake_test")
+
+    async def build_authorization_request(
+        self,
+        *,
+        redirect_uri: str,
+        state: str,
+        scopes: Sequence[str] = (),
+        provider_metadata: Mapping[str, object] | None = None,
+    ) -> SocialAccountAuthorizationRequest:
+        requested_scopes = tuple(scopes or self._scope_capabilities.keys())
+        return SocialAccountAuthorizationRequest(
+            authorization_url=(
+                "https://fake-third-party.labelos.test/connect?"
+                + urlencode(
+                    {
+                        "response_type": "code",
+                        "adapter": self.adapter_key,
+                        "provider": self.provider.value,
+                        "redirect_uri": redirect_uri,
+                        "scope": " ".join(requested_scopes),
+                        "state": state,
+                    }
+                )
+            ),
+            state=state,
+            scopes=requested_scopes,
+            metadata={"third_party": {"adapter_key": self.adapter_key}},
+        )
+
+    async def complete_oauth_exchange(
+        self,
+        *,
+        code: str,
+        redirect_uri: str,
+        provider_metadata: Mapping[str, object] | None = None,
+    ) -> SocialAccountCredentialResult:
+        normalized_code = code.strip()
+        if not normalized_code:
+            raise SocialAccountProviderError(
+                SocialAccountProviderErrorCode.authorization_failed,
+                "Third-party authorization code is required",
+                provider=self.provider,
+                connection_method=self.connection_method,
+            )
+        if normalized_code == "third-party-denied":
+            raise SocialAccountProviderError(
+                SocialAccountProviderErrorCode.authorization_failed,
+                "Third-party authorization failed",
+                provider=self.provider,
+                connection_method=self.connection_method,
+            )
+        granted_scopes = (
+            ("publish",)
+            if normalized_code == "third-party-partial"
+            else ("publish", "account_metrics", "post_metrics")
+        )
+        account_key = normalized_code.replace("-", "_")
+        metadata = self._adapter_metadata(
+            {
+                **dict(provider_metadata or {}),
+                "external_account_id": (
+                    f"{self.provider.value}-third-party-{account_key}"
+                ),
+                "username": f"third_party_{account_key}",
+                "display_name": "Fake Third-Party Account",
+                "profile_url": (
+                    f"https://fake-third-party.labelos.test/"
+                    f"{self.provider.value}/{account_key}"
+                ),
+                "third_party": {
+                    "adapter_key": self.adapter_key,
+                    "external_integration_account_id": (
+                        f"fake-integration-{account_key}"
+                    ),
+                    "external_connection_id": f"fake-connection-{account_key}",
+                },
+            }
+        )
+        return SocialAccountCredentialResult(
+            credential_payload={
+                "access_token": f"fake-third-party-access-token:{normalized_code}",
+                "refresh_token": f"fake-third-party-refresh-token:{normalized_code}",
+                "token_type": "Bearer",
+            },
+            granted_scopes=granted_scopes,
+            provider_metadata=metadata,
+        )
+
+    async def retrieve_account_identity(
+        self,
+        *,
+        credential_ref: str | None,
+        provider_metadata: Mapping[str, object] | None = None,
+    ) -> SocialAccountIdentity:
+        metadata = dict(provider_metadata or {})
+        external_account_id = metadata.get("external_account_id")
+        if not isinstance(external_account_id, str) or not external_account_id.strip():
+            raise SocialAccountProviderError(
+                SocialAccountProviderErrorCode.malformed_provider_response,
+                "Third-party adapter account identity is malformed",
+                provider=self.provider,
+                connection_method=self.connection_method,
+            )
+        return self.normalize_account_identity(
+            SocialAccountIdentity(
+                provider=self.provider,
+                external_account_id=external_account_id,
+                username=(
+                    metadata.get("username")
+                    if isinstance(metadata.get("username"), str)
+                    else None
+                ),
+                display_name=(
+                    metadata.get("display_name")
+                    if isinstance(metadata.get("display_name"), str)
+                    else None
+                ),
+                profile_url=(
+                    metadata.get("profile_url")
+                    if isinstance(metadata.get("profile_url"), str)
+                    else None
+                ),
+            )
+        )
+
+    def capabilities_for_scopes(self, scopes: Sequence[str]) -> list[str]:
+        return self.normalize_capabilities(
+            [
+                capability
+                for scope in scopes
+                if (capability := self._scope_capabilities.get(scope.strip()))
+            ]
+        )
+
+
 @dataclass(frozen=True, kw_only=True)
 class YouTubeDirectProviderConfig:
     client_id: str
@@ -1183,6 +1460,13 @@ def _coerce_connection_method(
             "Unsupported social account connection method",
             connection_method=str(connection_method),
         ) from exc
+
+
+def _required_adapter_key(value: str) -> str:
+    normalized = value.strip().lower().replace("-", "_")
+    if not normalized:
+        raise ValueError("Third-party social account adapter_key is required")
+    return normalized
 
 
 def _optional_text(value: str | None) -> str | None:
