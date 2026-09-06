@@ -3,6 +3,7 @@ from typing import Annotated, Any, NoReturn
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import RedirectResponse
 from labelos_database.models import (
     SocialAccountConnection,
     SocialAccountConnectionStatus,
@@ -12,7 +13,19 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from sqlalchemy import select
 
 from labelos_api.auth import CurrentUserContext, SessionDep, get_current_user_context
-from labelos_api.services import social_account_service
+from labelos_api.config import Settings, get_settings
+from labelos_api.services import oauth_connection_service, social_account_service
+from labelos_api.services.credential_store import (
+    CredentialStore,
+    CredentialStoreError,
+    build_credential_store,
+)
+from labelos_api.services.oauth_connection_service import (
+    OAuthConnectionCallback,
+    OAuthConnectionError,
+    OAuthConnectionStart,
+)
+from labelos_api.services.oauth_state_service import OAuthStateError
 from labelos_api.services.social_account_service import (
     SocialAccountAuthorizationError,
     SocialAccountConnectionCreate,
@@ -23,7 +36,11 @@ from labelos_api.services.social_account_service import (
     SocialAccountNotFoundError,
     SocialAccountRelationshipError,
 )
-from labelos_api.social_accounts.providers import SocialAccountProviderError
+from labelos_api.social_accounts.providers import (
+    SocialAccountProviderError,
+    SocialAccountProviderRegistry,
+    provider_registry,
+)
 
 router = APIRouter(prefix="/workspaces", tags=["social-account-connections"])
 
@@ -127,6 +144,27 @@ class SocialAccountConnectionListResponse(BaseModel):
     offset: int
 
 
+class SocialAccountOAuthStartRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: str = Field(min_length=1, max_length=80)
+    redirect_uri: str = Field(min_length=1, max_length=2048)
+    safe_redirect_path: str = Field(
+        default="/workspace/settings?tab=connections",
+        min_length=1,
+        max_length=2048,
+    )
+    scopes: list[str] = Field(default_factory=list)
+    provider_metadata: dict[str, Any] | None = None
+
+
+class SocialAccountOAuthStartResponse(BaseModel):
+    authorization_url: str
+    state: str
+    expires_at: datetime
+    scopes: list[str]
+
+
 def _not_found() -> HTTPException:
     return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
 
@@ -141,6 +179,16 @@ def _bad_request(detail: str) -> HTTPException:
 
 def _conflict(detail: str) -> HTTPException:
     return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail)
+
+
+def get_social_account_provider_registry() -> SocialAccountProviderRegistry:
+    return provider_registry
+
+
+def get_credential_store_dependency(
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> CredentialStore:
+    return build_credential_store(settings)
 
 
 def _raise_capability_denial(reason: str) -> NoReturn:
@@ -298,6 +346,118 @@ def _list_response(page) -> SocialAccountConnectionListResponse:
         limit=page.limit,
         offset=page.offset,
     )
+
+
+@router.post(
+    "/{workspace_id}/social-account-connections/oauth/start",
+    response_model=SocialAccountOAuthStartResponse,
+)
+async def start_social_account_oauth_connection(
+    workspace_id: UUID,
+    payload: SocialAccountOAuthStartRequest,
+    session: SessionDep,
+    context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
+    credential_store: Annotated[
+        CredentialStore,
+        Depends(get_credential_store_dependency),
+    ],
+    registry: Annotated[
+        SocialAccountProviderRegistry,
+        Depends(get_social_account_provider_registry),
+    ],
+) -> SocialAccountOAuthStartResponse:
+    try:
+        result = await oauth_connection_service.start_oauth_connection(
+            session,
+            workspace_id,
+            OAuthConnectionStart(
+                provider=payload.provider,
+                redirect_uri=payload.redirect_uri,
+                safe_redirect_path=payload.safe_redirect_path,
+                scopes=payload.scopes,
+                provider_metadata=payload.provider_metadata,
+            ),
+            actor=context,
+            credential_store=credential_store,
+            provider_registry=registry,
+        )
+    except (
+        SocialAccountAuthorizationError,
+        SocialAccountDuplicateError,
+        SocialAccountRelationshipError,
+    ) as exc:
+        _service_error(exc)
+    except (OAuthStateError, SocialAccountProviderError) as exc:
+        raise _bad_request(str(exc)) from exc
+    return SocialAccountOAuthStartResponse(
+        authorization_url=result.authorization_url,
+        state=result.state,
+        expires_at=result.expires_at,
+        scopes=list(result.scopes),
+    )
+
+
+@router.get("/{workspace_id}/social-account-connections/oauth/{provider}/callback")
+async def complete_social_account_oauth_connection(
+    workspace_id: UUID,
+    provider: str,
+    session: SessionDep,
+    context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
+    credential_store: Annotated[
+        CredentialStore,
+        Depends(get_credential_store_dependency),
+    ],
+    registry: Annotated[
+        SocialAccountProviderRegistry,
+        Depends(get_social_account_provider_registry),
+    ],
+    state: str | None = None,
+    code: str | None = None,
+    error: str | None = None,
+    redirect_uri: str = "http://localhost/api/v1/oauth/callback",
+) -> RedirectResponse:
+    redirect_path = "/workspace/settings?tab=connections&oauth=failed"
+    try:
+        result = await oauth_connection_service.complete_oauth_connection(
+            session,
+            workspace_id,
+            OAuthConnectionCallback(
+                provider=provider,
+                redirect_uri=redirect_uri,
+                state=state,
+                code=code,
+                error=error,
+            ),
+            actor=context,
+            credential_store=credential_store,
+            provider_registry=registry,
+        )
+        redirect_path = _oauth_redirect(result.safe_redirect_path, "connected")
+    except (
+        SocialAccountAuthorizationError,
+        SocialAccountDuplicateError,
+        SocialAccountRelationshipError,
+    ) as exc:
+        _service_error(exc)
+    except OAuthConnectionError as exc:
+        redirect_path = _oauth_failure_redirect(session, state, str(exc))
+    except (OAuthStateError, SocialAccountProviderError, CredentialStoreError) as exc:
+        redirect_path = _oauth_failure_redirect(session, state, str(exc))
+    return RedirectResponse(redirect_path, status_code=status.HTTP_303_SEE_OTHER)
+
+
+def _oauth_failure_redirect(
+    session: SessionDep,
+    state: str | None,
+    _detail: str,
+) -> str:
+    # Failure redirects intentionally carry only status, never provider tokens/codes.
+    return _oauth_redirect("/workspace/settings?tab=connections", "failed")
+
+
+def _oauth_redirect(path: str, status_value: str) -> str:
+    separator = "&" if "?" in path else "?"
+    return f"{path}{separator}oauth={status_value}"
 
 
 @router.get(

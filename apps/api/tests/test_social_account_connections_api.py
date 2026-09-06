@@ -13,6 +13,8 @@ from labelos_database.models import (
     Artist,
     ArtistProfile,
     MembershipRole,
+    OAuthAuthorizationState,
+    OAuthAuthorizationStateStatus,
     Organization,
     OrganizationMembership,
     RealtimeEvent,
@@ -28,6 +30,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
+from labelos_api.api.v1.social_account_connections import (
+    get_credential_store_dependency,
+    get_social_account_provider_registry,
+)
 from labelos_api.auth import (
     AuthenticatedPrincipal,
     CurrentUserContext,
@@ -36,6 +42,11 @@ from labelos_api.auth import (
     get_session,
 )
 from labelos_api.main import create_app
+from labelos_api.services.credential_store import InMemoryCredentialStore
+from labelos_api.social_accounts.providers import (
+    FakeOAuthSocialAccountConnectionProvider,
+    SocialAccountProviderRegistry,
+)
 
 
 @dataclass(frozen=True)
@@ -276,6 +287,31 @@ def _outside_base(seeded: SeededSocialAccountConnectionsApi) -> str:
     )
 
 
+def _oauth_start_base(seeded: SeededSocialAccountConnectionsApi) -> str:
+    return f"{_base(seeded)}/oauth/start"
+
+
+def _oauth_callback_base(seeded: SeededSocialAccountConnectionsApi) -> str:
+    return f"{_base(seeded)}/oauth/instagram/callback"
+
+
+def _install_fake_oauth(
+    client: TestClient,
+    store: InMemoryCredentialStore | None = None,
+) -> InMemoryCredentialStore:
+    credential_store = store or InMemoryCredentialStore()
+    registry = SocialAccountProviderRegistry(
+        [FakeOAuthSocialAccountConnectionProvider()]
+    )
+    client.app.dependency_overrides[get_credential_store_dependency] = (
+        lambda: credential_store
+    )
+    client.app.dependency_overrides[get_social_account_provider_registry] = (
+        lambda: registry
+    )
+    return credential_store
+
+
 async def _realtime_events(
     sessionmaker: async_sessionmaker[AsyncSession],
     organization_id: UUID,
@@ -286,6 +322,27 @@ async def _realtime_events(
             .where(RealtimeEvent.organization_id == organization_id)
             .order_by(RealtimeEvent.created_at.asc(), RealtimeEvent.id.asc())
         )
+    return list(rows.all())
+
+
+async def _state_statuses(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> list[OAuthAuthorizationStateStatus]:
+    async with sessionmaker() as session:
+        rows = await session.scalars(
+            select(OAuthAuthorizationState).order_by(
+                OAuthAuthorizationState.created_at.asc(),
+                OAuthAuthorizationState.id.asc(),
+            )
+        )
+        return [row.status for row in rows.all()]
+
+
+async def _social_connections(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> list[SocialAccountConnection]:
+    async with sessionmaker() as session:
+        rows = await session.scalars(select(SocialAccountConnection))
         return list(rows.all())
 
 
@@ -745,6 +802,293 @@ def test_social_account_connection_safe_serialization(
     assert body["token_expires_at"] is not None
 
 
+def test_social_account_oauth_start_builds_provider_authorization_url(
+    social_account_connections_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededSocialAccountConnectionsApi,
+    ],
+) -> None:
+    client, sessionmaker, seeded = social_account_connections_client
+    _install_fake_oauth(client)
+    _set_context(client, seeded)
+
+    response = client.post(
+        _oauth_start_base(seeded),
+        json={
+            "provider": "instagram",
+            "redirect_uri": "https://labelos.test/oauth/callback",
+            "safe_redirect_path": "/workspace/settings?tab=connections",
+            "scopes": ["publish", "account_metrics"],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["authorization_url"].startswith(
+        "https://fake-oauth.labelos.test/authorize?"
+    )
+    assert "state=" in body["authorization_url"]
+    assert "fake-access-token" not in body["authorization_url"]
+    assert body["scopes"] == ["publish", "account_metrics"]
+    assert asyncio.run(_state_statuses(sessionmaker)) == [
+        OAuthAuthorizationStateStatus.pending
+    ]
+
+
+def test_social_account_oauth_callback_stores_credentials_and_connects_account(
+    social_account_connections_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededSocialAccountConnectionsApi,
+    ],
+) -> None:
+    client, sessionmaker, seeded = social_account_connections_client
+    store = _install_fake_oauth(client)
+    _set_context(client, seeded)
+    started = client.post(
+        _oauth_start_base(seeded),
+        json={
+            "provider": "instagram",
+            "redirect_uri": "https://labelos.test/oauth/callback",
+            "safe_redirect_path": "/workspace/settings?tab=connections",
+        },
+    ).json()
+
+    response = client.get(
+        _oauth_callback_base(seeded),
+        params={
+            "state": started["state"],
+            "code": "success",
+            "redirect_uri": "https://labelos.test/oauth/callback",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"].endswith("&oauth=connected")
+    rows = asyncio.run(_social_connections(sessionmaker))
+    assert len(rows) == 1
+    connection = rows[0]
+    assert connection.status == SocialAccountConnectionStatus.connected
+    assert connection.connection_method == SocialAccountConnectionMethod.direct_api
+    assert connection.external_account_id == "fake-account-success"
+    assert connection.capabilities == [
+        "content_publish",
+        "account_analytics_read",
+        "post_analytics_read",
+    ]
+    assert connection.credential_ref is not None
+    assert (asyncio.run(store.get(connection.credential_ref))).expose()[
+        "access_token"
+    ] == "fake-access-token:success"
+    persisted = json.dumps(
+        {
+            "provider_metadata": connection.provider_metadata,
+            "credential_ref": connection.credential_ref,
+            "external_account_id": connection.external_account_id,
+        },
+        default=str,
+    )
+    assert "fake-access-token" not in persisted
+    assert "fake-refresh-token" not in persisted
+    assert asyncio.run(_state_statuses(sessionmaker)) == [
+        OAuthAuthorizationStateStatus.consumed
+    ]
+
+
+def test_social_account_oauth_callback_partial_scopes_creates_limited_connection(
+    social_account_connections_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededSocialAccountConnectionsApi,
+    ],
+) -> None:
+    client, sessionmaker, seeded = social_account_connections_client
+    _install_fake_oauth(client)
+    _set_context(client, seeded)
+    state = client.post(
+        _oauth_start_base(seeded),
+        json={
+            "provider": "instagram",
+            "redirect_uri": "https://labelos.test/oauth/callback",
+        },
+    ).json()["state"]
+
+    response = client.get(
+        _oauth_callback_base(seeded),
+        params={"state": state, "code": "partial-scopes"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    connection = asyncio.run(_social_connections(sessionmaker))[0]
+    assert connection.status == SocialAccountConnectionStatus.limited
+    assert connection.capabilities == ["content_publish"]
+
+
+@pytest.mark.parametrize(
+    ("params", "expected_state"),
+    [
+        ({"error": "access_denied"}, OAuthAuthorizationStateStatus.consumed),
+        ({"code": "exchange-fails"}, OAuthAuthorizationStateStatus.consumed),
+        ({"code": "malformed"}, OAuthAuthorizationStateStatus.consumed),
+    ],
+)
+def test_social_account_oauth_callback_failures_do_not_connect_accounts(
+    social_account_connections_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededSocialAccountConnectionsApi,
+    ],
+    params: dict[str, str],
+    expected_state: OAuthAuthorizationStateStatus,
+) -> None:
+    client, sessionmaker, seeded = social_account_connections_client
+    _install_fake_oauth(client)
+    _set_context(client, seeded)
+    state = client.post(
+        _oauth_start_base(seeded),
+        json={
+            "provider": "instagram",
+            "redirect_uri": "https://labelos.test/oauth/callback",
+        },
+    ).json()["state"]
+
+    response = client.get(
+        _oauth_callback_base(seeded),
+        params={"state": state, **params},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == (
+        "/workspace/settings?tab=connections&oauth=failed"
+    )
+    assert asyncio.run(_social_connections(sessionmaker)) == []
+    assert asyncio.run(_state_statuses(sessionmaker)) == [expected_state]
+    payload = json.dumps(dict(response.headers))
+    assert "fake-access-token" not in payload
+    assert "fake-refresh-token" not in payload
+
+
+def test_social_account_oauth_credential_store_failure_does_not_connect_account(
+    social_account_connections_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededSocialAccountConnectionsApi,
+    ],
+) -> None:
+    client, sessionmaker, seeded = social_account_connections_client
+    store = _install_fake_oauth(client)
+    _set_context(client, seeded)
+    state = client.post(
+        _oauth_start_base(seeded),
+        json={
+            "provider": "instagram",
+            "redirect_uri": "https://labelos.test/oauth/callback",
+        },
+    ).json()["state"]
+    store.fail_operations.add("put")
+
+    response = client.get(
+        _oauth_callback_base(seeded),
+        params={"state": state, "code": "success"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert asyncio.run(_social_connections(sessionmaker)) == []
+    assert asyncio.run(_state_statuses(sessionmaker)) == [
+        OAuthAuthorizationStateStatus.consumed
+    ]
+
+
+def test_social_account_oauth_state_replay_workspace_mismatch_and_actor_denials(
+    social_account_connections_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededSocialAccountConnectionsApi,
+    ],
+) -> None:
+    client, sessionmaker, seeded = social_account_connections_client
+    _install_fake_oauth(client)
+    _set_context(client, seeded)
+    state = client.post(
+        _oauth_start_base(seeded),
+        json={
+            "provider": "instagram",
+            "redirect_uri": "https://labelos.test/oauth/callback",
+        },
+    ).json()["state"]
+    first = client.get(
+        _oauth_callback_base(seeded),
+        params={"state": state, "code": "success"},
+        follow_redirects=False,
+    )
+    replay = client.get(
+        _oauth_callback_base(seeded),
+        params={"state": state, "code": "success"},
+        follow_redirects=False,
+    )
+
+    _set_context(client, seeded)
+    mismatch_state = client.post(
+        _oauth_start_base(seeded),
+        json={
+            "provider": "instagram",
+            "redirect_uri": "https://labelos.test/oauth/callback",
+        },
+    ).json()["state"]
+    _set_context(
+        client,
+        seeded,
+        user_id=seeded.outside_user_id,
+        email="social-outside@example.com",
+        workspace_id=seeded.outside_workspace_id,
+        workos_organization_id="org_BETA_SOCIAL_API",
+        workspace_permission=WorkspacePermission.owner,
+    )
+    workspace_mismatch = client.get(
+        f"{_outside_base(seeded)}/oauth/instagram/callback",
+        params={"state": mismatch_state, "code": "success"},
+        follow_redirects=False,
+    )
+
+    _set_context(
+        client,
+        seeded,
+        user_id=seeded.viewer_user_id,
+        email="social-viewer@example.com",
+        workspace_permission=WorkspacePermission.guest,
+        capability_permissions=(Capability.marketing_account_view.value,),
+        department_access=("marketing",),
+    )
+    unauthorized_start = client.post(
+        _oauth_start_base(seeded),
+        json={
+            "provider": "instagram",
+            "redirect_uri": "https://labelos.test/oauth/callback",
+        },
+    )
+    unauthorized_callback = client.get(
+        _oauth_callback_base(seeded),
+        params={"state": mismatch_state, "code": "success"},
+        follow_redirects=False,
+    )
+
+    assert first.status_code == 303
+    assert replay.status_code == 303
+    assert workspace_mismatch.status_code == 303
+    assert unauthorized_start.status_code == 403
+    assert unauthorized_callback.status_code == 403
+    assert len(asyncio.run(_social_connections(sessionmaker))) == 1
+    assert asyncio.run(_state_statuses(sessionmaker)) == [
+        OAuthAuthorizationStateStatus.consumed,
+        OAuthAuthorizationStateStatus.pending,
+    ]
+
+
 def test_social_account_connection_openapi_contract_exposes_stable_routes(
     social_account_connections_client: tuple[
         TestClient,
@@ -758,6 +1102,14 @@ def test_social_account_connection_openapi_contract_exposes_stable_routes(
     paths = schema["paths"]
 
     assert "/api/v1/workspaces/{workspace_id}/social-account-connections" in paths
+    assert (
+        "/api/v1/workspaces/{workspace_id}/social-account-connections/oauth/start"
+        in paths
+    )
+    assert (
+        "/api/v1/workspaces/{workspace_id}/social-account-connections/oauth/{provider}/callback"
+        in paths
+    )
     assert (
         "/api/v1/workspaces/{workspace_id}/social-account-connections/{connection_id}"
         in paths

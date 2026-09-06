@@ -80,6 +80,7 @@ class SocialAccountAuthorizationRequest:
 @dataclass(frozen=True, kw_only=True)
 class SocialAccountCredentialResult:
     credential_ref: str | None = None
+    credential_payload: Mapping[str, object] | None = None
     token_expires_at: datetime | None = None
     granted_scopes: tuple[str, ...] = ()
     provider_metadata: dict[str, object] = field(default_factory=dict)
@@ -290,6 +291,164 @@ class AssistedSocialAccountConnectionProvider(SocialAccountConnectionProvider):
         provider_metadata: Mapping[str, object] | None = None,
     ) -> SocialAccountHealth:
         return SocialAccountHealth(healthy=True, status="assisted_action_required")
+
+
+class FakeOAuthSocialAccountConnectionProvider(SocialAccountConnectionProvider):
+    """Deterministic OAuth adapter for exercising the generic connection workflow."""
+
+    provider = SocialAccountProviderKey.instagram
+    connection_method = SocialAccountConnectionMethod.direct_api
+
+    _scope_capabilities = {
+        "publish": "content_publish",
+        "account_metrics": "account_analytics_read",
+        "post_metrics": "post_analytics_read",
+    }
+
+    def default_capabilities(self) -> tuple[str, ...]:
+        return (
+            "content_publish",
+            "account_analytics_read",
+            "post_analytics_read",
+        )
+
+    def normalize_capabilities(self, capabilities: Sequence[str] | None) -> list[str]:
+        normalized = super().normalize_capabilities(capabilities)
+        allowed = set(self._scope_capabilities.values())
+        unsupported = [
+            capability for capability in normalized if capability not in allowed
+        ]
+        if unsupported:
+            raise SocialAccountProviderError(
+                SocialAccountProviderErrorCode.malformed_provider_response,
+                "Provider returned unsupported social account capabilities",
+                provider=self.provider,
+                connection_method=self.connection_method,
+            )
+        return normalized
+
+    async def build_authorization_request(
+        self,
+        *,
+        redirect_uri: str,
+        state: str,
+        scopes: Sequence[str] = (),
+        provider_metadata: Mapping[str, object] | None = None,
+    ) -> SocialAccountAuthorizationRequest:
+        from urllib.parse import urlencode
+
+        requested_scopes = tuple(scopes or self._scope_capabilities.keys())
+        return SocialAccountAuthorizationRequest(
+            authorization_url=(
+                "https://fake-oauth.labelos.test/authorize?"
+                + urlencode(
+                    {
+                        "response_type": "code",
+                        "client_id": "labelos-fake-client",
+                        "redirect_uri": redirect_uri,
+                        "scope": " ".join(requested_scopes),
+                        "state": state,
+                    }
+                )
+            ),
+            state=state,
+            scopes=requested_scopes,
+        )
+
+    async def complete_oauth_exchange(
+        self,
+        *,
+        code: str,
+        redirect_uri: str,
+        provider_metadata: Mapping[str, object] | None = None,
+    ) -> SocialAccountCredentialResult:
+        normalized_code = code.strip()
+        if normalized_code == "exchange-fails":
+            raise SocialAccountProviderError(
+                SocialAccountProviderErrorCode.authorization_failed,
+                "OAuth authorization code exchange failed",
+                provider=self.provider,
+                connection_method=self.connection_method,
+            )
+        if normalized_code == "malformed":
+            return SocialAccountCredentialResult(
+                credential_payload={"access_token": "fake-access-token"},
+                granted_scopes=("publish",),
+                provider_metadata={"external_account_id": ""},
+            )
+        if not normalized_code:
+            raise SocialAccountProviderError(
+                SocialAccountProviderErrorCode.authorization_failed,
+                "OAuth authorization code is required",
+                provider=self.provider,
+                connection_method=self.connection_method,
+            )
+
+        granted_scopes = (
+            ("publish",)
+            if normalized_code == "partial-scopes"
+            else ("publish", "account_metrics", "post_metrics")
+        )
+        return SocialAccountCredentialResult(
+            credential_payload={
+                "access_token": f"fake-access-token:{normalized_code}",
+                "refresh_token": f"fake-refresh-token:{normalized_code}",
+                "token_type": "Bearer",
+            },
+            granted_scopes=granted_scopes,
+            provider_metadata={
+                "external_account_id": f"fake-account-{normalized_code}",
+                "username": f"fake_{normalized_code.replace('-', '_')}",
+                "display_name": "Fake OAuth Account",
+                "profile_url": f"https://fake-oauth.labelos.test/{normalized_code}",
+            },
+        )
+
+    async def retrieve_account_identity(
+        self,
+        *,
+        credential_ref: str | None,
+        provider_metadata: Mapping[str, object] | None = None,
+    ) -> SocialAccountIdentity:
+        metadata = dict(provider_metadata or {})
+        external_account_id = metadata.get("external_account_id")
+        if not isinstance(external_account_id, str) or not external_account_id.strip():
+            raise SocialAccountProviderError(
+                SocialAccountProviderErrorCode.malformed_provider_response,
+                "Provider account identity is malformed",
+                provider=self.provider,
+                connection_method=self.connection_method,
+            )
+        return self.normalize_account_identity(
+            SocialAccountIdentity(
+                provider=self.provider,
+                external_account_id=external_account_id,
+                username=(
+                    metadata.get("username")
+                    if isinstance(metadata.get("username"), str)
+                    else None
+                ),
+                display_name=(
+                    metadata.get("display_name")
+                    if isinstance(metadata.get("display_name"), str)
+                    else None
+                ),
+                profile_url=(
+                    metadata.get("profile_url")
+                    if isinstance(metadata.get("profile_url"), str)
+                    else None
+                ),
+            )
+        )
+
+    def capabilities_for_scopes(self, scopes: Sequence[str]) -> list[str]:
+        return self.normalize_capabilities(
+            [
+                capability
+                for scope in scopes
+                if (capability := self._scope_capabilities.get(scope.strip()))
+            ]
+        )
 
 
 class SocialAccountProviderRegistry:
