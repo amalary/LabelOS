@@ -146,6 +146,32 @@ async def find_active_connection_by_provider_username(
     )
 
 
+async def find_active_connection_by_provider_external_account(
+    session: AsyncSession,
+    workspace_id: UUID,
+    *,
+    provider: str,
+    external_account_id: str,
+) -> SocialAccountConnection | None:
+    return await session.scalar(
+        select(SocialAccountConnection)
+        .options(*_connection_load_options())
+        .where(SocialAccountConnection.organization_id == workspace_id)
+        .where(SocialAccountConnection.provider == provider)
+        .where(SocialAccountConnection.external_account_id == external_account_id)
+        .where(
+            SocialAccountConnection.status
+            != SocialAccountConnectionStatus.disconnected
+        )
+        .order_by(
+            SocialAccountConnection.updated_at.desc(),
+            SocialAccountConnection.created_at.desc(),
+            SocialAccountConnection.id.desc(),
+        )
+        .limit(1)
+    )
+
+
 async def update_connection(
     session: AsyncSession,
     workspace_id: UUID,

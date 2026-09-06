@@ -12,6 +12,10 @@ import {
   shouldInvalidateMarketingContentRealtimeCacheKey,
   useWorkspaceMarketingContent,
 } from "../marketing-content";
+import {
+  clearSocialAccountConnectionCache,
+  useSocialAccountConnections,
+} from "../social-account-connections";
 import { clearCampaignCalendarCache, useCampaignCalendar } from "../campaign-calendar";
 import { activityEventTypes, refetchEventTypes } from "./events";
 import {
@@ -117,6 +121,27 @@ function RealtimeMarketingContentProbe() {
   );
 }
 
+function RealtimeSocialAccountsProbe() {
+  const { recentActivityEvents } = useOrganizationRealtime("org_01");
+  const socialAccounts = useSocialAccountConnections("org_01", {
+    include_disconnected: true,
+    limit: 100,
+    offset: 0,
+  });
+  const otherWorkspaceSocialAccounts = useSocialAccountConnections("org_02", {
+    include_disconnected: true,
+    limit: 100,
+    offset: 0,
+  });
+  return (
+    <div>
+      <span>social:{socialAccounts.data?.total ?? "none"}</span>
+      <span>other-social:{otherWorkspaceSocialAccounts.data?.total ?? "none"}</span>
+      <span>{recentActivityEvents[0]?.type ?? "no activity"}</span>
+    </div>
+  );
+}
+
 function RealtimeApprovalProbe() {
   const { recentActivityEvents } = useOrganizationRealtime("org_01");
   const approvals = useApprovalQueue("org_01", { status: "in_review", limit: 25 });
@@ -215,6 +240,7 @@ describe("useOrganizationRealtime", () => {
     clearAnalyticsCache();
     clearCampaignCalendarCache();
     clearMarketingContentCache();
+    clearSocialAccountConnectionCache();
     navigation.refresh.mockReset();
     routeState.pathname = "/artists";
     FakeEventSource.instances = [];
@@ -396,6 +422,64 @@ describe("useOrganizationRealtime", () => {
     expect(refetchEventTypes.has("marketing.content.approved")).toBe(true);
     expect(refetchEventTypes.has("marketing.content.published")).toBe(true);
     expect(activityEventTypes.has("marketing.content.created")).toBe(true);
+  });
+
+  it("recognizes social account events as realtime refetch and activity events", () => {
+    expect(refetchEventTypes.has("marketing.social_account.connected")).toBe(true);
+    expect(refetchEventTypes.has("marketing.social_account.updated")).toBe(true);
+    expect(refetchEventTypes.has("marketing.social_account.disconnected")).toBe(true);
+    expect(refetchEventTypes.has("marketing.social_account.health_changed")).toBe(true);
+    expect(activityEventTypes.has("marketing.social_account.connected")).toBe(true);
+  });
+
+  it("invalidates social account cache for workspace scoped social account events", async () => {
+    routeState.pathname = "/marketing";
+    const workspaceFetchCounts = new Map<string, number>();
+    vi.mocked(fetch).mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      const workspaceId = url.includes("/workspaces/org_02/") ? "org_02" : "org_01";
+      const count = (workspaceFetchCounts.get(workspaceId) ?? 0) + 1;
+      workspaceFetchCounts.set(workspaceId, count);
+      return Promise.resolve(
+        Response.json({
+          social_account_connections: [],
+          total: count,
+          limit: 100,
+          offset: 0,
+        }),
+      );
+    });
+
+    render(<RealtimeSocialAccountsProbe />);
+    const source = FakeEventSource.instances[0]!;
+
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+    act(() => {
+      source.emit("message", {
+        id: "social_account_event_01",
+        type: "marketing.social_account.connected",
+        version: 1,
+        channel: "organization:org_01",
+        organization_id: "org_01",
+        entity_type: "social_account_connection",
+        entity_id: "connection_01",
+        operation_id: "operation_social_account_01",
+        actor: { user_id: "user_01", display_name: "Mara Chen" },
+        payload: {
+          action: "connected",
+          connectionId: "connection_01",
+          connectionMethod: "assisted",
+          provider: "instagram",
+          status: "connected",
+        },
+        created_at: new Date().toISOString(),
+      });
+    });
+
+    await waitFor(() => expect(workspaceFetchCounts.get("org_01")).toBe(2));
+    expect(workspaceFetchCounts.get("org_02")).toBe(1);
+    expect(navigation.refresh).not.toHaveBeenCalled();
+    expect(screen.getByText("marketing.social_account.connected")).toBeInTheDocument();
   });
 
   it("invalidates marketing content cache for workspace scoped content events", async () => {

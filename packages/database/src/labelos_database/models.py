@@ -1826,8 +1826,14 @@ class SocialAccountConnection(Base, TimestampMixin, OrganizationOwnedMixin):
             "provider",
             "external_account_id",
             unique=True,
-            postgresql_where=external_account_id.is_not(None),
-            sqlite_where=external_account_id.is_not(None),
+            postgresql_where=(
+                external_account_id.is_not(None)
+                & (status != SocialAccountConnectionStatus.disconnected)
+            ),
+            sqlite_where=(
+                external_account_id.is_not(None)
+                & (status != SocialAccountConnectionStatus.disconnected)
+            ),
         ),
     )
 

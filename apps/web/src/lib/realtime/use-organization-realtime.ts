@@ -23,6 +23,10 @@ import {
 } from "../marketing-content";
 import { invalidateProfileCache } from "../profiles";
 import {
+  invalidateSocialAccountConnectionCache,
+  shouldInvalidateSocialAccountConnectionRealtimeCacheKey,
+} from "../social-account-connections";
+import {
   invalidateWorkspaceCapabilityCache,
   shouldInvalidateWorkspaceCapabilityRealtimeCacheKey,
 } from "../workspace-capabilities";
@@ -64,6 +68,7 @@ const profileEventPrefix = "profile.";
 const campaignEventPrefix = "campaign.";
 const analyticsEventPrefix = "analytics.";
 const marketingContentEventPrefix = "marketing.content.";
+const marketingSocialAccountEventPrefix = "marketing.social_account.";
 const approvalEventPrefix = "approval.";
 const campaignCalendarEventTypes = new Set<RealtimeEventType>([
   "campaign.created",
@@ -334,6 +339,19 @@ export function useOrganizationRealtime(organizationId: string | null): Organiza
               }),
             );
           }
+          if (event.type.startsWith(marketingSocialAccountEventPrefix)) {
+            const connectionId =
+              typeof event.payload.connectionId === "string"
+                ? event.payload.connectionId
+                : event.entity_id;
+            invalidateSocialAccountConnectionCache((key) =>
+              shouldInvalidateSocialAccountConnectionRealtimeCacheKey({
+                connectionId,
+                key,
+                workspaceId: organizationId,
+              }),
+            );
+          }
           if (event.type.startsWith(approvalEventPrefix)) {
             handleApprovalRealtimeInvalidation({
               approvalRequestId:
@@ -380,6 +398,7 @@ export function useOrganizationRealtime(organizationId: string | null): Organiza
           const isMarketingContentWorkspaceRefresh =
             pathname.startsWith("/marketing") &&
             (event.type.startsWith(marketingContentEventPrefix) ||
+              event.type.startsWith(marketingSocialAccountEventPrefix) ||
               (event.type.startsWith(approvalEventPrefix) &&
                 (typeof event.payload.campaignId === "string" ||
                   typeof event.payload.contentItemId === "string")));

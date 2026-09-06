@@ -2032,6 +2032,44 @@ def test_social_account_connections_allow_nullable_external_account_ids() -> Non
     engine.dispose()
 
 
+def test_social_accounts_allow_external_replacement_after_disconnect() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    SocialAccountConnection.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        organization = Organization(
+            name="Disconnected External Label",
+            slug="disconnected-external-label",
+            owner=User(email="disconnected-external-owner@example.com"),
+        )
+        session.add(
+            SocialAccountConnection(
+                organization=organization,
+                provider="instagram",
+                external_account_id="ig_123",
+                status=SocialAccountConnectionStatus.disconnected,
+            )
+        )
+        session.commit()
+
+        replacement = SocialAccountConnection(
+            organization=organization,
+            provider="instagram",
+            external_account_id="ig_123",
+            status=SocialAccountConnectionStatus.connected,
+        )
+        session.add(replacement)
+        session.commit()
+
+        assert (
+            session.query(SocialAccountConnection)
+            .filter_by(organization_id=organization.id, provider="instagram")
+            .count()
+            == 2
+        )
+    engine.dispose()
+
+
 def test_social_account_connections_foreign_key_behavior() -> None:
     engine = create_engine("sqlite:///:memory:")
 
@@ -2145,6 +2183,7 @@ def test_social_account_connection_schema_indexes_and_migration_contract() -> No
     }
     assert 'down_revision: str | None = "202609031500"' in migration
     assert "external_account_id IS NOT NULL" in migration
+    assert "status != 'disconnected'" in migration
     assert '"access_token"' not in migration
     assert '"refresh_token"' not in migration
     assert '"provider_password"' not in migration

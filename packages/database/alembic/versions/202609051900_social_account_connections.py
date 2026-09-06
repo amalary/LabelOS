@@ -157,8 +157,12 @@ def upgrade() -> None:
         "social_account_connections",
         ["organization_id", "provider", "external_account_id"],
         unique=True,
-        postgresql_where=sa.text("external_account_id IS NOT NULL"),
-        sqlite_where=sa.text("external_account_id IS NOT NULL"),
+        postgresql_where=sa.text(
+            "external_account_id IS NOT NULL AND status != 'disconnected'"
+        ),
+        sqlite_where=sa.text(
+            "external_account_id IS NOT NULL AND status != 'disconnected'"
+        ),
     )
 
 

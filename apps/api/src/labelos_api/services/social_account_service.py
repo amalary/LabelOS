@@ -685,19 +685,39 @@ async def _assert_no_reasonable_duplicate(
 ) -> None:
     provider = values.get("provider")
     username = values.get("username")
-    if not isinstance(provider, str) or not isinstance(username, str):
+    external_account_id = values.get("external_account_id")
+    if not isinstance(provider, str):
         return
-    existing = await social_accounts.find_active_connection_by_provider_username(
-        session,
-        workspace_id,
-        provider=provider,
-        username=username,
-    )
-    if existing is not None:
-        raise SocialAccountDuplicateError(
-            "A social account connection with this provider and username already "
-            "exists in the workspace"
+
+    if isinstance(username, str):
+        existing_username = (
+            await social_accounts.find_active_connection_by_provider_username(
+                session,
+                workspace_id,
+                provider=provider,
+                username=username,
+            )
         )
+        if existing_username is not None:
+            raise SocialAccountDuplicateError(
+                "A social account connection with this provider and username already "
+                "exists in the workspace"
+            )
+
+    if isinstance(external_account_id, str):
+        existing_external = (
+            await social_accounts.find_active_connection_by_provider_external_account(
+                session,
+                workspace_id,
+                provider=provider,
+                external_account_id=external_account_id,
+            )
+        )
+        if existing_external is not None:
+            raise SocialAccountDuplicateError(
+                "A social account connection with this provider and external account "
+                "already exists in the workspace"
+            )
 
 
 async def _load_connection_for_workspace(

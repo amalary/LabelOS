@@ -544,6 +544,74 @@ def test_register_assisted_connection_detects_duplicates_by_workspace_provider_h
     assert result["replacement_id"] is not None
 
 
+def test_register_assisted_connection_blocks_external_duplicates(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async def run() -> dict[str, object]:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            other_workspace = data["other_workspace"]
+            assert isinstance(workspace, Organization)
+            assert isinstance(other_workspace, Organization)
+            workspace_id = workspace.id
+            other_workspace_id = other_workspace.id
+
+            first = await register_assisted_connection(
+                session,
+                workspace_id,
+                SocialAccountConnectionCreate(
+                    provider="instagram",
+                    external_account_id="ig_alpha",
+                    username="alpha",
+                ),
+            )
+            first_id = first.id
+            result: dict[str, object] = {"first_id": first_id}
+            try:
+                await register_assisted_connection(
+                    session,
+                    workspace_id,
+                    SocialAccountConnectionCreate(
+                        provider="Instagram",
+                        external_account_id="ig_alpha",
+                        username="alpha-alt",
+                    ),
+                )
+            except SocialAccountDuplicateError:
+                result["duplicate_blocked"] = True
+                await session.rollback()
+
+            other = await register_assisted_connection(
+                session,
+                other_workspace_id,
+                SocialAccountConnectionCreate(
+                    provider="instagram",
+                    external_account_id="ig_alpha",
+                    username="alpha",
+                ),
+            )
+            await disconnect_connection(session, workspace_id, first_id)
+            replacement = await register_assisted_connection(
+                session,
+                workspace_id,
+                SocialAccountConnectionCreate(
+                    provider="instagram",
+                    external_account_id="ig_alpha",
+                    username="alpha-replacement",
+                ),
+            )
+            result["other_workspace_id"] = other.id
+            result["replacement_id"] = replacement.id
+            return result
+
+    result = asyncio.run(run())
+    assert result["first_id"] is not None
+    assert result["duplicate_blocked"] is True
+    assert result["other_workspace_id"] is not None
+    assert result["replacement_id"] is not None
+
+
 def test_register_assisted_connection_enforces_manage_authorization(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:

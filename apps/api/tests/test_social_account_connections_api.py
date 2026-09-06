@@ -682,6 +682,15 @@ def test_social_account_connection_rejects_invalid_artist_duplicate_and_provider
     duplicate = client.post(base, json=_payload(seeded, handle=" duplicate "))
     assert duplicate.status_code == 409
 
+    external_duplicate = client.post(
+        base,
+        json={
+            **_payload(seeded, handle="unique-handle"),
+            "external_account_id": "ig-alpha-1",
+        },
+    )
+    assert external_duplicate.status_code == 409
+
 
 def test_social_account_connection_safe_serialization(
     social_account_connections_client: tuple[
