@@ -24,6 +24,9 @@ class Settings(DatabaseSettings):
     workos_jwks_url: str | None = None
     workos_audience: str | None = None
     workos_webhook_secret: str | None = None
+    credential_store_backend: str = "memory"
+    credential_store_gcp_project_id: str | None = None
+    credential_store_secret_prefix: str = "labelos-credential"
 
     @field_validator("allowed_frontend_origins", mode="before")
     @classmethod
@@ -73,6 +76,23 @@ class Settings(DatabaseSettings):
 
         _ = self.resolved_workos_jwks_url
 
+        if (
+            self.credential_store_backend.lower() == "gcp-secret-manager"
+            and not self.resolved_credential_store_gcp_project_id
+        ):
+            raise RuntimeError(
+                "GCP_PROJECT_ID or GOOGLE_CLOUD_PROJECT is required for the "
+                "GCP Secret Manager credential store"
+            )
+
+    @property
+    def resolved_credential_store_gcp_project_id(self) -> str | None:
+        return (
+            self.credential_store_gcp_project_id
+            or os.getenv("GOOGLE_CLOUD_PROJECT")
+            or os.getenv("GCP_PROJECT_ID")
+        )
+
 
 @lru_cache
 def get_settings() -> Settings:
@@ -96,4 +116,12 @@ def get_settings() -> Settings:
         workos_jwks_url=os.getenv("WORKOS_JWKS_URL") or None,
         workos_audience=os.getenv("WORKOS_AUDIENCE") or None,
         workos_webhook_secret=os.getenv("WORKOS_WEBHOOK_SECRET") or None,
+        credential_store_backend=os.getenv("CREDENTIAL_STORE_BACKEND", "memory"),
+        credential_store_gcp_project_id=(
+            os.getenv("CREDENTIAL_STORE_GCP_PROJECT_ID") or None
+        ),
+        credential_store_secret_prefix=os.getenv(
+            "CREDENTIAL_STORE_SECRET_PREFIX",
+            "labelos-credential",
+        ),
     )

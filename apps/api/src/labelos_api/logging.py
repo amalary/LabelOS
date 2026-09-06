@@ -27,6 +27,7 @@ _RESERVED_LOG_RECORD_KEYS = set(logging.makeLogRecord({}).__dict__)
 _SENSITIVE_KEY_PARTS = (
     "authorization",
     "cookie",
+    "credential",
     "password",
     "secret",
     "token",
