@@ -3,6 +3,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
+from urllib.parse import urlparse
 
 from labelos_database.models import SocialAccountConnectionMethod
 
@@ -244,12 +245,51 @@ class SocialAccountConnectionProvider(ABC):
 
 class AssistedSocialAccountConnectionProvider(SocialAccountConnectionProvider):
     connection_method = SocialAccountConnectionMethod.assisted
+    _allowed_capabilities = frozenset({"manual_publish"})
 
     def __init__(self, provider: SocialAccountProviderKey | str) -> None:
         self.provider = SocialAccountProviderKey(canonical_provider_key(provider))
 
     def default_capabilities(self) -> tuple[str, ...]:
         return ("manual_publish",)
+
+    def normalize_account_identity(
+        self,
+        identity: SocialAccountIdentity,
+    ) -> SocialAccountIdentity:
+        normalized = super().normalize_account_identity(identity)
+        return SocialAccountIdentity(
+            provider=normalized.provider,
+            external_account_id=normalized.external_account_id,
+            username=_normalize_handle(normalized.username),
+            display_name=normalized.display_name,
+            profile_url=_validate_profile_url(normalized.profile_url),
+        )
+
+    def normalize_capabilities(self, capabilities: Sequence[str] | None) -> list[str]:
+        normalized = super().normalize_capabilities(capabilities)
+        unsupported = [
+            capability
+            for capability in normalized
+            if capability not in self._allowed_capabilities
+        ]
+        if unsupported:
+            raise SocialAccountProviderError(
+                SocialAccountProviderErrorCode.unsupported_connection_method,
+                "Assisted social account connections only support manual publishing",
+                provider=self.provider,
+                connection_method=self.connection_method,
+            )
+        return normalized
+
+    async def check_connection_health(
+        self,
+        *,
+        credential_ref: str | None,
+        token_expires_at: datetime | None = None,
+        provider_metadata: Mapping[str, object] | None = None,
+    ) -> SocialAccountHealth:
+        return SocialAccountHealth(healthy=True, status="assisted_action_required")
 
 
 class SocialAccountProviderRegistry:
@@ -382,6 +422,33 @@ def _optional_text(value: str | None) -> str | None:
         return None
     normalized = value.strip()
     return normalized or None
+
+
+def _normalize_handle(value: str | None) -> str | None:
+    normalized = _optional_text(value)
+    if normalized is None:
+        return None
+    normalized = normalized.lstrip("@").strip().lower()
+    return normalized or None
+
+
+def _validate_profile_url(value: str | None) -> str | None:
+    normalized = _optional_text(value)
+    if normalized is None:
+        return None
+    parsed = urlparse(normalized)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        raise SocialAccountProviderError(
+            SocialAccountProviderErrorCode.malformed_provider_response,
+            "profile_url must be an absolute HTTP(S) URL without embedded credentials",
+        )
+    return normalized
 
 
 provider_registry = default_social_account_provider_registry()

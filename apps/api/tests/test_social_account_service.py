@@ -26,6 +26,7 @@ from labelos_api.services.social_account_service import (
     SocialAccountConnectionCreate,
     SocialAccountConnectionQuery,
     SocialAccountConnectionUpdate,
+    SocialAccountDuplicateError,
     SocialAccountLifecycleError,
     SocialAccountNotFoundError,
     SocialAccountRelationshipError,
@@ -33,16 +34,20 @@ from labelos_api.services.social_account_service import (
     can_auto_publish,
     can_read_account_analytics,
     can_read_post_analytics,
+    check_connection_health,
     create_connection,
     disconnect_connection,
     get_connection,
     list_connections,
+    register_assisted_connection,
     requires_manual_publish,
     resolve_capabilities,
     supports_capability,
+    supports_manual_metrics,
     transition_status,
     update_connection,
 )
+from labelos_api.social_accounts.providers import SocialAccountProviderError
 
 
 @pytest.fixture
@@ -234,11 +239,7 @@ def test_social_account_service_lifecycle_disconnect_and_capability_helpers(
                     provider="TikTok",
                     artist_profile_id=artist_profile.id,
                     username="alpha",
-                    capabilities=[
-                        "manual_publish",
-                        "post_analytics_read",
-                        "account_analytics_read",
-                    ],
+                    capabilities=["manual_publish"],
                 ),
             )
             limited = await transition_status(
@@ -279,6 +280,7 @@ def test_social_account_service_lifecycle_disconnect_and_capability_helpers(
                 "manual": requires_manual_publish(connection),
                 "account_analytics": can_read_account_analytics(connection),
                 "post_analytics": can_read_post_analytics(connection),
+                "manual_metrics": supports_manual_metrics(connection),
                 "resolved": resolve_capabilities(connection),
             }
 
@@ -293,9 +295,11 @@ def test_social_account_service_lifecycle_disconnect_and_capability_helpers(
     assert result["supports_manual"] is True
     assert result["auto"] is False
     assert result["manual"] is True
-    assert result["account_analytics"] is True
-    assert result["post_analytics"] is True
+    assert result["account_analytics"] is False
+    assert result["post_analytics"] is False
+    assert result["manual_metrics"] is False
     assert result["resolved"]["requires_manual_publish"] is True
+    assert result["resolved"]["supports_manual_metrics"] is False
 
 
 def test_social_account_service_update_and_optional_artist_association(
@@ -328,7 +332,7 @@ def test_social_account_service_update_and_optional_artist_association(
                 SocialAccountConnectionUpdate(
                     display_name="Alpha Channel",
                     provider_metadata={"banner": "blue"},
-                    capabilities=["content_publish", "content_publish"],
+                    capabilities=["manual_publish", "manual_publish"],
                 ),
             )
             cleared = await associate_artist_profile(
@@ -348,7 +352,273 @@ def test_social_account_service_update_and_optional_artist_association(
     assert display_name == "Alpha Channel"
     assert associated_artist is not None
     assert cleared_artist is None
-    assert capabilities == ["content_publish"]
+    assert capabilities == ["manual_publish"]
+
+
+def test_register_assisted_connection_normalizes_and_assigns_safe_defaults(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async def run() -> dict[str, object]:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            artist_profile = data["artist_profile"]
+            assert isinstance(workspace, Organization)
+            assert isinstance(artist_profile, ArtistProfile)
+
+            artist_connection = await register_assisted_connection(
+                session,
+                workspace.id,
+                SocialAccountConnectionCreate(
+                    provider="Twitter",
+                    artist_profile_id=artist_profile.id,
+                    username=" @LabelOS ",
+                    display_name=" Label OS ",
+                    profile_url=" https://x.com/LabelOS ",
+                    provider_metadata={"source": "artist-submitted"},
+                ),
+            )
+            label_connection = await register_assisted_connection(
+                session,
+                workspace.id,
+                SocialAccountConnectionCreate(
+                    provider="YouTube",
+                    username=" label-channel ",
+                    display_name="Label Channel",
+                ),
+            )
+            return {
+                "artist_provider": artist_connection.provider,
+                "artist_username": artist_connection.username,
+                "artist_status": artist_connection.status,
+                "artist_profile_id": artist_connection.artist_profile_id,
+                "artist_url": artist_connection.profile_url,
+                "artist_capabilities": artist_connection.capabilities,
+                "artist_metadata": artist_connection.provider_metadata,
+                "label_provider": label_connection.provider,
+                "label_artist_profile_id": label_connection.artist_profile_id,
+                "label_capabilities": label_connection.capabilities,
+                "label_status": label_connection.status,
+            }
+
+    result = asyncio.run(run())
+    assert result["artist_provider"] == "x"
+    assert result["artist_username"] == "labelos"
+    assert result["artist_status"] == SocialAccountConnectionStatus.connected
+    assert result["artist_profile_id"] is not None
+    assert result["artist_url"] == "https://x.com/LabelOS"
+    assert result["artist_capabilities"] == ["manual_publish"]
+    assert result["artist_metadata"] == {"source": "artist-submitted"}
+    assert result["label_provider"] == "youtube"
+    assert result["label_artist_profile_id"] is None
+    assert result["label_capabilities"] == ["manual_publish"]
+    assert result["label_status"] == SocialAccountConnectionStatus.connected
+
+
+def test_register_assisted_connection_rejects_invalid_provider_url_and_capabilities(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async def run() -> dict[str, bool]:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            assert isinstance(workspace, Organization)
+            result: dict[str, bool] = {}
+
+            try:
+                await register_assisted_connection(
+                    session,
+                    workspace.id,
+                    SocialAccountConnectionCreate(provider="threads", username="alpha"),
+                )
+            except SocialAccountProviderError:
+                result["invalid_provider"] = True
+                await session.rollback()
+
+            try:
+                await register_assisted_connection(
+                    session,
+                    workspace.id,
+                    SocialAccountConnectionCreate(
+                        provider="instagram",
+                        username="alpha",
+                        profile_url="javascript:alert(1)",
+                    ),
+                )
+            except SocialAccountProviderError:
+                result["invalid_url"] = True
+                await session.rollback()
+
+            try:
+                await register_assisted_connection(
+                    session,
+                    workspace.id,
+                    SocialAccountConnectionCreate(
+                        provider="instagram",
+                        username="alpha",
+                        capabilities=["content_publish"],
+                    ),
+                )
+            except SocialAccountProviderError:
+                result["disallowed_capability"] = True
+                await session.rollback()
+
+            return result
+
+    assert asyncio.run(run()) == {
+        "invalid_provider": True,
+        "invalid_url": True,
+        "disallowed_capability": True,
+    }
+
+
+def test_register_assisted_connection_detects_duplicates_by_workspace_provider_handle(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async def run() -> dict[str, object]:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            other_workspace = data["other_workspace"]
+            assert isinstance(workspace, Organization)
+            assert isinstance(other_workspace, Organization)
+            workspace_id = workspace.id
+            other_workspace_id = other_workspace.id
+
+            first = await register_assisted_connection(
+                session,
+                workspace_id,
+                SocialAccountConnectionCreate(provider="instagram", username="@Alpha"),
+            )
+            first_id = first.id
+            result: dict[str, object] = {
+                "first_username": first.username,
+            }
+            try:
+                await register_assisted_connection(
+                    session,
+                    workspace_id,
+                    SocialAccountConnectionCreate(
+                        provider="Instagram",
+                        username=" alpha ",
+                    ),
+                )
+            except SocialAccountDuplicateError:
+                result["duplicate_blocked"] = True
+                await session.rollback()
+
+            other = await register_assisted_connection(
+                session,
+                other_workspace_id,
+                SocialAccountConnectionCreate(provider="instagram", username="ALPHA"),
+            )
+            result["other_workspace_username"] = other.username
+
+            await disconnect_connection(session, workspace_id, first_id)
+            replacement = await register_assisted_connection(
+                session,
+                workspace_id,
+                SocialAccountConnectionCreate(provider="instagram", username="alpha"),
+            )
+            result["replacement_id"] = replacement.id
+            return result
+
+    result = asyncio.run(run())
+    assert result["first_username"] == "alpha"
+    assert result["duplicate_blocked"] is True
+    assert result["other_workspace_username"] == "alpha"
+    assert result["replacement_id"] is not None
+
+
+def test_register_assisted_connection_enforces_manage_authorization(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async def run() -> dict[str, bool]:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            assert isinstance(workspace, Organization)
+
+            manage_actor = await _seed_actor(
+                session,
+                workspace=workspace,
+                email="assisted-manage@example.com",
+                capability_keys=[Capability.marketing_account_manage.value],
+            )
+            view_actor = await _seed_actor(
+                session,
+                workspace=workspace,
+                email="assisted-view@example.com",
+                capability_keys=[Capability.marketing_account_view.value],
+            )
+            created = await register_assisted_connection(
+                session,
+                workspace.id,
+                SocialAccountConnectionCreate(provider="spotify", username="artist"),
+                actor=manage_actor.id,
+            )
+            result = {"manage_created": created.provider == "spotify"}
+            try:
+                await register_assisted_connection(
+                    session,
+                    workspace.id,
+                    SocialAccountConnectionCreate(provider="spotify", username="other"),
+                    actor=view_actor.id,
+                )
+            except SocialAccountAuthorizationError:
+                result["view_denied"] = True
+            return result
+
+    assert asyncio.run(run()) == {
+        "manage_created": True,
+        "view_denied": True,
+    }
+
+
+def test_assisted_connection_disconnect_and_health_semantics(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async def run() -> dict[str, object]:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            assert isinstance(workspace, Organization)
+
+            connection = await register_assisted_connection(
+                session,
+                workspace.id,
+                SocialAccountConnectionCreate(provider="tiktok", username="alpha"),
+            )
+            registered_status = connection.status
+            health = await check_connection_health(session, workspace.id, connection.id)
+            disconnected = await disconnect_connection(
+                session,
+                workspace.id,
+                connection.id,
+            )
+            disconnected_health = await check_connection_health(
+                session,
+                workspace.id,
+                connection.id,
+            )
+            return {
+                "status": registered_status,
+                "credential_ref": connection.credential_ref,
+                "health_healthy": health.healthy,
+                "health_status": health.status,
+                "disconnected": disconnected.status,
+                "disconnected_health_healthy": disconnected_health.healthy,
+                "disconnected_health_status": disconnected_health.status,
+            }
+
+    result = asyncio.run(run())
+    assert result["status"] == SocialAccountConnectionStatus.connected
+    assert result["credential_ref"] is None
+    assert result["health_healthy"] is True
+    assert result["health_status"] == "assisted_action_required"
+    assert result["disconnected"] == SocialAccountConnectionStatus.disconnected
+    assert result["disconnected_health_healthy"] is False
+    assert result["disconnected_health_status"] == "disconnected"
 
 
 def test_social_account_service_rejects_invalid_and_cross_workspace_artists(

@@ -120,6 +120,32 @@ async def create_connection(
     return connection
 
 
+async def find_active_connection_by_provider_username(
+    session: AsyncSession,
+    workspace_id: UUID,
+    *,
+    provider: str,
+    username: str,
+) -> SocialAccountConnection | None:
+    return await session.scalar(
+        select(SocialAccountConnection)
+        .options(*_connection_load_options())
+        .where(SocialAccountConnection.organization_id == workspace_id)
+        .where(SocialAccountConnection.provider == provider)
+        .where(SocialAccountConnection.username == username)
+        .where(
+            SocialAccountConnection.status
+            != SocialAccountConnectionStatus.disconnected
+        )
+        .order_by(
+            SocialAccountConnection.updated_at.desc(),
+            SocialAccountConnection.created_at.desc(),
+            SocialAccountConnection.id.desc(),
+        )
+        .limit(1)
+    )
+
+
 async def update_connection(
     session: AsyncSession,
     workspace_id: UUID,

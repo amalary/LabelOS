@@ -131,14 +131,16 @@ def test_capability_and_identity_normalization() -> None:
     assert canonical_provider_key("Twitter") == "x"
     assert adapter.normalize_capabilities(()) == ["manual_publish"]
     assert adapter.normalize_capabilities(
-        ["manual_publish", " manual_publish ", "account_analytics_read"]
-    ) == ["manual_publish", "account_analytics_read"]
+        ["manual_publish", " manual_publish "]
+    ) == ["manual_publish"]
+    with pytest.raises(SocialAccountProviderError):
+        adapter.normalize_capabilities(["account_analytics_read"])
 
     result = adapter.validate_account_input(
         SocialAccountIdentity(
             provider="twitter",
             external_account_id=" ext-1 ",
-            username=" labelos ",
+            username=" @LabelOS ",
             display_name=" Label OS ",
             profile_url=" https://x.com/labelos ",
         ),
@@ -152,6 +154,41 @@ def test_capability_and_identity_normalization() -> None:
         profile_url="https://x.com/labelos",
     )
     assert result.provider_metadata == {"source": "manual"}
+
+
+def test_assisted_provider_rejects_unsafe_profile_urls() -> None:
+    adapter = AssistedSocialAccountConnectionProvider(
+        SocialAccountProviderKey.instagram
+    )
+
+    with pytest.raises(SocialAccountProviderError):
+        adapter.validate_account_input(
+            SocialAccountIdentity(
+                provider="instagram",
+                username="labelos",
+                profile_url="javascript:alert(1)",
+            )
+        )
+
+    with pytest.raises(SocialAccountProviderError):
+        adapter.validate_account_input(
+            SocialAccountIdentity(
+                provider="instagram",
+                username="labelos",
+                profile_url="https://user:pass@example.com/labelos",
+            )
+        )
+
+
+def test_assisted_provider_health_is_manual_action_required() -> None:
+    adapter = AssistedSocialAccountConnectionProvider(SocialAccountProviderKey.tiktok)
+
+    async def run() -> SocialAccountHealth:
+        return await adapter.check_connection_health(credential_ref=None)
+
+    health = asyncio.run(run())
+    assert health.healthy is True
+    assert health.status == "assisted_action_required"
 
 
 def test_connection_provider_contract_has_no_fastapi_request_dependency() -> None:

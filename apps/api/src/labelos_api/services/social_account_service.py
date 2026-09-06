@@ -20,6 +20,7 @@ from labelos_api.authorization import (
 from labelos_api.repositories import social_accounts
 from labelos_api.social_accounts.providers import (
     SocialAccountConnectionProvider,
+    SocialAccountHealth,
     SocialAccountIdentity,
     resolve_social_account_provider,
 )
@@ -41,6 +42,10 @@ class SocialAccountLifecycleError(SocialAccountServiceError):
     pass
 
 
+class SocialAccountDuplicateError(SocialAccountServiceError):
+    pass
+
+
 class SocialAccountAuthorizationError(SocialAccountServiceError):
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
@@ -51,6 +56,7 @@ MAX_SOCIAL_ACCOUNT_LIST_LIMIT = 500
 
 SOCIAL_ACCOUNT_CAPABILITY_CONTENT_PUBLISH = "content_publish"
 SOCIAL_ACCOUNT_CAPABILITY_MANUAL_PUBLISH = "manual_publish"
+SOCIAL_ACCOUNT_CAPABILITY_MANUAL_METRICS = "manual_metrics"
 SOCIAL_ACCOUNT_CAPABILITY_ACCOUNT_ANALYTICS_READ = "account_analytics_read"
 SOCIAL_ACCOUNT_CAPABILITY_POST_ANALYTICS_READ = "post_analytics_read"
 
@@ -282,6 +288,15 @@ def requires_manual_publish(
     ) and not can_auto_publish(connection_or_capabilities)
 
 
+def supports_manual_metrics(
+    connection_or_capabilities: SocialAccountConnection | Sequence[str],
+) -> bool:
+    return supports_capability(
+        connection_or_capabilities,
+        SOCIAL_ACCOUNT_CAPABILITY_MANUAL_METRICS,
+    )
+
+
 def can_read_account_analytics(
     connection_or_capabilities: SocialAccountConnection | Sequence[str],
 ) -> bool:
@@ -366,6 +381,36 @@ def _create_values(payload: SocialAccountConnectionCreate) -> dict[str, object]:
     _set_if_not_none(values, "created_by_user_id", payload.created_by_user_id)
     _set_if_not_none(values, "created_by_profile_id", payload.created_by_profile_id)
     return values
+
+
+def _assisted_create_payload(
+    payload: SocialAccountConnectionCreate,
+) -> SocialAccountConnectionCreate:
+    method = _coerce_method(payload.connection_method)
+    if method != SocialAccountConnectionMethod.assisted:
+        raise SocialAccountRelationshipError(
+            "Assisted social account registration requires assisted connection_method"
+        )
+    return SocialAccountConnectionCreate(
+        provider=payload.provider,
+        artist_profile_id=payload.artist_profile_id,
+        external_account_id=payload.external_account_id,
+        username=payload.username,
+        display_name=payload.display_name,
+        profile_url=payload.profile_url,
+        connection_method=SocialAccountConnectionMethod.assisted,
+        status=SocialAccountConnectionStatus.connected,
+        capabilities=payload.capabilities,
+        credential_ref=None,
+        token_expires_at=None,
+        last_synced_at=payload.last_synced_at,
+        last_health_checked_at=payload.last_health_checked_at,
+        last_error_code=None,
+        last_error_message=None,
+        provider_metadata=payload.provider_metadata,
+        created_by_user_id=payload.created_by_user_id,
+        created_by_profile_id=payload.created_by_profile_id,
+    )
 
 
 def _update_values(
@@ -540,6 +585,28 @@ async def _validate_relationships(
         )
 
 
+async def _assert_no_reasonable_duplicate(
+    session: AsyncSession,
+    workspace_id: UUID,
+    values: Mapping[str, object],
+) -> None:
+    provider = values.get("provider")
+    username = values.get("username")
+    if not isinstance(provider, str) or not isinstance(username, str):
+        return
+    existing = await social_accounts.find_active_connection_by_provider_username(
+        session,
+        workspace_id,
+        provider=provider,
+        username=username,
+    )
+    if existing is not None:
+        raise SocialAccountDuplicateError(
+            "A social account connection with this provider and username already "
+            "exists in the workspace"
+        )
+
+
 async def _load_connection_for_workspace(
     session: AsyncSession,
     workspace_id: UUID,
@@ -582,6 +649,34 @@ async def create_connection(
         recovery_succeeded=True,
     )
     await _validate_relationships(session, workspace_id, values)
+    connection = await social_accounts.create_connection(session, workspace_id, values)
+    await session.commit()
+    return await _load_connection_for_workspace(session, workspace_id, connection.id)
+
+
+async def register_assisted_connection(
+    session: AsyncSession,
+    workspace_id: UUID,
+    payload: SocialAccountConnectionCreate,
+    *,
+    actor: AuthorizationActorInput | None = None,
+) -> SocialAccountConnection:
+    """Register a manually operated social account as connected.
+
+    Assisted connections are marked connected because LabelOS can route work to
+    the destination and prepare manual publishing steps immediately. They do not
+    use OAuth credentials, so absence of credentials is not a reconnect signal.
+    """
+
+    await _require_capability(
+        session,
+        actor=actor,
+        workspace_id=workspace_id,
+        capability=Capability.marketing_account_manage,
+    )
+    values = _create_values(_assisted_create_payload(payload))
+    await _validate_relationships(session, workspace_id, values)
+    await _assert_no_reasonable_duplicate(session, workspace_id, values)
     connection = await social_accounts.create_connection(session, workspace_id, values)
     await session.commit()
     return await _load_connection_for_workspace(session, workspace_id, connection.id)
@@ -797,10 +892,42 @@ async def disconnect_connection(
     )
 
 
+async def check_connection_health(
+    session: AsyncSession,
+    workspace_id: UUID,
+    connection_id: UUID,
+    *,
+    actor: AuthorizationActorInput | None = None,
+) -> SocialAccountHealth:
+    connection = await _load_connection_for_workspace(
+        session,
+        workspace_id,
+        connection_id,
+    )
+    await _require_capability(
+        session,
+        actor=actor,
+        workspace_id=workspace_id,
+        capability=Capability.marketing_account_view,
+    )
+    if connection.status == SocialAccountConnectionStatus.disconnected:
+        return SocialAccountHealth(healthy=False, status="disconnected")
+    adapter = resolve_social_account_provider(
+        connection.provider,
+        connection.connection_method,
+    )
+    return await adapter.check_connection_health(
+        credential_ref=connection.credential_ref,
+        token_expires_at=connection.token_expires_at,
+        provider_metadata=connection.provider_metadata,
+    )
+
+
 def resolve_capabilities(connection: SocialAccountConnection) -> dict[str, bool]:
     return {
         "can_auto_publish": can_auto_publish(connection),
         "requires_manual_publish": requires_manual_publish(connection),
+        "supports_manual_metrics": supports_manual_metrics(connection),
         "can_read_account_analytics": can_read_account_analytics(connection),
         "can_read_post_analytics": can_read_post_analytics(connection),
     }
