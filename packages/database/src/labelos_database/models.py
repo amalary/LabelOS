@@ -153,6 +153,21 @@ class AnalyticsMetricValueType(StrEnum):
     json = "json"
 
 
+class SocialAccountConnectionMethod(StrEnum):
+    direct_api = "direct_api"
+    third_party = "third_party"
+    assisted = "assisted"
+
+
+class SocialAccountConnectionStatus(StrEnum):
+    pending = "pending"
+    connected = "connected"
+    limited = "limited"
+    reconnect_required = "reconnect_required"
+    disconnected = "disconnected"
+    error = "error"
+
+
 def workspace_permission_from_role(role: MembershipRole) -> WorkspacePermission:
     if role == MembershipRole.artist:
         return WorkspacePermission.member
@@ -196,6 +211,12 @@ class User(Base, TimestampMixin):
         relationship(
             back_populates="created_by_user",
             foreign_keys="MarketingContentItem.created_by_user_id",
+        )
+    )
+    created_social_account_connections: Mapped[list["SocialAccountConnection"]] = (
+        relationship(
+            back_populates="created_by_user",
+            foreign_keys="SocialAccountConnection.created_by_user_id",
         )
     )
 
@@ -285,6 +306,12 @@ class UniversalProfile(Base, TimestampMixin):
         relationship(
             back_populates="approved_by_profile",
             foreign_keys="MarketingContentItem.approved_by_profile_id",
+        )
+    )
+    created_social_account_connections: Mapped[list["SocialAccountConnection"]] = (
+        relationship(
+            back_populates="created_by_profile",
+            foreign_keys="SocialAccountConnection.created_by_profile_id",
         )
     )
 
@@ -620,6 +647,10 @@ class Organization(Base, TimestampMixin):
         )
     )
     analytics_observations: Mapped[list["AnalyticsObservation"]] = relationship(
+        back_populates="organization",
+        cascade="all, delete-orphan",
+    )
+    social_account_connections: Mapped[list["SocialAccountConnection"]] = relationship(
         back_populates="organization",
         cascade="all, delete-orphan",
     )
@@ -1630,6 +1661,9 @@ class ArtistProfile(Base, TimestampMixin, ProfileModuleMixin):
     analytics_observations: Mapped[list["AnalyticsObservation"]] = relationship(
         back_populates="artist_profile",
     )
+    social_account_connections: Mapped[list["SocialAccountConnection"]] = relationship(
+        back_populates="artist_profile"
+    )
 
     @validates("stage_name", "career_stage")
     def _validate_optional_text(self, _key: str, value: str | None) -> str | None:
@@ -1655,6 +1689,146 @@ class ArtistProfile(Base, TimestampMixin, ProfileModuleMixin):
         Index("ix_artist_profiles_universal_profile_id", "universal_profile_id"),
         Index("ix_artist_profiles_stage_name", "stage_name"),
         Index("ix_artist_profiles_career_stage", "career_stage"),
+    )
+
+
+class SocialAccountConnection(Base, TimestampMixin, OrganizationOwnedMixin):
+    __tablename__ = "social_account_connections"
+
+    id: Mapped[UUIDPrimaryKey]
+    artist_profile_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("artist_profiles.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    provider: Mapped[str] = mapped_column(String(80), nullable=False)
+    external_account_id: Mapped[str | None] = mapped_column(String(255))
+    username: Mapped[str | None] = mapped_column(String(255))
+    display_name: Mapped[str | None] = mapped_column(String(255))
+    profile_url: Mapped[str | None] = mapped_column(String(2048))
+    connection_method: Mapped[SocialAccountConnectionMethod] = mapped_column(
+        Enum(
+            SocialAccountConnectionMethod,
+            name="social_account_connection_method",
+            values_callable=lambda methods: [method.value for method in methods],
+        ),
+        nullable=False,
+        default=SocialAccountConnectionMethod.assisted,
+        server_default=SocialAccountConnectionMethod.assisted.value,
+    )
+    status: Mapped[SocialAccountConnectionStatus] = mapped_column(
+        Enum(
+            SocialAccountConnectionStatus,
+            name="social_account_connection_status",
+            values_callable=lambda statuses: [status.value for status in statuses],
+        ),
+        nullable=False,
+        default=SocialAccountConnectionStatus.pending,
+        server_default=SocialAccountConnectionStatus.pending.value,
+    )
+    capabilities: Mapped[list[str]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+        server_default="[]",
+    )
+    credential_ref: Mapped[str | None] = mapped_column(String(500))
+    token_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_health_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    last_error_code: Mapped[str | None] = mapped_column(String(120))
+    last_error_message: Mapped[str | None] = mapped_column(String(2000))
+    provider_metadata: Mapped[dict] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+        server_default="{}",
+    )
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_by_profile_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("universal_profiles.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    organization: Mapped[Organization] = relationship(
+        back_populates="social_account_connections"
+    )
+    artist_profile: Mapped[ArtistProfile | None] = relationship(
+        back_populates="social_account_connections"
+    )
+    created_by_user: Mapped[User | None] = relationship(
+        back_populates="created_social_account_connections",
+        foreign_keys=[created_by_user_id],
+    )
+    created_by_profile: Mapped[UniversalProfile | None] = relationship(
+        back_populates="created_social_account_connections",
+        foreign_keys=[created_by_profile_id],
+    )
+
+    @validates("provider")
+    def _validate_provider(self, key: str, value: str | None) -> str:
+        return _required_text(value, key)
+
+    @validates(
+        "external_account_id",
+        "username",
+        "display_name",
+        "credential_ref",
+        "last_error_code",
+        "last_error_message",
+    )
+    def _validate_optional_text(self, _key: str, value: str | None) -> str | None:
+        return _optional_text(value)
+
+    @validates("profile_url")
+    def _validate_profile_url(self, _key: str, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _validate_url(value)
+
+    @validates("capabilities")
+    def _validate_capabilities(self, key: str, value: list | None) -> list:
+        return _json_list(value, key)
+
+    @validates("provider_metadata")
+    def _validate_provider_metadata(self, key: str, value: dict | None) -> dict:
+        return _json_object(value, key)
+
+    __table_args__ = (
+        Index("ix_social_account_connections_organization_id", "organization_id"),
+        Index(
+            "ix_social_account_connections_organization_provider",
+            "organization_id",
+            "provider",
+        ),
+        Index(
+            "ix_social_account_connections_organization_status",
+            "organization_id",
+            "status",
+        ),
+        Index(
+            "ix_social_account_connections_organization_artist_profile",
+            "organization_id",
+            "artist_profile_id",
+        ),
+        Index(
+            "ix_social_account_connections_provider_external_account",
+            "provider",
+            "external_account_id",
+        ),
+        Index(
+            "uq_social_account_connections_org_provider_external",
+            "organization_id",
+            "provider",
+            "external_account_id",
+            unique=True,
+            postgresql_where=external_account_id.is_not(None),
+            sqlite_where=external_account_id.is_not(None),
+        ),
     )
 
 

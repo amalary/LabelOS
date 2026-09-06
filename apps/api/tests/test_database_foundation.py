@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -57,6 +57,9 @@ from labelos_database.models import (
     RoleCapability,
     RoleDepartment,
     Royalty,
+    SocialAccountConnection,
+    SocialAccountConnectionMethod,
+    SocialAccountConnectionStatus,
     TeamSetting,
     UniversalProfile,
     User,
@@ -107,6 +110,7 @@ def test_foundational_models_are_registered() -> None:
         CampaignRelease.__tablename__,
         MarketingContentItem.__tablename__,
         MarketingContentItemChannel.__tablename__,
+        SocialAccountConnection.__tablename__,
         ApprovalRequest.__tablename__,
         ApprovalRequestStage.__tablename__,
         ApprovalDecision.__tablename__,
@@ -149,6 +153,7 @@ def test_foundational_models_are_registered() -> None:
         "campaign_releases",
         "marketing_content_items",
         "marketing_content_item_channels",
+        "social_account_connections",
         "approval_requests",
         "approval_request_stages",
         "approval_decisions",
@@ -1835,6 +1840,315 @@ def test_artist_profile_extends_universal_profile_without_replacing_artist() -> 
         assert universal_profile.artist_profiles == [artist_profile]
         assert universal_profile.profile_modules == {"artist": [artist_profile]}
     engine.dispose()
+
+
+def test_social_account_connections_support_core_connection_shapes() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    SocialAccountConnection.metadata.create_all(engine)
+
+    token_expiry = (datetime.now(UTC) + timedelta(days=30)).replace(tzinfo=None)
+    with Session(engine) as session:
+        owner = User(email="social-owner@example.com")
+        creator_profile = UniversalProfile(
+            user=owner,
+            display_name="Social Owner",
+            slug="social-owner",
+        )
+        organization = Organization(
+            name="Social Label",
+            slug="social-label",
+            owner=owner,
+        )
+        artist_profile = ArtistProfile(
+            artist=Artist(name="Social Artist", organization=organization),
+            universal_profile=UniversalProfile(
+                user=User(email="artist-social@example.com"),
+                slug="artist-social",
+            ),
+            stage_name="Social Artist",
+        )
+        assisted = SocialAccountConnection(
+            organization=organization,
+            provider="instagram",
+            username="label_handle",
+            display_name="Label Handle",
+            profile_url="https://instagram.com/label_handle",
+            connection_method=SocialAccountConnectionMethod.assisted,
+            status=SocialAccountConnectionStatus.pending,
+            capabilities=["manual_publish", "manual_metrics"],
+            provider_metadata={"notes": "waiting on invite"},
+            created_by_user=owner,
+            created_by_profile=creator_profile,
+        )
+        direct_api = SocialAccountConnection(
+            organization=organization,
+            artist_profile=artist_profile,
+            provider="tiktok",
+            external_account_id="tt_123",
+            username="artist_handle",
+            connection_method=SocialAccountConnectionMethod.direct_api,
+            status=SocialAccountConnectionStatus.connected,
+            capabilities=[
+                "profile_read",
+                "account_analytics_read",
+                "content_publish",
+            ],
+            credential_ref="vault://social/tiktok/tt_123",
+            token_expires_at=token_expiry,
+            provider_metadata={"scopes": ["user.info.basic"]},
+        )
+        third_party = SocialAccountConnection(
+            organization=organization,
+            provider="youtube",
+            external_account_id="yt_123",
+            connection_method=SocialAccountConnectionMethod.third_party,
+            status=SocialAccountConnectionStatus.limited,
+            capabilities=["profile_read", "post_analytics_read"],
+            provider_metadata={"broker": "partner-platform"},
+        )
+        session.add_all([assisted, direct_api, third_party])
+        session.commit()
+
+        session.refresh(organization)
+        session.refresh(artist_profile)
+        assert assisted.artist_profile_id is None
+        assert direct_api.artist_profile == artist_profile
+        assert artist_profile.social_account_connections == [direct_api]
+        assert len(organization.social_account_connections) == 3
+        assert direct_api.connection_method is SocialAccountConnectionMethod.direct_api
+        assert (
+            third_party.connection_method is SocialAccountConnectionMethod.third_party
+        )
+        assert third_party.status is SocialAccountConnectionStatus.limited
+        assert direct_api.capabilities == [
+            "profile_read",
+            "account_analytics_read",
+            "content_publish",
+        ]
+        assert third_party.provider_metadata == {"broker": "partner-platform"}
+        assert direct_api.credential_ref == "vault://social/tiktok/tt_123"
+        assert direct_api.token_expires_at == token_expiry
+        assert assisted.created_by_user == owner
+        assert assisted.created_by_profile == creator_profile
+        assert assisted.created_at is not None
+        assert assisted.updated_at is not None
+    engine.dispose()
+
+
+def test_social_account_connections_do_not_define_secret_columns() -> None:
+    column_names = set(SocialAccountConnection.__table__.columns.keys())
+
+    assert "credential_ref" in column_names
+    assert "access_token" not in column_names
+    assert "refresh_token" not in column_names
+    assert "provider_password" not in column_names
+    assert "oauth_authorization_code" not in column_names
+    assert "client_secret" not in column_names
+
+
+def test_social_account_connections_enforce_external_account_uniqueness() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    SocialAccountConnection.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        first_owner = User(email="first-social-owner@example.com")
+        first_org = Organization(
+            name="First Social Label",
+            slug="first-social-label",
+            owner=first_owner,
+        )
+        second_org = Organization(
+            name="Second Social Label",
+            slug="second-social-label",
+            owner=User(email="second-social-owner@example.com"),
+        )
+        session.add_all(
+            [
+                SocialAccountConnection(
+                    organization=first_org,
+                    provider="instagram",
+                    external_account_id="ig_123",
+                ),
+                SocialAccountConnection(
+                    organization=second_org,
+                    provider="instagram",
+                    external_account_id="ig_123",
+                ),
+                SocialAccountConnection(
+                    organization=first_org,
+                    provider="tiktok",
+                    external_account_id="ig_123",
+                ),
+            ]
+        )
+        session.commit()
+
+        session.add(
+            SocialAccountConnection(
+                organization=first_org,
+                provider="instagram",
+                external_account_id="ig_123",
+            )
+        )
+        with pytest.raises(IntegrityError):
+            session.commit()
+    engine.dispose()
+
+
+def test_social_account_connections_allow_nullable_external_account_ids() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    SocialAccountConnection.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        organization = Organization(
+            name="Nullable External Label",
+            slug="nullable-external-label",
+            owner=User(email="nullable-external-owner@example.com"),
+        )
+        session.add_all(
+            [
+                SocialAccountConnection(
+                    organization=organization,
+                    provider="instagram",
+                    connection_method=SocialAccountConnectionMethod.assisted,
+                    username="first_assisted",
+                ),
+                SocialAccountConnection(
+                    organization=organization,
+                    provider="instagram",
+                    connection_method=SocialAccountConnectionMethod.assisted,
+                    username="second_assisted",
+                ),
+            ]
+        )
+        session.commit()
+
+        assert (
+            session.query(SocialAccountConnection)
+            .filter_by(organization_id=organization.id, provider="instagram")
+            .count()
+            == 2
+        )
+    engine.dispose()
+
+
+def test_social_account_connections_foreign_key_behavior() -> None:
+    engine = create_engine("sqlite:///:memory:")
+
+    @event.listens_for(engine, "connect")
+    def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record) -> None:
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
+    SocialAccountConnection.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        owner = User(email="fk-owner@example.com")
+        creator_user = User(email="fk-creator@example.com")
+        creator_profile = UniversalProfile(user=creator_user, slug="fk-creator")
+        organization = Organization(name="FK Label", slug="fk-label", owner=owner)
+        artist_profile = ArtistProfile(
+            artist=Artist(name="FK Artist", organization=organization),
+            universal_profile=UniversalProfile(
+                user=User(email="fk-artist@example.com"),
+                slug="fk-artist",
+            ),
+        )
+        connection = SocialAccountConnection(
+            organization=organization,
+            artist_profile=artist_profile,
+            provider="instagram",
+            external_account_id="ig_fk",
+            created_by_user=creator_user,
+            created_by_profile=creator_profile,
+        )
+        session.add(connection)
+        session.commit()
+
+        session.delete(artist_profile)
+        session.delete(creator_profile)
+        session.commit()
+        session.refresh(connection)
+        assert connection.artist_profile_id is None
+        assert connection.created_by_profile_id is None
+
+        session.delete(creator_user)
+        session.commit()
+        session.refresh(connection)
+        assert connection.created_by_user_id is None
+
+        connection_id = connection.id
+        session.delete(organization)
+        session.commit()
+        assert session.get(SocialAccountConnection, connection_id) is None
+    engine.dispose()
+
+
+def test_social_account_connection_schema_indexes_and_migration_contract() -> None:
+    table = SocialAccountConnection.__table__
+    column_names = set(table.columns.keys())
+    index_names = {index.name for index in table.indexes}
+    foreign_key_deletions = {
+        foreign_key.parent.name: foreign_key.ondelete
+        for foreign_key in table.foreign_keys
+    }
+    unique_index = next(
+        index
+        for index in table.indexes
+        if index.name == "uq_social_account_connections_org_provider_external"
+    )
+    migration = (
+        REPO_ROOT
+        / "packages/database/alembic/versions"
+        / "202609051900_social_account_connections.py"
+    ).read_text()
+
+    assert column_names == {
+        "id",
+        "organization_id",
+        "artist_profile_id",
+        "provider",
+        "external_account_id",
+        "username",
+        "display_name",
+        "profile_url",
+        "connection_method",
+        "status",
+        "capabilities",
+        "credential_ref",
+        "token_expires_at",
+        "last_synced_at",
+        "last_health_checked_at",
+        "last_error_code",
+        "last_error_message",
+        "provider_metadata",
+        "created_by_user_id",
+        "created_by_profile_id",
+        "created_at",
+        "updated_at",
+    }
+    assert index_names >= {
+        "ix_social_account_connections_organization_id",
+        "ix_social_account_connections_organization_provider",
+        "ix_social_account_connections_organization_status",
+        "ix_social_account_connections_organization_artist_profile",
+        "ix_social_account_connections_provider_external_account",
+        "uq_social_account_connections_org_provider_external",
+    }
+    assert unique_index.unique is True
+    assert unique_index.dialect_options["sqlite"]["where"] is not None
+    assert unique_index.dialect_options["postgresql"]["where"] is not None
+    assert foreign_key_deletions == {
+        "organization_id": "CASCADE",
+        "artist_profile_id": "SET NULL",
+        "created_by_user_id": "SET NULL",
+        "created_by_profile_id": "SET NULL",
+    }
+    assert 'down_revision: str | None = "202609031500"' in migration
+    assert "external_account_id IS NOT NULL" in migration
+    assert '"access_token"' not in migration
+    assert '"refresh_token"' not in migration
+    assert '"provider_password"' not in migration
+    assert '"client_secret"' not in migration
 
 
 def test_universal_profiles_enforce_one_profile_per_user() -> None:
