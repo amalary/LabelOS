@@ -34,6 +34,8 @@ export const capabilities = {
   marketingCampaignCreate: "marketing.campaign.create",
   marketingCampaignEdit: "marketing.campaign.edit",
   marketingCampaignApprove: "marketing.campaign.approve",
+  marketingAccountView: "marketing.account.view",
+  marketingAccountManage: "marketing.account.manage",
   marketingContentView: "marketing.content.view",
   marketingContentCreate: "marketing.content.create",
   marketingContentEdit: "marketing.content.edit",
@@ -246,6 +248,20 @@ export const capabilityRegistry: readonly CapabilityDefinition[] = [
     key: capabilities.marketingCampaignApprove,
     displayName: "Approve campaigns",
     description: "Approve marketing campaign plans.",
+    systemCapability: true,
+  },
+  {
+    key: capabilities.marketingAccountView,
+    displayName: "View social accounts",
+    description:
+      "View workspace social account connection metadata, status, health, and connection capabilities.",
+    systemCapability: true,
+  },
+  {
+    key: capabilities.marketingAccountManage,
+    displayName: "Manage social accounts",
+    description:
+      "Register, update, reconnect, disconnect, associate, and synchronize workspace social account connections.",
     systemCapability: true,
   },
   {

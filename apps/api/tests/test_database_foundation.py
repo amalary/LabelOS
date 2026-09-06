@@ -1449,6 +1449,8 @@ def test_default_capabilities_are_specific_actions() -> None:
         "marketing.campaign.create",
         "marketing.campaign.edit",
         "marketing.campaign.approve",
+        "marketing.account.view",
+        "marketing.account.manage",
         "contract.view",
         "contract.create",
         "contract.edit",
@@ -1487,6 +1489,31 @@ def test_default_role_capability_mapping_references_configured_registries() -> N
     assert set(DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS["owner"]) == capability_keys
     assert "workspace.update" in DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS["admin"]
     assert "role.assign" in DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS["admin"]
+    assert {
+        "marketing.account.view",
+        "marketing.account.manage",
+    } <= set(DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS["admin"])
+    assert {
+        "marketing.account.view",
+        "marketing.account.manage",
+    } <= set(DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS["marketing"])
+    assert {
+        "marketing.account.view",
+        "marketing.account.manage",
+    } <= set(DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS["manager"])
+    assert "marketing.account.view" in DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS["member"]
+    assert "marketing.account.view" in DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS["artist"]
+    assert "marketing.account.view" in DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS["a_and_r"]
+    assert (
+        "marketing.account.manage" not in DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS["member"]
+    )
+    assert (
+        "marketing.account.manage" not in DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS["artist"]
+    )
+    assert (
+        "marketing.account.manage"
+        not in DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS["a_and_r"]
+    )
     assert {
         "marketing.content.view",
         "marketing.content.create",

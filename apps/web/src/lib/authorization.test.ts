@@ -58,6 +58,26 @@ describe("frontend authorization helpers", () => {
     expect(can(subject, null, capabilities.contractCreate, { department: "legal" })).toBe(false);
   });
 
+  it("separates social account view from manage capabilities", () => {
+    const viewOnly = {
+      workspacePermission: "member",
+      departmentAccess: ["marketing"],
+      capabilities: [capabilities.marketingAccountView],
+    };
+    const manager = {
+      workspacePermission: "member",
+      departmentAccess: ["marketing"],
+      capabilities: [capabilities.marketingAccountView, capabilities.marketingAccountManage],
+    };
+
+    expect(hasCapability(viewOnly, capabilities.marketingAccountView)).toBe(true);
+    expect(hasCapability(viewOnly, capabilities.marketingAccountManage)).toBe(false);
+    expect(hasCapability(manager, capabilities.marketingAccountManage)).toBe(true);
+    expect(can(manager, null, capabilities.marketingAccountManage, { department: "legal" })).toBe(
+      false,
+    );
+  });
+
   it("applies default capability departments when no resource department is provided", () => {
     const subject = {
       workspacePermission: "member",

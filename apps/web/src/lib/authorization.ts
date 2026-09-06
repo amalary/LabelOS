@@ -101,6 +101,8 @@ const capabilityDepartments: Partial<Record<Capability, readonly string[]>> = {
   [capabilities.marketingCampaignCreate]: ["marketing", "management"],
   [capabilities.marketingCampaignEdit]: ["marketing", "management"],
   [capabilities.marketingCampaignApprove]: ["marketing", "management"],
+  [capabilities.marketingAccountView]: ["marketing", "management"],
+  [capabilities.marketingAccountManage]: ["marketing", "management"],
   [capabilities.releaseView]: ["release_operations", "management"],
   [capabilities.releaseCreate]: ["release_operations", "management"],
   [capabilities.releaseEdit]: ["release_operations", "management"],

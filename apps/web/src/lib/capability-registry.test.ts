@@ -12,6 +12,8 @@ describe("capability registry", () => {
   it("imports the central capability registry", () => {
     expect(capabilities.workspaceView).toBe("workspace.view");
     expect(capabilities.artistProfileEdit).toBe("artist.profile.edit");
+    expect(capabilities.marketingAccountView).toBe("marketing.account.view");
+    expect(capabilities.marketingAccountManage).toBe("marketing.account.manage");
     expect(capabilityRegistry.length).toBeGreaterThan(0);
   });
 
@@ -31,6 +33,9 @@ describe("capability registry", () => {
 
   it("keeps future additions on the dot-separated resource.action pattern", () => {
     expect(capabilityKeys).toEqual(expect.arrayContaining(["release.approve"]));
+    expect(capabilityKeys).toEqual(
+      expect.arrayContaining(["marketing.account.view", "marketing.account.manage"]),
+    );
     expect(capabilityKeys.every(isValidCapabilityIdentifier)).toBe(true);
     expect(capabilityKeys.every((key) => key.split(".").length >= 2)).toBe(true);
   });
