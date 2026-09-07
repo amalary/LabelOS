@@ -1,8 +1,9 @@
 from datetime import datetime
 from typing import Annotated, Any, NoReturn
+from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import RedirectResponse
 from labelos_database.models import (
     SocialAccountConnection,
@@ -409,6 +410,7 @@ async def start_social_account_oauth_connection(
 
 @router.get("/{workspace_id}/social-account-connections/oauth/{provider}/callback")
 async def complete_social_account_oauth_connection(
+    request: Request,
     workspace_id: UUID,
     provider: str,
     session: SessionDep,
@@ -424,7 +426,7 @@ async def complete_social_account_oauth_connection(
     state: str | None = None,
     code: str | None = None,
     error: str | None = None,
-    redirect_uri: str = "http://localhost/api/v1/oauth/callback",
+    redirect_uri: str | None = None,
 ) -> RedirectResponse:
     redirect_path = "/workspace/settings?tab=connections&oauth=failed"
     try:
@@ -433,7 +435,7 @@ async def complete_social_account_oauth_connection(
             workspace_id,
             OAuthConnectionCallback(
                 provider=provider,
-                redirect_uri=redirect_uri,
+                redirect_uri=redirect_uri or _request_url_without_query(request),
                 state=state,
                 code=code,
                 error=error,
@@ -463,6 +465,11 @@ def _oauth_failure_redirect(
 ) -> str:
     # Failure redirects intentionally carry only status, never provider tokens/codes.
     return _oauth_redirect("/workspace/settings?tab=connections", "failed")
+
+
+def _request_url_without_query(request: Request) -> str:
+    parsed = urlsplit(str(request.url))
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
 
 
 def _oauth_redirect(path: str, status_value: str) -> str:

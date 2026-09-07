@@ -66,13 +66,14 @@ describe("social account connections proxy routes", () => {
 
     const response = await oauthCallback(
       new Request(
-        "http://localhost/api/workspaces/workspace_01/social-account-connections/oauth/youtube/callback?state=state_01&code=code_01",
+        "https://app.labelos.test/api/workspaces/workspace_01/social-account-connections/oauth/youtube/callback?state=state_01&code=code_01",
       ),
       callbackContext,
     );
 
     expect(apiFetch).toHaveBeenCalledWith(
-      "/api/v1/workspaces/workspace_01/social-account-connections/oauth/youtube/callback?state=state_01&code=code_01",
+      "/api/v1/workspaces/workspace_01/social-account-connections/oauth/youtube/callback" +
+        "?state=state_01&code=code_01&redirect_uri=https%3A%2F%2Fapp.labelos.test%2Fapi%2Fworkspaces%2Fworkspace_01%2Fsocial-account-connections%2Foauth%2Fyoutube%2Fcallback",
       expect.objectContaining({ redirect: "manual" }),
     );
     expect(response.status).toBe(303);

@@ -45,6 +45,7 @@ from labelos_api.main import create_app
 from labelos_api.services.credential_store import InMemoryCredentialStore
 from labelos_api.social_accounts.providers import (
     FakeOAuthSocialAccountConnectionProvider,
+    SocialAccountCredentialResult,
     SocialAccountProviderRegistry,
 )
 
@@ -293,6 +294,25 @@ def _oauth_start_base(seeded: SeededSocialAccountConnectionsApi) -> str:
 
 def _oauth_callback_base(seeded: SeededSocialAccountConnectionsApi) -> str:
     return f"{_base(seeded)}/oauth/instagram/callback"
+
+
+class RedirectUriCapturingOAuthProvider(FakeOAuthSocialAccountConnectionProvider):
+    def __init__(self) -> None:
+        self.redirect_uris: list[str] = []
+
+    async def complete_oauth_exchange(
+        self,
+        *,
+        code: str,
+        redirect_uri: str,
+        provider_metadata=None,
+    ) -> SocialAccountCredentialResult:
+        self.redirect_uris.append(redirect_uri)
+        return await super().complete_oauth_exchange(
+            code=code,
+            redirect_uri=redirect_uri,
+            provider_metadata=provider_metadata,
+        )
 
 
 def _install_fake_oauth(
@@ -940,6 +960,43 @@ def test_social_account_oauth_callback_stores_credentials_and_connects_account(
     assert "fake-refresh-token" not in persisted
     assert asyncio.run(_state_statuses(sessionmaker)) == [
         OAuthAuthorizationStateStatus.consumed
+    ]
+
+
+def test_social_account_oauth_callback_derives_redirect_uri_without_query_when_missing(
+    social_account_connections_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededSocialAccountConnectionsApi,
+    ],
+) -> None:
+    client, _sessionmaker, seeded = social_account_connections_client
+    credential_store = InMemoryCredentialStore()
+    provider = RedirectUriCapturingOAuthProvider()
+    client.app.dependency_overrides[get_credential_store_dependency] = (
+        lambda: credential_store
+    )
+    client.app.dependency_overrides[get_social_account_provider_registry] = (
+        lambda: SocialAccountProviderRegistry([provider])
+    )
+    _set_context(client, seeded)
+    state = client.post(
+        _oauth_start_base(seeded),
+        json={
+            "provider": "instagram",
+            "redirect_uri": "https://labelos.test/oauth/callback",
+        },
+    ).json()["state"]
+
+    response = client.get(
+        _oauth_callback_base(seeded),
+        params={"state": state, "code": "success"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert provider.redirect_uris == [
+        f"http://testserver{_oauth_callback_base(seeded)}"
     ]
 
 
