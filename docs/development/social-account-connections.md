@@ -198,10 +198,13 @@ fields such as channel, placement, planned times, copy override, asset refs, and
 publication result fields. The social account connection owns destination
 identity, health, credential reference, and capabilities.
 
-Channel destination validation uses the connection resolver so draft channels
-cannot point at accounts from another workspace, disconnected accounts,
-reconnect-required accounts, errored accounts, or accounts missing the required
-publishing capability.
+Channel destination validation enforces canonical connection ownership and
+publishing capability rules before a draft channel can point at an account:
+workspace, provider, artist compatibility, non-disconnected status, and
+`content_publish` or `manual_publish`. Health states such as
+`reconnect_required`, `pending`, `limited`, or `error` remain selectable so
+planning can preserve the intended destination while the readiness projection
+surfaces delivery warnings.
 
 ## Destination Resolver
 

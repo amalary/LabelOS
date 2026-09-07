@@ -92,6 +92,21 @@ export type SocialAccountConnectionsList = {
   offset: number;
 };
 
+export type SocialAccountOAuthStart = {
+  provider: SocialAccountProvider;
+  redirect_uri: string;
+  safe_redirect_path?: string;
+  scopes?: string[];
+  provider_metadata?: Record<string, unknown> | null;
+};
+
+export type SocialAccountOAuthStartResult = {
+  authorization_url: string;
+  state: string;
+  expires_at: string;
+  scopes: string[];
+};
+
 export type SocialAccountConnectionsListOptions = {
   provider?: SocialAccountProvider | null;
   status?: SocialAccountConnectionStatus | null;
@@ -642,6 +657,47 @@ export async function disconnectSocialAccountConnection(
   return connection;
 }
 
+export async function startSocialAccountOAuthConnection(
+  workspaceId: string,
+  payload: SocialAccountOAuthStart,
+): Promise<SocialAccountOAuthStartResult> {
+  return socialAccountConnectionJson<SocialAccountOAuthStartResult>(
+    `/api/workspaces/${workspaceId}/social-account-connections/oauth/start`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export async function checkSocialAccountConnectionHealth(
+  workspaceId: string,
+  connectionId: string,
+): Promise<SocialAccountConnection> {
+  const connection = await socialAccountConnectionJson<SocialAccountConnection>(
+    `/api/workspaces/${workspaceId}/social-account-connections/${connectionId}/health`,
+    {
+      method: "POST",
+    },
+  );
+  invalidateConnectionCaches(workspaceId, connectionId);
+  return connection;
+}
+
+export async function syncSocialAccountConnectionMetadata(
+  workspaceId: string,
+  connectionId: string,
+): Promise<SocialAccountConnection> {
+  const connection = await socialAccountConnectionJson<SocialAccountConnection>(
+    `/api/workspaces/${workspaceId}/social-account-connections/${connectionId}/sync`,
+    {
+      method: "POST",
+    },
+  );
+  invalidateConnectionCaches(workspaceId, connectionId);
+  return connection;
+}
+
 export function useSocialAccountConnections(
   workspaceId: string | null,
   options?: SocialAccountConnectionsListOptions,
@@ -732,6 +788,69 @@ export function useDisconnectSocialAccountConnection(
   }, [connectionId, workspaceId]);
   return useSocialAccountConnectionMutation(
     `social-account-connections:mutation:disconnect:${workspaceId ?? "none"}:${
+      connectionId ?? "none"
+    }`,
+    mutation,
+  );
+}
+
+export function useStartSocialAccountOAuthConnection(
+  workspaceId: string | null,
+): SocialAccountConnectionMutationState<SocialAccountOAuthStartResult, SocialAccountOAuthStart> {
+  const mutation = useCallback(
+    (payload: SocialAccountOAuthStart) => {
+      if (!workspaceId) {
+        throw new SocialAccountConnectionApiError(
+          "not_found",
+          "A workspace resource key is required.",
+        );
+      }
+      return startSocialAccountOAuthConnection(workspaceId, payload);
+    },
+    [workspaceId],
+  );
+  return useSocialAccountConnectionMutation(
+    `social-account-connections:mutation:oauth-start:${workspaceId ?? "none"}`,
+    mutation,
+  );
+}
+
+export function useCheckSocialAccountConnectionHealth(
+  workspaceId: string | null,
+  connectionId: string | null,
+): SocialAccountConnectionMutationState<SocialAccountConnection, void> {
+  const mutation = useCallback(() => {
+    if (!workspaceId || !connectionId) {
+      throw new SocialAccountConnectionApiError(
+        "not_found",
+        "A social account connection key is required.",
+      );
+    }
+    return checkSocialAccountConnectionHealth(workspaceId, connectionId);
+  }, [connectionId, workspaceId]);
+  return useSocialAccountConnectionMutation(
+    `social-account-connections:mutation:health:${workspaceId ?? "none"}:${
+      connectionId ?? "none"
+    }`,
+    mutation,
+  );
+}
+
+export function useSyncSocialAccountConnectionMetadata(
+  workspaceId: string | null,
+  connectionId: string | null,
+): SocialAccountConnectionMutationState<SocialAccountConnection, void> {
+  const mutation = useCallback(() => {
+    if (!workspaceId || !connectionId) {
+      throw new SocialAccountConnectionApiError(
+        "not_found",
+        "A social account connection key is required.",
+      );
+    }
+    return syncSocialAccountConnectionMetadata(workspaceId, connectionId);
+  }, [connectionId, workspaceId]);
+  return useSocialAccountConnectionMutation(
+    `social-account-connections:mutation:sync:${workspaceId ?? "none"}:${
       connectionId ?? "none"
     }`,
     mutation,

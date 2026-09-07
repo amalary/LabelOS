@@ -4,6 +4,7 @@ import {
   SocialAccountConnectionApiError,
   canAutoPublish,
   canReadAnalytics,
+  checkSocialAccountConnectionHealth,
   createAssistedSocialAccountConnection,
   disconnectSocialAccountConnection,
   getSocialAccountConnection,
@@ -11,6 +12,8 @@ import {
   requiresManualPublish,
   shouldInvalidateSocialAccountConnectionRealtimeCacheKey,
   socialAccountConnectionQueryKeys,
+  startSocialAccountOAuthConnection,
+  syncSocialAccountConnectionMetadata,
   updateSocialAccountConnection,
   type SocialAccountConnection,
 } from "./social-account-connections";
@@ -98,11 +101,13 @@ describe("social account connections data layer", () => {
     );
   });
 
-  it("reads, mutates, and disconnects connections through proxy routes", async () => {
+  it("reads, mutates, checks, syncs, and disconnects connections through proxy routes", async () => {
     vi.mocked(fetch)
       .mockResolvedValueOnce(Response.json(socialAccountConnection))
       .mockResolvedValueOnce(Response.json(socialAccountConnection, { status: 201 }))
       .mockResolvedValueOnce(Response.json({ ...socialAccountConnection, display_name: "Final" }))
+      .mockResolvedValueOnce(Response.json({ ...socialAccountConnection, status: "connected" }))
+      .mockResolvedValueOnce(Response.json({ ...socialAccountConnection, display_name: "Synced" }))
       .mockResolvedValueOnce(
         Response.json({ ...socialAccountConnection, status: "disconnected" }),
       );
@@ -125,6 +130,12 @@ describe("social account connections data layer", () => {
         display_name: "Final",
       }),
     ).resolves.toMatchObject({ display_name: "Final" });
+    await expect(
+      checkSocialAccountConnectionHealth("workspace_01", "connection_01"),
+    ).resolves.toMatchObject({ status: "connected" });
+    await expect(
+      syncSocialAccountConnectionMetadata("workspace_01", "connection_01"),
+    ).resolves.toMatchObject({ display_name: "Synced" });
     await expect(
       disconnectSocialAccountConnection("workspace_01", "connection_01"),
     ).resolves.toMatchObject({ status: "disconnected" });
@@ -152,8 +163,46 @@ describe("social account connections data layer", () => {
     );
     expect(fetch).toHaveBeenNthCalledWith(
       4,
+      "/api/workspaces/workspace_01/social-account-connections/connection_01/health",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(fetch).toHaveBeenNthCalledWith(
+      5,
+      "/api/workspaces/workspace_01/social-account-connections/connection_01/sync",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(fetch).toHaveBeenNthCalledWith(
+      6,
       "/api/workspaces/workspace_01/social-account-connections/connection_01/disconnect",
       expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("starts OAuth social account connections through the workspace proxy", async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      Response.json({
+        authorization_url: "https://accounts.example/authorize?state=state_01",
+        state: "state_01",
+        expires_at: "2026-09-06T12:10:00Z",
+        scopes: ["publish"],
+      }),
+    );
+
+    await expect(
+      startSocialAccountOAuthConnection("workspace_01", {
+        provider: "youtube",
+        redirect_uri:
+          "https://app.labelos.test/api/workspaces/workspace_01/social-account-connections/oauth/youtube/callback",
+        scopes: ["publish"],
+      }),
+    ).resolves.toMatchObject({ state: "state_01" });
+
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/workspaces/workspace_01/social-account-connections/oauth/start",
+      expect.objectContaining({
+        body: expect.stringContaining('"provider":"youtube"'),
+        method: "POST",
+      }),
     );
   });
 
