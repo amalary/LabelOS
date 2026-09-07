@@ -51,6 +51,7 @@ from labelos_api.services.marketing_content_service import (
     MarketingContentLifecycleError,
     MarketingContentNotFoundError,
     MarketingContentRelationshipError,
+    ManualPublishScheduleInput,
     archive_content_item,
     create_content_item,
     get_campaign_content_item,
@@ -58,6 +59,7 @@ from labelos_api.services.marketing_content_service import (
     list_campaign_content_items,
     list_content_items,
     list_content_items_by_date_range,
+    prepare_assisted_publish_handoff,
     replace_channels,
     transition_status,
     update_channel,
@@ -941,6 +943,181 @@ def test_marketing_content_service_validates_optional_channel_social_account_tar
         "disconnected": True,
         "missing_capability": True,
     }
+
+
+def test_prepare_assisted_publish_handoff_returns_scheduler_delivery_contract(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async def run() -> dict[str, object]:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            campaign = data["campaign"]
+            artist = data["artist"]
+            artist_profile = data["artist_profile"]
+            assert isinstance(workspace, Organization)
+            assert isinstance(campaign, Campaign)
+            assert isinstance(artist, Artist)
+            assert isinstance(artist_profile, ArtistProfile)
+
+            assisted = SocialAccountConnection(
+                organization=workspace,
+                artist_profile=artist_profile,
+                provider="instagram",
+                username="@alpha-assisted",
+                display_name="Alpha Assisted",
+                profile_url="https://instagram.com/alpha-assisted",
+                status=SocialAccountConnectionStatus.connected,
+                capabilities=["manual_publish", "manual_metrics"],
+            )
+            session.add(assisted)
+            await session.flush()
+
+            item = await create_content_item(
+                session,
+                workspace.id,
+                MarketingContentItemCreate(
+                    campaign_id=campaign.id,
+                    title="Manual Reel",
+                    content_type="video",
+                    artist_id=artist.id,
+                    copy_text="Item caption",
+                    asset_refs=[{"asset_id": "item_asset"}],
+                    metadata_json={"hashtags": ["Alpha", "#Launch"]},
+                    channels=[
+                        MarketingContentChannelCreate(
+                            channel="instagram",
+                            placement="reel",
+                            social_account_connection_id=assisted.id,
+                            copy_text_override="Channel caption",
+                            asset_refs=[{"asset_id": "channel_asset"}],
+                            metadata_json={"hashtags": ["#Launch", "Reels"]},
+                        )
+                    ],
+                ),
+            )
+            intended_at = datetime(2026, 9, 15, 17, 30, tzinfo=UTC)
+            handoff = await prepare_assisted_publish_handoff(
+                session,
+                workspace.id,
+                item.id,
+                item.channels[0].id,
+                ManualPublishScheduleInput(intended_publication_at=intended_at),
+            )
+            return {
+                "marketing_content_id": handoff.marketing_content_id,
+                "channel_id": handoff.channel_content_item_channel_id,
+                "connection_id": handoff.social_account_connection_id,
+                "provider": handoff.provider,
+                "handle": handoff.handle,
+                "account_display": handoff.account_display,
+                "capability": handoff.capability,
+                "health_status": handoff.health_status,
+                "asset_refs": handoff.asset_refs,
+                "caption": handoff.caption,
+                "hashtags": handoff.hashtags,
+                "intended_at": handoff.intended_publication_at,
+                "safe_link": handoff.safe_profile_provider_link,
+                "instructions": handoff.manual_instructions,
+                "completion": handoff.completion,
+            }
+
+    result = asyncio.run(run())
+
+    assert result["marketing_content_id"] is not None
+    assert result["channel_id"] is not None
+    assert result["connection_id"] is not None
+    assert result["provider"] == "instagram"
+    assert result["handle"] == "@alpha-assisted"
+    assert result["account_display"] == "Alpha Assisted"
+    assert result["capability"] == "manual_publish"
+    assert result["health_status"] == "connected"
+    assert result["asset_refs"] == [{"asset_id": "channel_asset"}]
+    assert result["caption"] == "Channel caption"
+    assert result["hashtags"] == ("#Alpha", "#Launch", "#Reels")
+    assert result["intended_at"] == datetime(2026, 9, 15, 17, 30, tzinfo=UTC)
+    assert result["safe_link"] == "https://instagram.com/alpha-assisted"
+    assert "record the external post ID or URL" in str(result["instructions"])
+    assert result["completion"] is None
+
+
+def test_prepare_assisted_publish_handoff_rejects_automatic_and_missing_scheduler_time(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async def run() -> dict[str, bool]:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            campaign = data["campaign"]
+            artist_profile = data["artist_profile"]
+            assert isinstance(workspace, Organization)
+            assert isinstance(campaign, Campaign)
+            assert isinstance(artist_profile, ArtistProfile)
+
+            automatic = SocialAccountConnection(
+                organization=workspace,
+                artist_profile=artist_profile,
+                provider="instagram",
+                username="@alpha-auto",
+                connection_method=SocialAccountConnectionMethod.direct_api,
+                status=SocialAccountConnectionStatus.connected,
+                capabilities=["content_publish"],
+            )
+            session.add(automatic)
+            await session.flush()
+
+            item = await create_content_item(
+                session,
+                workspace.id,
+                MarketingContentItemCreate(
+                    campaign_id=campaign.id,
+                    title="Auto Reel",
+                    content_type="video",
+                    channels=[
+                        MarketingContentChannelCreate(
+                            channel="instagram",
+                            social_account_connection_id=automatic.id,
+                        )
+                    ],
+                ),
+            )
+            result = {"automatic_rejected": False, "naive_time_rejected": False}
+            try:
+                await prepare_assisted_publish_handoff(
+                    session,
+                    workspace.id,
+                    item.id,
+                    item.channels[0].id,
+                    ManualPublishScheduleInput(
+                        intended_publication_at=datetime(2026, 9, 15, 17, 30),
+                    ),
+                )
+            except MarketingContentRelationshipError:
+                result["naive_time_rejected"] = True
+            try:
+                await prepare_assisted_publish_handoff(
+                    session,
+                    workspace.id,
+                    item.id,
+                    item.channels[0].id,
+                    ManualPublishScheduleInput(
+                        intended_publication_at=datetime(
+                            2026, 9, 15, 17, 30, tzinfo=UTC
+                        ),
+                    ),
+                )
+            except MarketingContentRelationshipError:
+                result["automatic_rejected"] = True
+            return result
+
+    assert asyncio.run(run()) == {
+        "automatic_rejected": True,
+        "naive_time_rejected": True,
+    }
+
+
+def test_manual_publish_task_persistence_is_intentionally_deferred() -> None:
+    assert "manual_publish_tasks" not in Base.metadata.tables
 
 
 def test_marketing_content_service_filters_items(

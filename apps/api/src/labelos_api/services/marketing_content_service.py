@@ -1,6 +1,8 @@
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import StrEnum
+from urllib.parse import urlparse
 from uuid import UUID
 
 from labelos_database.models import (
@@ -56,6 +58,14 @@ class MarketingContentAuthorizationError(MarketingContentServiceError):
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
         self.reason = reason
+
+
+class ManualPublishCompletionStatus(StrEnum):
+    pending = "pending"
+    in_progress = "in_progress"
+    completed = "completed"
+    failed = "failed"
+    cancelled = "cancelled"
 
 
 MAX_MARKETING_CONTENT_LIST_LIMIT = 500
@@ -217,6 +227,39 @@ class MarketingContentItemQuery:
     published_end: datetime | None = None
 
 
+@dataclass(frozen=True, kw_only=True)
+class ManualPublishScheduleInput:
+    intended_publication_at: datetime
+
+
+@dataclass(frozen=True, kw_only=True)
+class ManualPublishCompletion:
+    status: ManualPublishCompletionStatus
+    external_post_id: str | None = None
+    external_url: str | None = None
+    completed_at: datetime | None = None
+    notes: str | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class AssistedPublishHandoff:
+    marketing_content_id: UUID
+    channel_content_item_channel_id: UUID
+    social_account_connection_id: UUID
+    provider: str
+    handle: str | None
+    account_display: str | None
+    capability: str
+    health_status: str
+    asset_refs: list
+    caption: str | None
+    hashtags: tuple[str, ...]
+    intended_publication_at: datetime
+    safe_profile_provider_link: str | None
+    manual_instructions: str
+    completion: ManualPublishCompletion | None = None
+
+
 def _now() -> datetime:
     return datetime.now(UTC)
 
@@ -247,6 +290,14 @@ def _json_object(value: dict | None, field_name: str) -> dict:
         return {}
     if not isinstance(value, dict):
         raise MarketingContentRelationshipError(f"{field_name} must be a JSON object")
+    return value
+
+
+def _require_timezone(value: datetime, field_name: str) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise MarketingContentRelationshipError(
+            f"{field_name} must include timezone information"
+        )
     return value
 
 
@@ -369,6 +420,53 @@ def _channel_update_values(
 def _set_if_not_none(values: dict[str, object], key: str, value: object | None) -> None:
     if value is not None:
         values[key] = value
+
+
+def _safe_absolute_http_url(value: str | None) -> str | None:
+    normalized = _normalize_optional_text(value)
+    if normalized is None:
+        return None
+    parsed = urlparse(normalized)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+    if parsed.username or parsed.password:
+        return None
+    return normalized
+
+
+def _structured_hashtags(*metadata_values: Mapping[str, object]) -> tuple[str, ...]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for metadata in metadata_values:
+        raw_hashtags = metadata.get("hashtags")
+        if not isinstance(raw_hashtags, list):
+            continue
+        for raw_hashtag in raw_hashtags:
+            if not isinstance(raw_hashtag, str):
+                continue
+            hashtag = raw_hashtag.strip()
+            if not hashtag:
+                continue
+            hashtag = hashtag if hashtag.startswith("#") else f"#{hashtag}"
+            key = hashtag.lower()
+            if key not in seen:
+                normalized.append(hashtag)
+                seen.add(key)
+    return tuple(normalized)
+
+
+def _manual_instructions(
+    *,
+    provider: str,
+    handle: str | None,
+    profile_link: str | None,
+) -> str:
+    target = handle or profile_link or provider
+    return (
+        f"Manually publish this content to {provider} for {target}. "
+        "Use the supplied caption, hashtags, assets, and scheduled time. "
+        "After publishing, record the external post ID or URL and completion status."
+    )
 
 
 def _actor_user(actor: AuthorizationActorInput | None) -> User | None:
@@ -936,6 +1034,73 @@ async def get_campaign_content_item(
     if item is None:
         raise MarketingContentNotFoundError("Marketing content item not found")
     return item
+
+
+async def prepare_assisted_publish_handoff(
+    session: AsyncSession,
+    workspace_id: UUID,
+    content_item_id: UUID,
+    channel_id: UUID,
+    schedule: ManualPublishScheduleInput,
+    *,
+    actor: AuthorizationActorInput | None = None,
+) -> AssistedPublishHandoff:
+    _require_timezone(
+        schedule.intended_publication_at,
+        "intended_publication_at",
+    )
+    item = await get_content_item(
+        session,
+        workspace_id,
+        content_item_id,
+        actor=actor,
+    )
+    channel = next((row for row in item.channels if row.id == channel_id), None)
+    if channel is None:
+        raise MarketingContentNotFoundError("Marketing content channel not found")
+    connection = channel.social_account_connection
+    if channel.social_account_connection_id is None or connection is None:
+        raise MarketingContentRelationshipError(
+            "Assisted publishing requires a social_account_connection_id"
+        )
+    _validate_channel_connection(
+        {
+            "channel": channel.channel,
+            "social_account_connection_id": channel.social_account_connection_id,
+        },
+        connection,
+        item.artist_id or item.campaign.primary_artist_id,
+    )
+    if "manual_publish" not in set(connection.capabilities or []):
+        raise MarketingContentRelationshipError(
+            "Assisted publishing handoff requires manual_publish capability"
+        )
+    if "content_publish" in set(connection.capabilities or []):
+        raise MarketingContentRelationshipError(
+            "Assisted publishing handoff is only for manual_publish destinations"
+        )
+    profile_link = _safe_absolute_http_url(connection.profile_url)
+    return AssistedPublishHandoff(
+        marketing_content_id=item.id,
+        channel_content_item_channel_id=channel.id,
+        social_account_connection_id=connection.id,
+        provider=connection.provider,
+        handle=connection.username,
+        account_display=connection.display_name,
+        capability="manual_publish",
+        health_status=connection.status.value,
+        asset_refs=list(channel.asset_refs or item.asset_refs or []),
+        caption=channel.copy_text_override or item.copy_text,
+        hashtags=_structured_hashtags(item.metadata_json, channel.metadata_json),
+        intended_publication_at=schedule.intended_publication_at,
+        safe_profile_provider_link=profile_link,
+        manual_instructions=_manual_instructions(
+            provider=connection.provider,
+            handle=connection.username,
+            profile_link=profile_link,
+        ),
+        completion=None,
+    )
 
 
 async def list_content_items(
