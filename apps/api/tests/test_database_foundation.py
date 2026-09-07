@@ -460,7 +460,10 @@ def test_marketing_content_models_define_persistence_contract() -> None:
         "ix_marketing_content_item_channels_channel",
         "ix_marketing_content_item_channels_channel_scheduled_at",
     } <= channel_index_names
-    assert channel_foreign_key_deletions == {"marketing_content_item_id": "CASCADE"}
+    assert channel_foreign_key_deletions == {
+        "marketing_content_item_id": "CASCADE",
+        "social_account_connection_id": "SET NULL",
+    }
 
     assert [status.value for status in MarketingContentItemStatus] == [
         "draft",

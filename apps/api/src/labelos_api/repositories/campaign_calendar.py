@@ -17,6 +17,7 @@ from labelos_database.models import (
     MarketingContentItem,
     MarketingContentItemChannel,
     MarketingContentItemStatus,
+    SocialAccountConnection,
 )
 from sqlalchemy import Select, and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -74,6 +75,7 @@ class CampaignCalendarEvent:
     channel_id: UUID | None = None
     channel: str | None = None
     placement: str | None = None
+    social_account_connection: SocialAccountConnection | None = None
     approval_request_id: UUID | None = None
     approval_request: ApprovalRequest | None = None
 
@@ -116,6 +118,9 @@ def _milestone_load_options():
 def _content_load_options():
     return (
         selectinload(MarketingContentItem.channels),
+        selectinload(MarketingContentItem.channels).selectinload(
+            MarketingContentItemChannel.social_account_connection
+        ),
         selectinload(MarketingContentItem.campaign).selectinload(
             Campaign.primary_artist
         ),
@@ -622,6 +627,7 @@ def _channel_event(
         channel_id=channel.id,
         channel=channel.channel,
         placement=channel.placement,
+        social_account_connection=channel.social_account_connection,
     )
 
 

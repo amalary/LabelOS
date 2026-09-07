@@ -351,6 +351,29 @@ function channel(overrides: Partial<MarketingContentItem["channels"][number]> = 
   return { ...item().channels[0]!, ...overrides };
 }
 
+function destinationReadiness(
+  overrides: Partial<
+    NonNullable<MarketingContentItem["channels"][number]["destination_readiness"]>
+  > = {},
+): NonNullable<MarketingContentItem["channels"][number]["destination_readiness"]> {
+  return {
+    account: {
+      connection_method: "direct_api",
+      display_name: "Mira Official",
+      handle: "@mira",
+      id: "connection_01",
+      provider: "instagram",
+      status: "connected",
+    },
+    delivery_ready: true,
+    label: "Ready",
+    planning_valid: true,
+    status: "ready",
+    warning: null,
+    ...overrides,
+  };
+}
+
 function socialConnection(
   overrides: Partial<SocialAccountConnection> = {},
 ): SocialAccountConnection {
@@ -729,6 +752,95 @@ describe("MarketingWorkspace", () => {
     expect(screen.getByText("Instagram / Tiktok / Youtube")).toBeInTheDocument();
     expect(screen.getByText("Multi-time")).toBeInTheDocument();
     expect(screen.getAllByText("Single Rollout").length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("shows destination readiness on calendar channel rows without blocking planning", () => {
+    mockCalendar([
+      item({
+        channels: [
+          channel({
+            destination_readiness: destinationReadiness(),
+            social_account_connection_id: "connection_auto",
+          }),
+          channel({
+            channel: "tiktok",
+            destination_readiness: destinationReadiness({
+              account: {
+                connection_method: "assisted",
+                display_name: "Mira TikTok",
+                handle: "@mira",
+                id: "connection_assisted",
+                provider: "tiktok",
+                status: "connected",
+              },
+              label: "Assisted Publishing",
+              status: "assisted",
+              warning: "Delivery requires assisted publishing.",
+            }),
+            id: "channel_02",
+            social_account_connection_id: "connection_assisted",
+          }),
+          channel({
+            channel: "youtube",
+            destination_readiness: destinationReadiness({
+              account: {
+                connection_method: "direct_api",
+                display_name: "Mira YouTube",
+                handle: "@mira",
+                id: "connection_reconnect",
+                provider: "youtube",
+                status: "reconnect_required",
+              },
+              delivery_ready: false,
+              label: "Reconnect Required",
+              status: "reconnect_required",
+              warning: "Selected account must be reconnected before delivery.",
+            }),
+            id: "channel_03",
+            social_account_connection_id: "connection_reconnect",
+          }),
+          channel({
+            channel: "facebook",
+            destination_readiness: destinationReadiness({
+              account: null,
+              delivery_ready: false,
+              label: "No Account Selected",
+              status: "missing_account",
+              warning: "Missing account is a delivery warning; content planning remains valid.",
+            }),
+            id: "channel_04",
+            social_account_connection_id: null,
+          }),
+          channel({
+            channel: "x",
+            destination_readiness: destinationReadiness({
+              account: {
+                connection_method: "direct_api",
+                display_name: "Mira X",
+                handle: "@mira_x",
+                id: "connection_disconnected",
+                provider: "x",
+                status: "disconnected",
+              },
+              delivery_ready: false,
+              label: "Disconnected",
+              status: "disconnected",
+              warning: "Selected account is disconnected; choose another account before delivery.",
+            }),
+            id: "channel_05",
+            social_account_connection_id: "connection_disconnected",
+          }),
+        ],
+      }),
+    ]);
+
+    render(<MarketingWorkspace />);
+
+    expect(screen.getByText("Instagram @mira Ready")).toBeInTheDocument();
+    expect(screen.getByText("Tiktok @mira Assisted Publishing")).toBeInTheDocument();
+    expect(screen.getByText("Youtube @mira Reconnect Required")).toBeInTheDocument();
+    expect(screen.getByText("Facebook No Account Selected")).toBeInTheDocument();
+    expect(screen.getByText("X @mira_x Disconnected")).toBeInTheDocument();
   });
 
   it("uses the earliest relevant channel date when the parent schedule is missing", () => {

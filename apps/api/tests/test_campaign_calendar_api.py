@@ -626,6 +626,16 @@ def test_campaign_calendar_api_projected_event_shapes(
         "id": str(seeded.channel_id),
         "channel": "Instagram",
         "placement": "Reel",
+        "destination_readiness": {
+            "planning_valid": True,
+            "delivery_ready": False,
+            "status": "missing_account",
+            "label": "No Account Selected",
+            "warning": (
+                "Missing account is a delivery warning; content planning remains valid."
+            ),
+            "account": None,
+        },
     }
     assert approval_event["source_type"] == "approval_request"
     assert approval_event["approval"]["request_id"] == str(seeded.approval_request_id)

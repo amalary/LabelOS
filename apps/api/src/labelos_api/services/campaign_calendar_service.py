@@ -21,6 +21,11 @@ from labelos_api.repositories.approval_resources import (
     get_approval_resource_adapter,
 )
 from labelos_api.services import approval_service
+from labelos_api.services.social_account_service import (
+    DestinationUnavailableReason,
+    ResolvedDestination,
+    resolved_destination_for_connection,
+)
 
 MAX_CAMPAIGN_CALENDAR_LIMIT = 1000
 
@@ -75,10 +80,31 @@ class CampaignCalendarReleaseContext:
 
 
 @dataclass(frozen=True, kw_only=True)
+class CampaignCalendarDestinationAccountContext:
+    id: str
+    provider: str
+    handle: str | None
+    display_name: str | None
+    connection_method: str
+    status: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class CampaignCalendarDestinationReadinessContext:
+    planning_valid: bool
+    delivery_ready: bool
+    status: str
+    label: str
+    warning: str | None
+    account: CampaignCalendarDestinationAccountContext | None
+
+
+@dataclass(frozen=True, kw_only=True)
 class CampaignCalendarChannelContext:
     id: str
     channel: str
     placement: str
+    destination_readiness: CampaignCalendarDestinationReadinessContext | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -371,7 +397,117 @@ def _channel_context(
         id=str(event.channel_id),
         channel=event.channel,
         placement=event.placement,
+        destination_readiness=_destination_readiness(event),
     )
+
+
+def _destination_readiness(
+    event: campaign_calendar.CampaignCalendarEvent,
+) -> CampaignCalendarDestinationReadinessContext:
+    connection = event.social_account_connection
+    if connection is None:
+        return CampaignCalendarDestinationReadinessContext(
+            planning_valid=True,
+            delivery_ready=False,
+            status="missing_account",
+            label="No Account Selected",
+            warning="Missing account is a delivery warning; content planning remains valid.",
+            account=None,
+        )
+    destination = resolved_destination_for_connection(
+        connection,
+        workspace_id=event.workspace_id,
+        provider=event.channel,
+    )
+    return _destination_readiness_response(destination)
+
+
+def _destination_readiness_response(
+    destination: ResolvedDestination,
+) -> CampaignCalendarDestinationReadinessContext:
+    account = destination.account
+    publishing_capable = bool(
+        destination.supports_automatic_publication
+        or destination.requires_assisted_publication
+    )
+    reasons = list(destination.unavailable_reasons)
+    if not publishing_capable:
+        reasons.append(DestinationUnavailableReason.missing_capability)
+    unique_reasons = tuple(dict.fromkeys(reasons))
+    delivery_ready = destination.usable and publishing_capable
+    if delivery_ready and destination.supports_automatic_publication:
+        status = "ready"
+        label = "Ready"
+        warning = None
+    elif delivery_ready and destination.requires_assisted_publication:
+        status = "assisted"
+        label = "Assisted Publishing"
+        warning = "Delivery requires assisted publishing."
+    else:
+        status = _destination_unavailable_status(unique_reasons)
+        label = _destination_unavailable_label(status)
+        warning = _destination_unavailable_warning(status)
+    return CampaignCalendarDestinationReadinessContext(
+        planning_valid=True,
+        delivery_ready=delivery_ready,
+        status=status,
+        label=label,
+        warning=warning,
+        account=CampaignCalendarDestinationAccountContext(
+            id=str(account.id),
+            provider=account.provider,
+            handle=account.username,
+            display_name=account.display_name,
+            connection_method=account.connection_method.value,
+            status=account.status.value,
+        ),
+    )
+
+
+def _destination_unavailable_status(
+    reasons: tuple[DestinationUnavailableReason, ...],
+) -> str:
+    if DestinationUnavailableReason.disconnected in reasons:
+        return "disconnected"
+    if DestinationUnavailableReason.reconnect_required in reasons:
+        return "reconnect_required"
+    if DestinationUnavailableReason.connection_error in reasons:
+        return "connection_error"
+    if DestinationUnavailableReason.missing_capability in reasons:
+        return "missing_capability"
+    if DestinationUnavailableReason.provider_mismatch in reasons:
+        return "provider_mismatch"
+    if DestinationUnavailableReason.wrong_artist in reasons:
+        return "wrong_artist"
+    if DestinationUnavailableReason.wrong_workspace in reasons:
+        return "wrong_workspace"
+    return "unavailable"
+
+
+def _destination_unavailable_label(status_value: str) -> str:
+    labels = {
+        "disconnected": "Disconnected",
+        "reconnect_required": "Reconnect Required",
+        "connection_error": "Connection Error",
+        "missing_capability": "Missing Publishing Capability",
+        "provider_mismatch": "Provider Mismatch",
+        "wrong_artist": "Wrong Artist",
+        "wrong_workspace": "Wrong Workspace",
+    }
+    return labels.get(status_value, "Unavailable")
+
+
+def _destination_unavailable_warning(status_value: str) -> str:
+    warnings = {
+        "disconnected": "Selected account is disconnected; choose another account before delivery.",
+        "reconnect_required": "Selected account must be reconnected before delivery.",
+        "connection_error": "Selected account needs attention before delivery.",
+        "missing_capability": "Selected account cannot publish this content.",
+        "provider_mismatch": "Selected account provider does not match this channel.",
+        "wrong_artist": "Selected account is attached to a different artist.",
+        "wrong_workspace": "Selected account belongs to a different workspace.",
+    }
+    return warnings.get(status_value, "Selected account is not delivery ready.")
 
 
 async def _approval_context(

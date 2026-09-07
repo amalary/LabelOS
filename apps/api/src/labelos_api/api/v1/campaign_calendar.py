@@ -39,10 +39,31 @@ class CampaignCalendarReleaseContextResponse(BaseModel):
     artist_id: UUID | None
 
 
+class CampaignCalendarDestinationAccountContextResponse(BaseModel):
+    id: UUID
+    provider: str
+    handle: str | None
+    display_name: str | None
+    connection_method: str
+    status: str
+
+
+class CampaignCalendarDestinationReadinessContextResponse(BaseModel):
+    planning_valid: bool
+    delivery_ready: bool
+    status: str
+    label: str
+    warning: str | None
+    account: CampaignCalendarDestinationAccountContextResponse | None
+
+
 class CampaignCalendarChannelContextResponse(BaseModel):
     id: UUID
     channel: str
     placement: str
+    destination_readiness: (
+        CampaignCalendarDestinationReadinessContextResponse | None
+    ) = None
 
 
 class CampaignCalendarApprovalContextResponse(BaseModel):

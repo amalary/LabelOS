@@ -233,6 +233,37 @@ function channelSummary(item: MarketingContentItem): string {
   return channels.length ? channels.map(humanize).join(" / ") : "No channel";
 }
 
+function destinationAccountLabel(
+  account: NonNullable<
+    NonNullable<MarketingContentItem["channels"][number]["destination_readiness"]>["account"]
+  >,
+): string {
+  return account.handle ?? account.display_name ?? account.id;
+}
+
+function channelDestinationSummaries(item: MarketingContentItem): string[] {
+  if (!item.channels.length) {
+    return ["No channel"];
+  }
+  return item.channels.map((channel) => {
+    const readiness = channel.destination_readiness;
+    const account = readiness?.account ? ` ${destinationAccountLabel(readiness.account)}` : "";
+    return `${humanize(channel.channel)}${account} ${readiness?.label ?? "No Account Selected"}`;
+  });
+}
+
+function destinationReadinessVariant(
+  readiness: MarketingContentItem["channels"][number]["destination_readiness"] | undefined,
+) {
+  if (readiness?.status === "ready") {
+    return "success" as const;
+  }
+  if (readiness?.status === "assisted" || readiness?.status === "missing_account") {
+    return "warning" as const;
+  }
+  return "neutral" as const;
+}
+
 function channelPlacementSummary(item: MarketingContentItem): string {
   const placements = [
     ...new Set(
@@ -1424,6 +1455,13 @@ function MonthCalendar({
                     <span className="truncate text-xs text-slate-500">
                       {channelSummary(instance.item)}
                     </span>
+                    <span className="grid gap-0.5">
+                      {channelDestinationSummaries(instance.item).map((summary, index) => (
+                        <span className="truncate text-xs text-slate-600" key={index}>
+                          {summary}
+                        </span>
+                      ))}
+                    </span>
                     <span className="flex flex-wrap items-center gap-1">
                       <Badge
                         className="max-w-full truncate"
@@ -1504,6 +1542,22 @@ function CalendarList({
               <p className="mt-1 text-sm text-slate-500">
                 {humanize(instance.item.content_type)} - {channelSummary(instance.item)}
               </p>
+              <div className="mt-2 flex flex-wrap gap-1">
+                {instance.item.channels.length ? (
+                  instance.item.channels.map((channel) => {
+                    const readiness = channel.destination_readiness;
+                    return (
+                      <Badge key={channel.id} variant={destinationReadinessVariant(readiness)}>
+                        {`${humanize(channel.channel)} ${
+                          readiness?.account ? destinationAccountLabel(readiness.account) : ""
+                        } ${readiness?.label ?? "No Account Selected"}`.replace(/\s+/g, " ")}
+                      </Badge>
+                    );
+                  })
+                ) : (
+                  <Badge variant="warning">No Account Selected</Badge>
+                )}
+              </div>
             </div>
             <div>
               <p className="text-xs font-semibold uppercase text-slate-500">Campaign</p>

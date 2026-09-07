@@ -147,6 +147,35 @@ function eventContext(event: CampaignCalendarEvent): string {
   return parts.join(" - ") || "Workspace event";
 }
 
+function destinationAccountLabel(
+  account: NonNullable<
+    NonNullable<NonNullable<CampaignCalendarEvent["channel"]>["destination_readiness"]>["account"]
+  >,
+): string {
+  return account.handle ?? account.display_name ?? account.id;
+}
+
+function eventDestinationSummary(event: CampaignCalendarEvent): string | null {
+  const readiness = event.channel?.destination_readiness;
+  if (!event.channel || !readiness) {
+    return null;
+  }
+  const account = readiness.account ? ` ${destinationAccountLabel(readiness.account)}` : "";
+  return `${humanize(event.channel.channel)}${account} ${readiness.label}`;
+}
+
+function destinationReadinessVariant(
+  readiness: NonNullable<CampaignCalendarEvent["channel"]>["destination_readiness"] | null | undefined,
+) {
+  if (readiness?.status === "ready") {
+    return "success" as const;
+  }
+  if (readiness?.status === "assisted" || readiness?.status === "missing_account") {
+    return "warning" as const;
+  }
+  return "neutral" as const;
+}
+
 export function campaignCalendarEventHref(event: CampaignCalendarEvent): string {
   if (event.url) {
     return event.url;
@@ -375,6 +404,7 @@ function EventCard({
   timeZone: string;
 }) {
   const label = eventTypeLabel(event.event_type);
+  const destinationSummary = eventDestinationSummary(event);
   return (
     <button
       aria-label={`${label}: ${event.title}`}
@@ -390,6 +420,9 @@ function EventCard({
       </span>
       <span className="truncate text-xs text-slate-500">{eventTimeLabel(event, timeZone)}</span>
       <span className="truncate text-xs text-slate-500">{eventContext(event)}</span>
+      {destinationSummary ? (
+        <span className="truncate text-xs text-slate-600">{destinationSummary}</span>
+      ) : null}
       {event.status ? (
         <span className="truncate text-xs text-slate-600">{humanize(event.status)}</span>
       ) : null}
@@ -496,36 +529,47 @@ function CalendarList({
               {formatCalendarListDate(`${dateKey}T12:00:00Z`, "UTC").replace(", 12:00 PM", "")}
             </h3>
             <div className="grid gap-2">
-              {dateEvents.map((event) => (
-                <button
-                  aria-label={`${eventTypeLabel(event.event_type)}: ${event.title}`}
-                  className="grid gap-3 rounded-md border border-slate-200 px-3 py-3 text-left transition hover:border-slate-400 hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-950 md:grid-cols-[180px_minmax(0,1fr)_180px_160px]"
-                  key={event.id}
-                  onClick={() => onOpenEvent(event)}
-                  type="button"
-                >
-                  <div>
-                    <p className="text-xs font-semibold uppercase text-slate-500">
-                      {event.all_day ? "All-day event" : "Timed event"}
-                    </p>
-                    <p className="mt-1 text-sm font-medium text-slate-900">
-                      {eventTimeLabel(event, timeZone)}
-                    </p>
-                  </div>
-                  <div className="min-w-0">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <Badge variant={eventVariant(event)}>
-                        {eventTypeToken(event.event_type)}
-                      </Badge>
-                      <h4 className="truncate text-sm font-semibold text-slate-950">
-                        {event.title}
-                      </h4>
-                      <Badge>{eventTypeLabel(event.event_type)}</Badge>
+              {dateEvents.map((event) => {
+                const destinationSummary = eventDestinationSummary(event);
+                return (
+                  <button
+                    aria-label={`${eventTypeLabel(event.event_type)}: ${event.title}`}
+                    className="grid gap-3 rounded-md border border-slate-200 px-3 py-3 text-left transition hover:border-slate-400 hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-950 md:grid-cols-[180px_minmax(0,1fr)_180px_160px]"
+                    key={event.id}
+                    onClick={() => onOpenEvent(event)}
+                    type="button"
+                  >
+                    <div>
+                      <p className="text-xs font-semibold uppercase text-slate-500">
+                        {event.all_day ? "All-day event" : "Timed event"}
+                      </p>
+                      <p className="mt-1 text-sm font-medium text-slate-900">
+                        {eventTimeLabel(event, timeZone)}
+                      </p>
                     </div>
-                    <p className="mt-1 text-sm text-slate-500">
-                      {event.description ?? eventContext(event)}
-                    </p>
-                  </div>
+                    <div className="min-w-0">
+                      {destinationSummary ? (
+                        <Badge
+                          variant={destinationReadinessVariant(
+                            event.channel?.destination_readiness,
+                          )}
+                        >
+                          {destinationSummary}
+                        </Badge>
+                      ) : null}
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Badge variant={eventVariant(event)}>
+                          {eventTypeToken(event.event_type)}
+                        </Badge>
+                        <h4 className="truncate text-sm font-semibold text-slate-950">
+                          {event.title}
+                        </h4>
+                        <Badge>{eventTypeLabel(event.event_type)}</Badge>
+                      </div>
+                      <p className="mt-1 text-sm text-slate-500">
+                        {event.description ?? eventContext(event)}
+                      </p>
+                    </div>
                   <div>
                     <p className="text-xs font-semibold uppercase text-slate-500">Campaign</p>
                     <p className="mt-1 truncate text-sm font-medium text-slate-800">
@@ -538,8 +582,9 @@ function CalendarList({
                       {humanize(event.status)}
                     </p>
                   </div>
-                </button>
-              ))}
+                  </button>
+                );
+              })}
             </div>
           </section>
         ))}

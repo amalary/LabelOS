@@ -564,6 +564,23 @@ def _resolved_destination(
     )
 
 
+def resolved_destination_for_connection(
+    connection: SocialAccountConnection,
+    *,
+    workspace_id: UUID,
+    provider: str | None = None,
+    artist_profile_id: UUID | None = None,
+    desired_capability: str | None = None,
+) -> ResolvedDestination:
+    return _resolved_destination(
+        connection,
+        workspace_id=workspace_id,
+        provider=_normalize_destination_provider(provider),
+        artist_profile_id=artist_profile_id,
+        desired_capability=_normalize_desired_capability(desired_capability),
+    )
+
+
 def _create_values(payload: SocialAccountConnectionCreate) -> dict[str, object]:
     method = _coerce_method(payload.connection_method)
     adapter = resolve_social_account_provider(payload.provider, method)
