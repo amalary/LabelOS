@@ -1838,6 +1838,55 @@ def test_sync_account_metadata_updates_identity_capabilities_and_timestamp(
     assert result["error_code"] is None
 
 
+def test_sync_account_metadata_strips_provider_returned_sensitive_metadata(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = HealthScenarioProvider(
+        SocialAccountHealth(healthy=True, status="connected"),
+        sync_result=SocialAccountMetadataSync(
+            provider_metadata={
+                "avatar_url": "https://cdn.example/avatar.jpg",
+                "access_token": "SECRET",
+                "nested": {"refresh-token": "SECRET", "safe": "kept"},
+            },
+        ),
+    )
+    registry = SocialAccountProviderRegistry([provider])
+    monkeypatch.setattr(
+        "labelos_api.social_accounts.providers.provider_registry",
+        registry,
+    )
+
+    async def run() -> dict[str, object]:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            assert isinstance(workspace, Organization)
+            connection = await create_connection(
+                session,
+                workspace.id,
+                SocialAccountConnectionCreate(
+                    provider="instagram",
+                    connection_method=SocialAccountConnectionMethod.direct_api,
+                    status=SocialAccountConnectionStatus.connected,
+                    credential_ref="memory://credentials/direct",
+                ),
+            )
+            updated = await sync_account_metadata(
+                session,
+                workspace.id,
+                connection.id,
+                provider_registry=registry,
+            )
+            return updated.provider_metadata
+
+    assert asyncio.run(run()) == {
+        "avatar_url": "https://cdn.example/avatar.jpg",
+        "nested": {"safe": "kept"},
+    }
+
+
 def test_sync_account_metadata_records_failure_without_dropping_connection(
     sessionmaker: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
@@ -1890,3 +1939,62 @@ def test_sync_account_metadata_records_failure_without_dropping_connection(
     assert result["error_code"] == "provider_unavailable"
     assert result["synced"] is None
     assert result["checked"] is not None
+
+
+def test_connection_health_redacts_provider_error_credentials_before_persistence(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = SocialAccountProviderRegistry(
+        [
+            HealthScenarioProvider(
+                SocialAccountHealth(
+                    healthy=False,
+                    status="unhealthy",
+                    error_code=SocialAccountProviderErrorCode.provider_unavailable,
+                    error_message=(
+                        "Authorization: Bearer secret-token "
+                        "refresh_token=secret-refresh"
+                    ),
+                )
+            )
+        ]
+    )
+    monkeypatch.setattr(
+        "labelos_api.social_accounts.providers.provider_registry",
+        registry,
+    )
+
+    async def run() -> tuple[str | None, list[RealtimeEvent]]:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            assert isinstance(workspace, Organization)
+            connection = await create_connection(
+                session,
+                workspace.id,
+                SocialAccountConnectionCreate(
+                    provider="instagram",
+                    connection_method=SocialAccountConnectionMethod.direct_api,
+                    status=SocialAccountConnectionStatus.connected,
+                    credential_ref="memory://credentials/direct",
+                ),
+            )
+            updated = await check_connection_health(
+                session,
+                workspace.id,
+                connection.id,
+                provider_registry=registry,
+            )
+            assert updated.error_message is not None
+            stored = await get_connection(session, workspace.id, connection.id)
+            return stored.last_error_message, await _realtime_events(
+                session,
+                workspace.id,
+            )
+
+    message, events = asyncio.run(run())
+    assert message == "Authorization: Bearer [redacted] refresh_token=[redacted]"
+    payloads = str([event.payload for event in events]).lower()
+    assert "secret-token" not in payloads
+    assert "secret-refresh" not in payloads

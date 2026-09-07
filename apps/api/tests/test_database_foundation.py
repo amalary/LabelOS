@@ -1952,6 +1952,30 @@ def test_social_account_connections_do_not_define_secret_columns() -> None:
     assert "client_secret" not in column_names
 
 
+def test_social_account_connection_model_sanitizes_secret_bearing_fields() -> None:
+    connection = SocialAccountConnection(
+        organization_id=uuid4(),
+        provider="instagram",
+        provider_metadata={
+            "avatar_url": "https://cdn.example/avatar.png",
+            "access_token": "SECRET",
+            "nested": {
+                "refresh-token": "SECRET",
+                "safe": "kept",
+            },
+        },
+        last_error_message="Authorization: Bearer secret-token access_token=secret",
+    )
+
+    assert connection.provider_metadata == {
+        "avatar_url": "https://cdn.example/avatar.png",
+        "nested": {"safe": "kept"},
+    }
+    assert connection.last_error_message == (
+        "Authorization: Bearer [redacted] access_token=[redacted]"
+    )
+
+
 def test_social_account_connections_enforce_external_account_uniqueness() -> None:
     engine = create_engine("sqlite:///:memory:")
     SocialAccountConnection.metadata.create_all(engine)

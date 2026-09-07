@@ -2,6 +2,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
+import re
 from uuid import UUID
 
 from labelos_database.models import (
@@ -108,6 +109,29 @@ SENSITIVE_SOCIAL_ACCOUNT_EVENT_FIELDS = frozenset(
         "credential_ref",
         "token_expires_at",
     }
+)
+SENSITIVE_PROVIDER_METADATA_KEY_PARTS = frozenset(
+    {
+        "access_token",
+        "authorization",
+        "client_secret",
+        "code",
+        "credential",
+        "id_token",
+        "password",
+        "private_key",
+        "refresh_token",
+        "secret",
+        "token",
+    }
+)
+SENSITIVE_ERROR_TEXT_PATTERNS = (
+    re.compile(
+        r"(?i)\b(access[-_]?token|refresh[-_]?token|id[-_]?token|client[-_]?secret|"
+        r"password|private[-_]?key|secret|credential)\b"
+        r"(\s*[:=]\s*)([^\s,;]+)"
+    ),
+    re.compile(r"(?i)\bbearer\s+([A-Za-z0-9._~+/=-]{6,})"),
 )
 
 ALLOWED_SOCIAL_ACCOUNT_TRANSITIONS: dict[
@@ -287,7 +311,36 @@ def _safe_error_message(message: str | None) -> str | None:
     normalized = _normalize_optional_text(message)
     if normalized is None:
         return None
-    return normalized[:500]
+    return _redact_sensitive_text(normalized)[:500]
+
+
+def _redact_sensitive_text(value: str) -> str:
+    redacted = SENSITIVE_ERROR_TEXT_PATTERNS[1].sub("Bearer [redacted]", value)
+    return SENSITIVE_ERROR_TEXT_PATTERNS[0].sub(r"\1\2[redacted]", redacted)
+
+
+def _provider_metadata_key_is_sensitive(key: str) -> bool:
+    normalized = key.lower().replace("-", "_")
+    return any(part in normalized for part in SENSITIVE_PROVIDER_METADATA_KEY_PARTS)
+
+
+def _safe_provider_metadata(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {
+            key: _safe_provider_metadata(item)
+            for key, item in value.items()
+            if not _provider_metadata_key_is_sensitive(str(key))
+        }
+    if isinstance(value, list):
+        return [_safe_provider_metadata(item) for item in value]
+    return value
+
+
+def _safe_provider_metadata_object(value: Mapping[str, object] | dict) -> dict:
+    sanitized = _safe_provider_metadata(value)
+    if not isinstance(sanitized, dict):
+        raise SocialAccountRelationshipError("provider_metadata must be a JSON object")
+    return sanitized
 
 
 def _social_account_event_payload(
@@ -592,9 +645,8 @@ def _create_values(payload: SocialAccountConnectionCreate) -> dict[str, object]:
             display_name=payload.display_name,
             profile_url=payload.profile_url,
         ),
-        provider_metadata=_json_object(
-            payload.provider_metadata,
-            "provider_metadata",
+        provider_metadata=_safe_provider_metadata_object(
+            _json_object(payload.provider_metadata, "provider_metadata")
         ),
     )
     identity = validation_result.identity
@@ -603,7 +655,9 @@ def _create_values(payload: SocialAccountConnectionCreate) -> dict[str, object]:
         "connection_method": method,
         "status": _coerce_status(payload.status),
         "capabilities": _normalize_capabilities(payload.capabilities, adapter=adapter),
-        "provider_metadata": validation_result.provider_metadata,
+        "provider_metadata": _safe_provider_metadata_object(
+            validation_result.provider_metadata
+        ),
     }
     _set_if_not_none(values, "artist_profile_id", payload.artist_profile_id)
     _set_if_not_none(
@@ -642,7 +696,7 @@ def _create_values(payload: SocialAccountConnectionCreate) -> dict[str, object]:
     _set_if_not_none(
         values,
         "last_error_message",
-        _normalize_optional_text(payload.last_error_message),
+        _safe_error_message(payload.last_error_message),
     )
     _set_if_not_none(values, "created_by_user_id", payload.created_by_user_id)
     _set_if_not_none(values, "created_by_profile_id", payload.created_by_profile_id)
@@ -717,12 +771,11 @@ def _update_values(
     _set_if_not_none(
         values,
         "last_error_message",
-        _normalize_optional_text(payload.last_error_message),
+        _safe_error_message(payload.last_error_message),
     )
     if payload.provider_metadata is not None:
-        values["provider_metadata"] = _json_object(
-            payload.provider_metadata,
-            "provider_metadata",
+        values["provider_metadata"] = _safe_provider_metadata_object(
+            _json_object(payload.provider_metadata, "provider_metadata")
         )
     if payload.clear_artist_profile:
         values["artist_profile_id"] = None
@@ -1285,7 +1338,7 @@ async def transition_status(
         values["last_health_checked_at"] = _now()
     elif next_status == SocialAccountConnectionStatus.error:
         values["last_error_code"] = _normalize_optional_text(error_code)
-        values["last_error_message"] = _normalize_optional_text(error_message)
+        values["last_error_message"] = _safe_error_message(error_message)
         values["last_health_checked_at"] = _now()
     updated = await social_accounts.update_connection(
         session,
@@ -1431,7 +1484,7 @@ def _health_values(
     if health.provider_metadata:
         values["provider_metadata"] = {
             **dict(connection.provider_metadata or {}),
-            **health.provider_metadata,
+            **_safe_provider_metadata_object(health.provider_metadata),
         }
     return values
 
@@ -1482,7 +1535,7 @@ async def _persist_connection_health(
         payload["healthStatus"] = health.status
         payload["healthy"] = health.healthy
         payload["previousErrorCode"] = previous_error_code
-        payload["previousErrorMessage"] = previous_error_message
+        payload["previousErrorMessage"] = _safe_error_message(previous_error_message)
         await _publish_social_account_event(
             session,
             workspace_id=workspace_id,
@@ -1612,7 +1665,7 @@ def _credential_recovery_values(
     if result.provider_metadata:
         values["provider_metadata"] = {
             **dict(connection.provider_metadata or {}),
-            **result.provider_metadata,
+            **_safe_provider_metadata_object(result.provider_metadata),
         }
     return values
 
@@ -1813,7 +1866,7 @@ async def _apply_metadata_sync(
             result.identity,
             provider_metadata={
                 **dict(connection.provider_metadata or {}),
-                **result.provider_metadata,
+                **_safe_provider_metadata_object(result.provider_metadata),
             },
         )
         values.update(
@@ -1822,13 +1875,15 @@ async def _apply_metadata_sync(
                 "username": validation.identity.username,
                 "display_name": validation.identity.display_name,
                 "profile_url": validation.identity.profile_url,
-                "provider_metadata": validation.provider_metadata,
+                "provider_metadata": _safe_provider_metadata_object(
+                    validation.provider_metadata
+                ),
             }
         )
     elif result.provider_metadata:
         values["provider_metadata"] = {
             **dict(connection.provider_metadata or {}),
-            **result.provider_metadata,
+            **_safe_provider_metadata_object(result.provider_metadata),
         }
     if result.capabilities:
         values["capabilities"] = adapter.normalize_capabilities(result.capabilities)

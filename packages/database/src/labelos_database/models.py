@@ -30,6 +30,29 @@ from labelos_database.base import Base, TimestampMixin, UUIDPrimaryKey
 
 _LOCALE_PATTERN = re.compile(r"^[A-Za-z]{2,3}(?:[-_][A-Za-z0-9]{2,8})*$")
 PROFILE_MODULE_RELATIONSHIPS = ("artist_profiles",)
+SENSITIVE_JSON_KEY_PARTS = frozenset(
+    {
+        "access_token",
+        "authorization",
+        "client_secret",
+        "code",
+        "credential",
+        "id_token",
+        "password",
+        "private_key",
+        "refresh_token",
+        "secret",
+        "token",
+    }
+)
+SENSITIVE_TEXT_PATTERNS = (
+    re.compile(
+        r"(?i)\b(access[-_]?token|refresh[-_]?token|id[-_]?token|client[-_]?secret|"
+        r"password|private[-_]?key|secret|credential)\b"
+        r"(\s*[:=]\s*)([^\s,;]+)"
+    ),
+    re.compile(r"(?i)\bbearer\s+([A-Za-z0-9._~+/=-]{6,})"),
+)
 
 
 def _required_text(value: str | None, field_name: str) -> str:
@@ -54,6 +77,31 @@ def _json_object(value: dict | None, field_name: str) -> dict:
     if not isinstance(value, dict):
         raise ValueError(f"{field_name} must be a JSON object")
     return value
+
+
+def _json_key_is_sensitive(key: str) -> bool:
+    normalized = key.lower().replace("-", "_")
+    return any(part in normalized for part in SENSITIVE_JSON_KEY_PARTS)
+
+
+def _without_sensitive_json_keys(value: object) -> object:
+    if isinstance(value, dict):
+        return {
+            key: _without_sensitive_json_keys(item)
+            for key, item in value.items()
+            if not _json_key_is_sensitive(str(key))
+        }
+    if isinstance(value, list):
+        return [_without_sensitive_json_keys(item) for item in value]
+    return value
+
+
+def _redact_sensitive_text(value: str | None) -> str | None:
+    normalized = _optional_text(value)
+    if normalized is None:
+        return None
+    redacted = SENSITIVE_TEXT_PATTERNS[1].sub("Bearer [redacted]", normalized)
+    return SENSITIVE_TEXT_PATTERNS[0].sub(r"\1\2[redacted]", redacted)
 
 
 def _json_list(value: list | None, field_name: str) -> list:
@@ -1794,10 +1842,18 @@ class SocialAccountConnection(Base, TimestampMixin, OrganizationOwnedMixin):
         "display_name",
         "credential_ref",
         "last_error_code",
-        "last_error_message",
     )
     def _validate_optional_text(self, _key: str, value: str | None) -> str | None:
         return _optional_text(value)
+
+    @validates("last_error_message")
+    def _validate_last_error_message(
+        self,
+        _key: str,
+        value: str | None,
+    ) -> str | None:
+        redacted = _redact_sensitive_text(value)
+        return redacted[:2000] if redacted is not None else None
 
     @validates("profile_url")
     def _validate_profile_url(self, _key: str, value: str | None) -> str | None:
@@ -1811,7 +1867,10 @@ class SocialAccountConnection(Base, TimestampMixin, OrganizationOwnedMixin):
 
     @validates("provider_metadata")
     def _validate_provider_metadata(self, key: str, value: dict | None) -> dict:
-        return _json_object(value, key)
+        sanitized = _without_sensitive_json_keys(_json_object(value, key))
+        if not isinstance(sanitized, dict):
+            raise ValueError(f"{key} must be a JSON object")
+        return sanitized
 
     __table_args__ = (
         Index("ix_social_account_connections_organization_id", "organization_id"),

@@ -480,7 +480,12 @@ def test_social_account_connection_mutations_publish_workspace_scoped_activity_e
         },
     )
     assert created_response.status_code == 201
-    connection_id = created_response.json()["id"]
+    created_body = created_response.json()
+    connection_id = created_body["id"]
+    assert created_body["provider_metadata"] == {
+        "source": "artist-submitted",
+        "nested": {},
+    }
 
     updated = client.patch(
         f"{base}/{connection_id}",
@@ -494,6 +499,14 @@ def test_social_account_connection_mutations_publish_workspace_scoped_activity_e
     assert disconnected.status_code == 200
 
     records = asyncio.run(_realtime_events(sessionmaker, seeded.workspace_id))
+    stored_connections = asyncio.run(_social_connections(sessionmaker))
+    persisted = json.dumps(
+        [connection.provider_metadata for connection in stored_connections],
+        default=str,
+    ).lower()
+    assert "access_token" not in persisted
+    assert "refresh_token" not in persisted
+    assert "secret" not in persisted
     assert [record.event_type for record in records] == [
         "marketing.social_account.connected",
         "marketing.social_account.updated",
@@ -828,6 +841,11 @@ def test_social_account_connection_safe_serialization(
     assert body["provider_metadata"]["avatar_url"] == "https://cdn.example/avatar.png"
     assert body["provider_metadata"]["nested"]["safe"] == "kept"
     assert body["token_expires_at"] is not None
+    [persisted] = asyncio.run(_social_connections(sessionmaker))
+    assert persisted.provider_metadata == {
+        "avatar_url": "https://cdn.example/avatar.png",
+        "nested": {"safe": "kept"},
+    }
 
 
 def test_social_account_oauth_start_builds_provider_authorization_url(
