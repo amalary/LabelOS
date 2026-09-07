@@ -29,12 +29,17 @@ class SocialAccountProviderErrorCode(StrEnum):
     unsupported_provider = "unsupported_provider"
     unsupported_connection_method = "unsupported_connection_method"
     provider_unavailable = "provider_unavailable"
+    third_party_service_unavailable = "third_party_service_unavailable"
     authorization_failed = "authorization_failed"
     insufficient_scope = "insufficient_scope"
+    credential_missing = "credential_missing"
     credential_expired = "credential_expired"
+    credential_revoked = "credential_revoked"
+    refresh_failed = "refresh_failed"
     account_not_found = "account_not_found"
     malformed_provider_response = "malformed_provider_response"
     rate_limited = "rate_limited"
+    sync_failed = "sync_failed"
 
 
 class SocialAccountProviderError(ValueError):
@@ -563,13 +568,17 @@ class ThirdPartySocialAccountConnectionProvider(SocialAccountConnectionProvider)
     ) -> SocialAccountHealth:
         metadata = self._adapter_metadata(provider_metadata)
         third_party = metadata["third_party"]
-        if isinstance(third_party, Mapping) and third_party.get("adapter_key"):
+        if (
+            isinstance(third_party, Mapping)
+            and third_party.get("adapter_key")
+            and credential_ref is not None
+        ):
             return SocialAccountHealth(healthy=True, status="connected")
         return SocialAccountHealth(
             healthy=False,
             status="reconnect_required",
-            error_code=SocialAccountProviderErrorCode.credential_expired,
-            error_message="Third-party integration metadata is missing",
+            error_code=SocialAccountProviderErrorCode.credential_missing,
+            error_message="Third-party integration credentials are missing",
         )
 
     def _adapter_metadata(

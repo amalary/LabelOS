@@ -633,3 +633,73 @@ async def disconnect_social_account_connection(
     ) as exc:
         _service_error(exc)
     return _connection_response(connection)
+
+
+@router.post(
+    "/{workspace_id}/social-account-connections/{connection_id}/health",
+    response_model=SocialAccountConnectionResponse,
+)
+async def check_social_account_connection_health(
+    workspace_id: UUID,
+    connection_id: UUID,
+    session: SessionDep,
+    context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
+    registry: Annotated[
+        SocialAccountProviderRegistry,
+        Depends(get_social_account_provider_registry),
+    ],
+) -> SocialAccountConnectionResponse:
+    try:
+        await social_account_service.check_connection_health(
+            session,
+            workspace_id,
+            connection_id,
+            actor=context,
+            provider_registry=registry,
+        )
+        connection = await social_account_service.get_connection(
+            session,
+            workspace_id,
+            connection_id,
+            actor=context,
+        )
+    except (
+        SocialAccountAuthorizationError,
+        SocialAccountLifecycleError,
+        SocialAccountNotFoundError,
+        SocialAccountProviderError,
+    ) as exc:
+        _service_error(exc)
+    return _connection_response(connection)
+
+
+@router.post(
+    "/{workspace_id}/social-account-connections/{connection_id}/sync",
+    response_model=SocialAccountConnectionResponse,
+)
+async def sync_social_account_connection_metadata(
+    workspace_id: UUID,
+    connection_id: UUID,
+    session: SessionDep,
+    context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
+    registry: Annotated[
+        SocialAccountProviderRegistry,
+        Depends(get_social_account_provider_registry),
+    ],
+) -> SocialAccountConnectionResponse:
+    try:
+        connection = await social_account_service.sync_account_metadata(
+            session,
+            workspace_id,
+            connection_id,
+            actor=context,
+            provider_registry=registry,
+        )
+    except (
+        SocialAccountAuthorizationError,
+        SocialAccountLifecycleError,
+        SocialAccountNotFoundError,
+        SocialAccountProviderError,
+    ) as exc:
+        _service_error(exc)
+    return _connection_response(connection)

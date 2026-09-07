@@ -21,9 +21,13 @@ from labelos_api.authorization import (
 from labelos_api.realtime import RealtimeEventType, RealtimePublisher
 from labelos_api.repositories import social_accounts
 from labelos_api.social_accounts.providers import (
+    SocialAccountCredentialResult,
     SocialAccountConnectionProvider,
     SocialAccountHealth,
     SocialAccountIdentity,
+    SocialAccountMetadataSync,
+    SocialAccountProviderError,
+    SocialAccountProviderErrorCode,
     SocialAccountProviderRegistry,
     resolve_social_account_provider,
 )
@@ -70,6 +74,31 @@ ACTIVE_SOCIAL_ACCOUNT_STATUSES = frozenset(
         SocialAccountConnectionStatus.limited,
         SocialAccountConnectionStatus.reconnect_required,
         SocialAccountConnectionStatus.error,
+    }
+)
+
+HEALTH_RETAIN_CURRENT_STATUS_CODES = frozenset(
+    {
+        SocialAccountProviderErrorCode.provider_unavailable,
+        SocialAccountProviderErrorCode.third_party_service_unavailable,
+        SocialAccountProviderErrorCode.rate_limited,
+    }
+)
+
+HEALTH_RECONNECT_REQUIRED_CODES = frozenset(
+    {
+        SocialAccountProviderErrorCode.authorization_failed,
+        SocialAccountProviderErrorCode.credential_missing,
+        SocialAccountProviderErrorCode.credential_revoked,
+        SocialAccountProviderErrorCode.refresh_failed,
+        SocialAccountProviderErrorCode.account_not_found,
+    }
+)
+
+HEALTH_ERROR_CODES = frozenset(
+    {
+        SocialAccountProviderErrorCode.malformed_provider_response,
+        SocialAccountProviderErrorCode.sync_failed,
     }
 )
 
@@ -204,6 +233,24 @@ def _method_value(method: SocialAccountConnectionMethod | str) -> str:
         if isinstance(method, SocialAccountConnectionMethod)
         else str(method)
     )
+
+
+def _safe_error_code(
+    code: SocialAccountProviderErrorCode | str | None,
+) -> str | None:
+    if code is None:
+        return None
+    try:
+        return SocialAccountProviderErrorCode(code).value
+    except ValueError:
+        return "provider_unavailable"
+
+
+def _safe_error_message(message: str | None) -> str | None:
+    normalized = _normalize_optional_text(message)
+    if normalized is None:
+        return None
+    return normalized[:500]
 
 
 def _social_account_event_payload(
@@ -1106,12 +1153,295 @@ async def disconnect_connection(
     )
 
 
+def _provider_registry_adapter(
+    connection: SocialAccountConnection,
+    provider_registry: SocialAccountProviderRegistry | None,
+) -> SocialAccountConnectionProvider:
+    if provider_registry is not None:
+        return provider_registry.resolve(
+            connection.provider, connection.connection_method
+        )
+    return resolve_social_account_provider(
+        connection.provider,
+        connection.connection_method,
+    )
+
+
+def _capabilities_for_adapter_scopes(
+    adapter: SocialAccountConnectionProvider,
+    scopes: Sequence[str],
+) -> list[str]:
+    mapper = getattr(adapter, "capabilities_for_scopes", None)
+    if callable(mapper):
+        return adapter.normalize_capabilities(mapper(scopes))
+    return adapter.normalize_capabilities(adapter.default_capabilities())
+
+
+def _status_from_health(
+    connection: SocialAccountConnection,
+    health: SocialAccountHealth,
+) -> SocialAccountConnectionStatus:
+    if health.healthy:
+        if health.status == SocialAccountConnectionStatus.limited.value:
+            return SocialAccountConnectionStatus.limited
+        return SocialAccountConnectionStatus.connected
+
+    code = health.error_code
+    if code == SocialAccountProviderErrorCode.insufficient_scope:
+        return SocialAccountConnectionStatus.limited
+    if code in HEALTH_RECONNECT_REQUIRED_CODES:
+        return SocialAccountConnectionStatus.reconnect_required
+    if code in HEALTH_RETAIN_CURRENT_STATUS_CODES:
+        return connection.status
+    if code in HEALTH_ERROR_CODES:
+        return SocialAccountConnectionStatus.error
+
+    try:
+        return SocialAccountConnectionStatus(health.status)
+    except ValueError:
+        return SocialAccountConnectionStatus.error
+
+
+def _health_values(
+    connection: SocialAccountConnection,
+    health: SocialAccountHealth,
+    *,
+    checked_at: datetime,
+) -> dict[str, object]:
+    next_status = _status_from_health(connection, health)
+    values: dict[str, object] = {
+        "status": next_status,
+        "last_health_checked_at": checked_at,
+    }
+    if health.healthy:
+        values["last_error_code"] = None
+        values["last_error_message"] = None
+    else:
+        values["last_error_code"] = _safe_error_code(health.error_code)
+        values["last_error_message"] = _safe_error_message(health.error_message)
+    if health.provider_metadata:
+        values["provider_metadata"] = {
+            **dict(connection.provider_metadata or {}),
+            **health.provider_metadata,
+        }
+    return values
+
+
+async def _persist_connection_health(
+    session: AsyncSession,
+    *,
+    workspace_id: UUID,
+    connection: SocialAccountConnection,
+    health: SocialAccountHealth,
+    actor: AuthorizationActorInput | None,
+    checked_at: datetime | None = None,
+) -> SocialAccountConnection:
+    observed_at = checked_at or _now()
+    values = _health_values(connection, health, checked_at=observed_at)
+    changed_fields = _changed_fields(connection, values)
+    if not changed_fields:
+        return connection
+
+    previous_status = _status_value(connection.status)
+    previous_error_code = connection.last_error_code
+    previous_error_message = connection.last_error_message
+    updated = await social_accounts.update_connection(
+        session,
+        workspace_id,
+        connection.id,
+        {key: values[key] for key in changed_fields},
+    )
+    if updated is None:
+        raise SocialAccountNotFoundError("Social account connection not found")
+
+    meaningful_health_change = bool(
+        {
+            "status",
+            "last_error_code",
+            "last_error_message",
+            "provider_metadata",
+        }
+        & changed_fields
+    )
+    if meaningful_health_change:
+        payload = _social_account_event_payload(
+            updated,
+            action="health_changed",
+            changed_fields=sorted(changed_fields),
+            previous_status=previous_status,
+        )
+        payload["healthStatus"] = health.status
+        payload["healthy"] = health.healthy
+        payload["previousErrorCode"] = previous_error_code
+        payload["previousErrorMessage"] = previous_error_message
+        await _publish_social_account_event(
+            session,
+            workspace_id=workspace_id,
+            event_type=RealtimeEventType.marketing_social_account_health_changed,
+            actor=actor,
+            connection=updated,
+            payload=payload,
+        )
+    await session.commit()
+    return updated
+
+
+def _health_from_provider_error(exc: SocialAccountProviderError) -> SocialAccountHealth:
+    return SocialAccountHealth(
+        healthy=False,
+        status="unhealthy",
+        error_code=exc.code,
+        error_message=str(exc),
+    )
+
+
+async def refresh_credentials(
+    session: AsyncSession,
+    workspace_id: UUID,
+    connection_id: UUID,
+    *,
+    actor: AuthorizationActorInput | None = None,
+    provider_registry: SocialAccountProviderRegistry | None = None,
+) -> SocialAccountConnection:
+    connection = await _load_connection_for_workspace(
+        session,
+        workspace_id,
+        connection_id,
+    )
+    _assert_mutable(connection)
+    await _require_capability(
+        session,
+        actor=actor,
+        workspace_id=workspace_id,
+        capability=Capability.marketing_account_manage,
+    )
+    if connection.connection_method == SocialAccountConnectionMethod.assisted:
+        health = SocialAccountHealth(healthy=True, status="assisted_action_required")
+        return await _persist_connection_health(
+            session,
+            workspace_id=workspace_id,
+            connection=connection,
+            health=health,
+            actor=actor,
+        )
+    if connection.credential_ref is None:
+        health = SocialAccountHealth(
+            healthy=False,
+            status="reconnect_required",
+            error_code=SocialAccountProviderErrorCode.credential_missing,
+            error_message="Connection credentials are missing",
+        )
+        return await _persist_connection_health(
+            session,
+            workspace_id=workspace_id,
+            connection=connection,
+            health=health,
+            actor=actor,
+        )
+
+    adapter = _provider_registry_adapter(connection, provider_registry)
+    try:
+        result = await adapter.refresh_credentials(
+            credential_ref=connection.credential_ref,
+            provider_metadata=connection.provider_metadata,
+        )
+    except SocialAccountProviderError as exc:
+        health = _health_from_provider_error(exc)
+        return await _persist_connection_health(
+            session,
+            workspace_id=workspace_id,
+            connection=connection,
+            health=health,
+            actor=actor,
+        )
+
+    values = _credential_recovery_values(connection, adapter, result)
+    updated = await social_accounts.update_connection(
+        session,
+        workspace_id,
+        connection_id,
+        values,
+    )
+    if updated is None:
+        raise SocialAccountNotFoundError("Social account connection not found")
+    await _publish_health_recovered_event(
+        session,
+        workspace_id=workspace_id,
+        actor=actor,
+        connection=updated,
+        previous_status=_status_value(connection.status),
+        changed_fields=sorted(_changed_fields(connection, values)),
+    )
+    await session.commit()
+    return updated
+
+
+def _credential_recovery_values(
+    connection: SocialAccountConnection,
+    adapter: SocialAccountConnectionProvider,
+    result: SocialAccountCredentialResult,
+) -> dict[str, object]:
+    capabilities = (
+        _capabilities_for_adapter_scopes(adapter, result.granted_scopes)
+        if result.granted_scopes
+        else list(connection.capabilities or [])
+    )
+    status = (
+        SocialAccountConnectionStatus.connected
+        if capabilities == list(adapter.default_capabilities())
+        else SocialAccountConnectionStatus.limited
+    )
+    values: dict[str, object] = {
+        "status": status,
+        "credential_ref": result.credential_ref or connection.credential_ref,
+        "token_expires_at": result.token_expires_at or connection.token_expires_at,
+        "capabilities": adapter.normalize_capabilities(capabilities),
+        "last_health_checked_at": _now(),
+        "last_error_code": None,
+        "last_error_message": None,
+    }
+    if result.provider_metadata:
+        values["provider_metadata"] = {
+            **dict(connection.provider_metadata or {}),
+            **result.provider_metadata,
+        }
+    return values
+
+
+async def _publish_health_recovered_event(
+    session: AsyncSession,
+    *,
+    workspace_id: UUID,
+    actor: AuthorizationActorInput | None,
+    connection: SocialAccountConnection,
+    previous_status: str,
+    changed_fields: list[str],
+) -> None:
+    payload = _social_account_event_payload(
+        connection,
+        action="health_changed",
+        changed_fields=changed_fields,
+        previous_status=previous_status,
+    )
+    payload["healthStatus"] = "connected"
+    payload["healthy"] = True
+    await _publish_social_account_event(
+        session,
+        workspace_id=workspace_id,
+        event_type=RealtimeEventType.marketing_social_account_health_changed,
+        actor=actor,
+        connection=connection,
+        payload=payload,
+    )
+
+
 async def check_connection_health(
     session: AsyncSession,
     workspace_id: UUID,
     connection_id: UUID,
     *,
     actor: AuthorizationActorInput | None = None,
+    provider_registry: SocialAccountProviderRegistry | None = None,
 ) -> SocialAccountHealth:
     connection = await _load_connection_for_workspace(
         session,
@@ -1126,15 +1456,199 @@ async def check_connection_health(
     )
     if connection.status == SocialAccountConnectionStatus.disconnected:
         return SocialAccountHealth(healthy=False, status="disconnected")
-    adapter = resolve_social_account_provider(
-        connection.provider,
-        connection.connection_method,
-    )
-    return await adapter.check_connection_health(
+    if (
+        connection.connection_method == SocialAccountConnectionMethod.direct_api
+        and connection.credential_ref is None
+    ):
+        health = SocialAccountHealth(
+            healthy=False,
+            status="reconnect_required",
+            error_code=SocialAccountProviderErrorCode.credential_missing,
+            error_message="Connection credentials are missing",
+        )
+        await _persist_connection_health(
+            session,
+            workspace_id=workspace_id,
+            connection=connection,
+            health=health,
+            actor=actor,
+        )
+        return health
+    adapter = _provider_registry_adapter(connection, provider_registry)
+    health = await adapter.check_connection_health(
         credential_ref=connection.credential_ref,
         token_expires_at=connection.token_expires_at,
         provider_metadata=connection.provider_metadata,
     )
+    if (
+        connection.connection_method != SocialAccountConnectionMethod.assisted
+        and health.error_code == SocialAccountProviderErrorCode.credential_expired
+    ):
+        recovered = await refresh_credentials(
+            session,
+            workspace_id,
+            connection.id,
+            actor=actor,
+            provider_registry=provider_registry,
+        )
+        return SocialAccountHealth(
+            healthy=(
+                recovered.last_error_code is None
+                and recovered.status
+                in {
+                    SocialAccountConnectionStatus.connected,
+                    SocialAccountConnectionStatus.limited,
+                }
+            ),
+            status=recovered.status.value,
+            error_code=(
+                SocialAccountProviderErrorCode(recovered.last_error_code)
+                if recovered.last_error_code
+                else None
+            ),
+            error_message=recovered.last_error_message,
+        )
+    await _persist_connection_health(
+        session,
+        workspace_id=workspace_id,
+        connection=connection,
+        health=health,
+        actor=actor,
+    )
+    return health
+
+
+async def sync_account_metadata(
+    session: AsyncSession,
+    workspace_id: UUID,
+    connection_id: UUID,
+    *,
+    actor: AuthorizationActorInput | None = None,
+    provider_registry: SocialAccountProviderRegistry | None = None,
+) -> SocialAccountConnection:
+    connection = await _load_connection_for_workspace(
+        session,
+        workspace_id,
+        connection_id,
+    )
+    _assert_mutable(connection)
+    await _require_capability(
+        session,
+        actor=actor,
+        workspace_id=workspace_id,
+        capability=Capability.marketing_account_manage,
+    )
+    if (
+        connection.connection_method == SocialAccountConnectionMethod.direct_api
+        and connection.credential_ref is None
+    ):
+        health = SocialAccountHealth(
+            healthy=False,
+            status="reconnect_required",
+            error_code=SocialAccountProviderErrorCode.credential_missing,
+            error_message="Connection credentials are missing",
+        )
+        return await _persist_connection_health(
+            session,
+            workspace_id=workspace_id,
+            connection=connection,
+            health=health,
+            actor=actor,
+        )
+    adapter = _provider_registry_adapter(connection, provider_registry)
+    try:
+        result = await adapter.synchronize_account_metadata(
+            credential_ref=connection.credential_ref,
+            provider_metadata=connection.provider_metadata,
+        )
+    except SocialAccountProviderError as exc:
+        health = SocialAccountHealth(
+            healthy=False,
+            status="sync_failed",
+            error_code=exc.code,
+            error_message=str(exc),
+        )
+        return await _persist_connection_health(
+            session,
+            workspace_id=workspace_id,
+            connection=connection,
+            health=health,
+            actor=actor,
+        )
+    return await _apply_metadata_sync(
+        session,
+        workspace_id=workspace_id,
+        connection=connection,
+        adapter=adapter,
+        result=result,
+        actor=actor,
+    )
+
+
+async def _apply_metadata_sync(
+    session: AsyncSession,
+    *,
+    workspace_id: UUID,
+    connection: SocialAccountConnection,
+    adapter: SocialAccountConnectionProvider,
+    result: SocialAccountMetadataSync,
+    actor: AuthorizationActorInput | None,
+) -> SocialAccountConnection:
+    values: dict[str, object] = {
+        "last_synced_at": _now(),
+        "last_error_code": None,
+        "last_error_message": None,
+    }
+    if result.identity is not None:
+        validation = adapter.validate_account_input(
+            result.identity,
+            provider_metadata={
+                **dict(connection.provider_metadata or {}),
+                **result.provider_metadata,
+            },
+        )
+        values.update(
+            {
+                "external_account_id": validation.identity.external_account_id,
+                "username": validation.identity.username,
+                "display_name": validation.identity.display_name,
+                "profile_url": validation.identity.profile_url,
+                "provider_metadata": validation.provider_metadata,
+            }
+        )
+    elif result.provider_metadata:
+        values["provider_metadata"] = {
+            **dict(connection.provider_metadata or {}),
+            **result.provider_metadata,
+        }
+    if result.capabilities:
+        values["capabilities"] = adapter.normalize_capabilities(result.capabilities)
+
+    changed_fields = _changed_fields(connection, values)
+    if not changed_fields:
+        return connection
+    updated = await social_accounts.update_connection(
+        session,
+        workspace_id,
+        connection.id,
+        {key: values[key] for key in changed_fields},
+    )
+    if updated is None:
+        raise SocialAccountNotFoundError("Social account connection not found")
+    await _publish_social_account_event(
+        session,
+        workspace_id=workspace_id,
+        event_type=RealtimeEventType.marketing_social_account_updated,
+        actor=actor,
+        connection=updated,
+        payload=_social_account_event_payload(
+            updated,
+            action="synced",
+            changed_fields=sorted(changed_fields),
+        ),
+    )
+    await session.commit()
+    return updated
 
 
 def resolve_capabilities(connection: SocialAccountConnection) -> dict[str, bool]:

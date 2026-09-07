@@ -1,5 +1,6 @@
 import asyncio
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
@@ -47,6 +48,7 @@ from labelos_api.services.social_account_service import (
     resolve_capabilities,
     supports_capability,
     supports_manual_metrics,
+    sync_account_metadata,
     transition_status,
     update_connection,
 )
@@ -54,7 +56,13 @@ from labelos_api.social_accounts.providers import (
     AssistedSocialAccountConnectionProvider,
     FakeOAuthSocialAccountConnectionProvider,
     FakeThirdPartySocialAccountConnectionProvider,
+    SocialAccountConnectionProvider,
+    SocialAccountCredentialResult,
     SocialAccountProviderError,
+    SocialAccountHealth,
+    SocialAccountIdentity,
+    SocialAccountMetadataSync,
+    SocialAccountProviderErrorCode,
     SocialAccountProviderKey,
     SocialAccountProviderRegistry,
 )
@@ -180,6 +188,76 @@ async def _realtime_events(
         .order_by(RealtimeEvent.created_at.asc(), RealtimeEvent.id.asc())
     )
     return list(rows.all())
+
+
+class HealthScenarioProvider(SocialAccountConnectionProvider):
+    provider = SocialAccountProviderKey.instagram
+    connection_method = SocialAccountConnectionMethod.direct_api
+
+    def __init__(
+        self,
+        health: SocialAccountHealth,
+        *,
+        refresh_result: SocialAccountCredentialResult | None = None,
+        refresh_error: SocialAccountProviderError | None = None,
+        sync_result: SocialAccountMetadataSync | None = None,
+        sync_error: SocialAccountProviderError | None = None,
+    ) -> None:
+        self.health = health
+        self.refresh_result = refresh_result
+        self.refresh_error = refresh_error
+        self.sync_result = sync_result
+        self.sync_error = sync_error
+        self.refresh_count = 0
+
+    def default_capabilities(self) -> tuple[str, ...]:
+        return (
+            "content_publish",
+            "account_analytics_read",
+            "post_analytics_read",
+        )
+
+    async def check_connection_health(
+        self,
+        *,
+        credential_ref: str | None,
+        token_expires_at=None,
+        provider_metadata=None,
+    ) -> SocialAccountHealth:
+        return self.health
+
+    async def refresh_credentials(
+        self,
+        *,
+        credential_ref: str,
+        provider_metadata: Mapping[str, object] | None = None,
+    ) -> SocialAccountCredentialResult:
+        self.refresh_count += 1
+        if self.refresh_error is not None:
+            raise self.refresh_error
+        return self.refresh_result or SocialAccountCredentialResult(
+            credential_ref=credential_ref,
+            token_expires_at=datetime.now(UTC) + timedelta(hours=1),
+            granted_scopes=("publish", "account_metrics", "post_metrics"),
+        )
+
+    async def synchronize_account_metadata(
+        self,
+        *,
+        credential_ref: str | None,
+        provider_metadata: Mapping[str, object] | None = None,
+    ) -> SocialAccountMetadataSync:
+        if self.sync_error is not None:
+            raise self.sync_error
+        return self.sync_result or SocialAccountMetadataSync()
+
+    def capabilities_for_scopes(self, scopes) -> list[str]:
+        mapping = {
+            "publish": "content_publish",
+            "account_metrics": "account_analytics_read",
+            "post_metrics": "post_analytics_read",
+        }
+        return self.normalize_capabilities([mapping[scope] for scope in scopes])
 
 
 def test_social_account_repository_create_get_list_update_and_scope(
@@ -1108,3 +1186,477 @@ def test_social_account_service_blocks_updates_to_disconnected_accounts(
         "credential_ref": None,
         "update_blocked": True,
     }
+
+
+def test_connection_health_refreshes_expired_direct_credentials(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = HealthScenarioProvider(
+        SocialAccountHealth(
+            healthy=False,
+            status="expired",
+            error_code=SocialAccountProviderErrorCode.credential_expired,
+            error_message="Access token expired",
+        )
+    )
+    registry = SocialAccountProviderRegistry([provider])
+    monkeypatch.setattr(
+        "labelos_api.social_accounts.providers.provider_registry",
+        registry,
+    )
+
+    async def run() -> dict[str, object]:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            assert isinstance(workspace, Organization)
+            connection = await create_connection(
+                session,
+                workspace.id,
+                SocialAccountConnectionCreate(
+                    provider="instagram",
+                    connection_method=SocialAccountConnectionMethod.direct_api,
+                    status=SocialAccountConnectionStatus.connected,
+                    credential_ref="memory://credentials/direct",
+                    token_expires_at=datetime.now(UTC) - timedelta(minutes=5),
+                ),
+            )
+            health = await check_connection_health(
+                session,
+                workspace.id,
+                connection.id,
+                provider_registry=registry,
+            )
+            updated = await get_connection(session, workspace.id, connection.id)
+            records = await _realtime_events(session, workspace.id)
+            return {
+                "health_status": health.status,
+                "status": updated.status,
+                "error_code": updated.last_error_code,
+                "checked": updated.last_health_checked_at,
+                "expires": updated.token_expires_at,
+                "refresh_count": provider.refresh_count,
+                "event_types": [record.event_type for record in records],
+            }
+
+    result = asyncio.run(run())
+    assert result["health_status"] == "connected"
+    assert result["status"] == SocialAccountConnectionStatus.connected
+    assert result["error_code"] is None
+    assert result["checked"] is not None
+    assert result["expires"] is not None
+    assert result["refresh_count"] == 1
+    assert result["event_types"] == [
+        "marketing.social_account.connected",
+        "marketing.social_account.health_changed",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("health", "expected_status", "expected_error"),
+    [
+        (
+            SocialAccountHealth(
+                healthy=False,
+                status="unhealthy",
+                error_code=SocialAccountProviderErrorCode.insufficient_scope,
+                error_message="Missing optional analytics scope",
+            ),
+            SocialAccountConnectionStatus.limited,
+            "insufficient_scope",
+        ),
+        (
+            SocialAccountHealth(
+                healthy=False,
+                status="unhealthy",
+                error_code=SocialAccountProviderErrorCode.credential_revoked,
+                error_message="Credential was revoked",
+            ),
+            SocialAccountConnectionStatus.reconnect_required,
+            "credential_revoked",
+        ),
+        (
+            SocialAccountHealth(
+                healthy=False,
+                status="unhealthy",
+                error_code=SocialAccountProviderErrorCode.malformed_provider_response,
+                error_message="Provider returned malformed response",
+            ),
+            SocialAccountConnectionStatus.error,
+            "malformed_provider_response",
+        ),
+    ],
+)
+def test_connection_health_maps_major_failure_classes(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    health: SocialAccountHealth,
+    expected_status: SocialAccountConnectionStatus,
+    expected_error: str,
+) -> None:
+    registry = SocialAccountProviderRegistry([HealthScenarioProvider(health)])
+    monkeypatch.setattr(
+        "labelos_api.social_accounts.providers.provider_registry",
+        registry,
+    )
+
+    async def run() -> dict[str, object]:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            assert isinstance(workspace, Organization)
+            connection = await create_connection(
+                session,
+                workspace.id,
+                SocialAccountConnectionCreate(
+                    provider="instagram",
+                    connection_method=SocialAccountConnectionMethod.direct_api,
+                    status=SocialAccountConnectionStatus.connected,
+                    credential_ref="memory://credentials/direct",
+                ),
+            )
+            await check_connection_health(
+                session,
+                workspace.id,
+                connection.id,
+                provider_registry=registry,
+            )
+            updated = await get_connection(session, workspace.id, connection.id)
+            return {
+                "status": updated.status,
+                "error_code": updated.last_error_code,
+                "error_message": updated.last_error_message,
+                "checked": updated.last_health_checked_at,
+            }
+
+    result = asyncio.run(run())
+    assert result["status"] == expected_status
+    assert result["error_code"] == expected_error
+    assert result["error_message"] is not None
+    assert result["checked"] is not None
+
+
+def test_connection_health_preserves_status_for_transient_provider_failures(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = SocialAccountProviderRegistry(
+        [
+            HealthScenarioProvider(
+                SocialAccountHealth(
+                    healthy=False,
+                    status="unhealthy",
+                    error_code=SocialAccountProviderErrorCode.provider_unavailable,
+                    error_message="Provider is temporarily unavailable",
+                )
+            )
+        ]
+    )
+    monkeypatch.setattr(
+        "labelos_api.social_accounts.providers.provider_registry",
+        registry,
+    )
+
+    async def run() -> dict[str, object]:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            assert isinstance(workspace, Organization)
+            connection = await create_connection(
+                session,
+                workspace.id,
+                SocialAccountConnectionCreate(
+                    provider="instagram",
+                    connection_method=SocialAccountConnectionMethod.direct_api,
+                    status=SocialAccountConnectionStatus.connected,
+                    credential_ref="memory://credentials/direct",
+                ),
+            )
+            await check_connection_health(
+                session,
+                workspace.id,
+                connection.id,
+                provider_registry=registry,
+            )
+            updated = await get_connection(session, workspace.id, connection.id)
+            return {
+                "status": updated.status,
+                "error_code": updated.last_error_code,
+                "checked": updated.last_health_checked_at,
+            }
+
+    result = asyncio.run(run())
+    assert result["status"] == SocialAccountConnectionStatus.connected
+    assert result["error_code"] == "provider_unavailable"
+    assert result["checked"] is not None
+
+
+def test_direct_api_missing_credentials_require_reconnect_before_provider_call(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = HealthScenarioProvider(
+        SocialAccountHealth(healthy=True, status="connected")
+    )
+    registry = SocialAccountProviderRegistry([provider])
+    monkeypatch.setattr(
+        "labelos_api.social_accounts.providers.provider_registry",
+        registry,
+    )
+
+    async def run() -> dict[str, object]:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            assert isinstance(workspace, Organization)
+            connection = await create_connection(
+                session,
+                workspace.id,
+                SocialAccountConnectionCreate(
+                    provider="instagram",
+                    connection_method=SocialAccountConnectionMethod.direct_api,
+                    status=SocialAccountConnectionStatus.connected,
+                ),
+            )
+            health = await check_connection_health(
+                session,
+                workspace.id,
+                connection.id,
+                provider_registry=registry,
+            )
+            updated = await get_connection(session, workspace.id, connection.id)
+            return {
+                "health_status": health.status,
+                "status": updated.status,
+                "error_code": updated.last_error_code,
+            }
+
+    result = asyncio.run(run())
+    assert result["health_status"] == "reconnect_required"
+    assert result["status"] == SocialAccountConnectionStatus.reconnect_required
+    assert result["error_code"] == "credential_missing"
+
+
+def test_refresh_failure_requires_reconnect_without_forcing_generic_error(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = HealthScenarioProvider(
+        SocialAccountHealth(
+            healthy=False,
+            status="expired",
+            error_code=SocialAccountProviderErrorCode.credential_expired,
+            error_message="Access token expired",
+        ),
+        refresh_error=SocialAccountProviderError(
+            SocialAccountProviderErrorCode.refresh_failed,
+            "Refresh failed and user action is required",
+            provider="instagram",
+            connection_method=SocialAccountConnectionMethod.direct_api,
+        ),
+    )
+    registry = SocialAccountProviderRegistry([provider])
+    monkeypatch.setattr(
+        "labelos_api.social_accounts.providers.provider_registry",
+        registry,
+    )
+
+    async def run() -> dict[str, object]:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            assert isinstance(workspace, Organization)
+            connection = await create_connection(
+                session,
+                workspace.id,
+                SocialAccountConnectionCreate(
+                    provider="instagram",
+                    connection_method=SocialAccountConnectionMethod.direct_api,
+                    status=SocialAccountConnectionStatus.connected,
+                    credential_ref="memory://credentials/direct",
+                ),
+            )
+            health = await check_connection_health(
+                session,
+                workspace.id,
+                connection.id,
+                provider_registry=registry,
+            )
+            updated = await get_connection(session, workspace.id, connection.id)
+            return {
+                "health_status": health.status,
+                "status": updated.status,
+                "error_code": updated.last_error_code,
+            }
+
+    result = asyncio.run(run())
+    assert result["health_status"] == "reconnect_required"
+    assert result["status"] == SocialAccountConnectionStatus.reconnect_required
+    assert result["error_code"] == "refresh_failed"
+
+
+def test_third_party_missing_credentials_require_reconnect(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = SocialAccountProviderRegistry(
+        [FakeThirdPartySocialAccountConnectionProvider()]
+    )
+    monkeypatch.setattr(
+        "labelos_api.social_accounts.providers.provider_registry",
+        registry,
+    )
+
+    async def run() -> dict[str, object]:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            assert isinstance(workspace, Organization)
+            connection = await create_connection(
+                session,
+                workspace.id,
+                SocialAccountConnectionCreate(
+                    provider="instagram",
+                    connection_method=SocialAccountConnectionMethod.third_party,
+                    status=SocialAccountConnectionStatus.connected,
+                    external_account_id="ig-third",
+                    provider_metadata={
+                        "third_party": {
+                            "external_connection_id": "vendor-connection",
+                        }
+                    },
+                ),
+            )
+            await check_connection_health(
+                session,
+                workspace.id,
+                connection.id,
+                provider_registry=registry,
+            )
+            updated = await get_connection(session, workspace.id, connection.id)
+            return {
+                "status": updated.status,
+                "error_code": updated.last_error_code,
+            }
+
+    result = asyncio.run(run())
+    assert result["status"] == SocialAccountConnectionStatus.reconnect_required
+    assert result["error_code"] == "credential_missing"
+
+
+def test_sync_account_metadata_updates_identity_capabilities_and_timestamp(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = HealthScenarioProvider(
+        SocialAccountHealth(healthy=True, status="connected"),
+        sync_result=SocialAccountMetadataSync(
+            identity=SocialAccountIdentity(
+                provider="instagram",
+                external_account_id="ig-synced",
+                username="synced_artist",
+                display_name="Synced Artist",
+                profile_url="https://instagram.com/synced_artist",
+            ),
+            capabilities=("content_publish",),
+            provider_metadata={"avatar_url": "https://cdn.example/avatar.jpg"},
+        ),
+    )
+    registry = SocialAccountProviderRegistry([provider])
+    monkeypatch.setattr(
+        "labelos_api.social_accounts.providers.provider_registry",
+        registry,
+    )
+
+    async def run() -> dict[str, object]:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            assert isinstance(workspace, Organization)
+            connection = await create_connection(
+                session,
+                workspace.id,
+                SocialAccountConnectionCreate(
+                    provider="instagram",
+                    connection_method=SocialAccountConnectionMethod.direct_api,
+                    status=SocialAccountConnectionStatus.connected,
+                    credential_ref="memory://credentials/direct",
+                ),
+            )
+            updated = await sync_account_metadata(
+                session,
+                workspace.id,
+                connection.id,
+                provider_registry=registry,
+            )
+            return {
+                "external_account_id": updated.external_account_id,
+                "username": updated.username,
+                "capabilities": updated.capabilities,
+                "metadata": updated.provider_metadata,
+                "synced": updated.last_synced_at,
+                "error_code": updated.last_error_code,
+            }
+
+    result = asyncio.run(run())
+    assert result["external_account_id"] == "ig-synced"
+    assert result["username"] == "synced_artist"
+    assert result["capabilities"] == ["content_publish"]
+    assert result["metadata"]["avatar_url"] == "https://cdn.example/avatar.jpg"
+    assert result["synced"] is not None
+    assert result["error_code"] is None
+
+
+def test_sync_account_metadata_records_failure_without_dropping_connection(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = HealthScenarioProvider(
+        SocialAccountHealth(healthy=True, status="connected"),
+        sync_error=SocialAccountProviderError(
+            SocialAccountProviderErrorCode.provider_unavailable,
+            "Provider temporarily unavailable during sync",
+            provider="instagram",
+            connection_method=SocialAccountConnectionMethod.direct_api,
+        ),
+    )
+    registry = SocialAccountProviderRegistry([provider])
+    monkeypatch.setattr(
+        "labelos_api.social_accounts.providers.provider_registry",
+        registry,
+    )
+
+    async def run() -> dict[str, object]:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            assert isinstance(workspace, Organization)
+            connection = await create_connection(
+                session,
+                workspace.id,
+                SocialAccountConnectionCreate(
+                    provider="instagram",
+                    connection_method=SocialAccountConnectionMethod.direct_api,
+                    status=SocialAccountConnectionStatus.connected,
+                    credential_ref="memory://credentials/direct",
+                ),
+            )
+            updated = await sync_account_metadata(
+                session,
+                workspace.id,
+                connection.id,
+                provider_registry=registry,
+            )
+            return {
+                "status": updated.status,
+                "error_code": updated.last_error_code,
+                "synced": updated.last_synced_at,
+                "checked": updated.last_health_checked_at,
+            }
+
+    result = asyncio.run(run())
+    assert result["status"] == SocialAccountConnectionStatus.connected
+    assert result["error_code"] == "provider_unavailable"
+    assert result["synced"] is None
+    assert result["checked"] is not None

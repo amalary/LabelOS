@@ -429,6 +429,34 @@ def test_social_account_connection_list_get_create_update_and_disconnect(
     assert active_only.json()["total"] == 0
 
 
+def test_social_account_connection_health_and_sync_routes_update_timestamps(
+    social_account_connections_client: tuple[
+        TestClient,
+        async_sessionmaker[AsyncSession],
+        SeededSocialAccountConnectionsApi,
+    ],
+) -> None:
+    client, _sessionmaker, seeded = social_account_connections_client
+    _set_context(client, seeded)
+    base = _base(seeded)
+
+    created_response = client.post(base, json=_payload(seeded))
+    assert created_response.status_code == 201
+    connection_id = created_response.json()["id"]
+
+    health = client.post(f"{base}/{connection_id}/health")
+    assert health.status_code == 200
+    health_body = health.json()
+    assert health_body["status"] == "connected"
+    assert health_body["last_health_checked_at"] is not None
+
+    synced = client.post(f"{base}/{connection_id}/sync")
+    assert synced.status_code == 200
+    synced_body = synced.json()
+    assert synced_body["status"] == "connected"
+    assert synced_body["last_synced_at"] is not None
+
+
 def test_social_account_connection_mutations_publish_workspace_scoped_activity_events(
     social_account_connections_client: tuple[
         TestClient,
