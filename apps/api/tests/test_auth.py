@@ -1104,6 +1104,8 @@ def test_workos_jwks_url_defaults_to_client_id() -> None:
         workos_issuer_url="https://api.workos.com",
         workos_jwks_url=None,
         workos_webhook_secret="whsec_01TEST",
+        credential_store_backend="gcp-secret-manager",
+        credential_store_gcp_project_id="labelos-prod",
     )
 
     settings.validate_startup_environment()

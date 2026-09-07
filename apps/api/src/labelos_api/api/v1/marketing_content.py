@@ -15,11 +15,6 @@ from sqlalchemy import select
 
 from labelos_api.auth import CurrentUserContext, SessionDep, get_current_user_context
 from labelos_api.services import marketing_content_service
-from labelos_api.services.social_account_service import (
-    DestinationUnavailableReason,
-    ResolvedDestination,
-    resolved_destination_for_connection,
-)
 from labelos_api.services.marketing_content_service import (
     MarketingContentAuthorizationError,
     MarketingContentChannelCreate,
@@ -29,6 +24,11 @@ from labelos_api.services.marketing_content_service import (
     MarketingContentLifecycleError,
     MarketingContentNotFoundError,
     MarketingContentRelationshipError,
+)
+from labelos_api.services.social_account_service import (
+    DestinationUnavailableReason,
+    ResolvedDestination,
+    resolved_destination_for_connection,
 )
 
 router = APIRouter(prefix="/workspaces", tags=["marketing-content"])
@@ -318,7 +318,10 @@ def _destination_readiness(
             delivery_ready=False,
             status="missing_account",
             label="No Account Selected",
-            warning="Missing account is a delivery warning; content planning remains valid.",
+            warning=(
+                "Missing account is a delivery warning; content planning remains "
+                "valid."
+            ),
             account=None,
         )
     destination = resolved_destination_for_connection(
@@ -406,7 +409,10 @@ def _destination_unavailable_label(status_value: str) -> str:
 
 def _destination_unavailable_warning(status_value: str) -> str:
     warnings = {
-        "disconnected": "Selected account is disconnected; choose another account before delivery.",
+        "disconnected": (
+            "Selected account is disconnected; choose another account before "
+            "delivery."
+        ),
         "reconnect_required": "Selected account must be reconnected before delivery.",
         "connection_error": "Selected account needs attention before delivery.",
         "missing_capability": "Selected account cannot publish this content.",

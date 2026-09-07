@@ -1,8 +1,8 @@
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
-import re
 from uuid import UUID
 
 from labelos_database.models import (
@@ -23,8 +23,8 @@ from labelos_api.authorization import (
 from labelos_api.realtime import RealtimeEventType, RealtimePublisher
 from labelos_api.repositories import social_accounts
 from labelos_api.social_accounts.providers import (
-    SocialAccountCredentialResult,
     SocialAccountConnectionProvider,
+    SocialAccountCredentialResult,
     SocialAccountHealth,
     SocialAccountIdentity,
     SocialAccountMetadataSync,

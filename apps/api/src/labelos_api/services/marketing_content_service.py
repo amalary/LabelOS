@@ -756,7 +756,8 @@ def _validate_channel_connection(
         )
     if not PUBLISHING_CAPABILITY_FIELDS.intersection(set(connection.capabilities)):
         raise MarketingContentRelationshipError(
-            "social_account_connection_id requires content_publish or manual_publish capability"
+            "social_account_connection_id requires content_publish or "
+            "manual_publish capability"
         )
     connection_artist_id = (
         connection.artist_profile.artist_id
@@ -770,7 +771,8 @@ def _validate_channel_connection(
         and connection_artist_id != content_artist_id
     ):
         raise MarketingContentRelationshipError(
-            "social_account_connection_id artist association is incompatible with content artist"
+            "social_account_connection_id artist association is incompatible with "
+            "content artist"
         )
 
 

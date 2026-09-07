@@ -78,6 +78,12 @@ class Settings(DatabaseSettings):
 
         _ = self.resolved_workos_jwks_url
 
+        if self.credential_store_backend.lower() == "memory":
+            raise RuntimeError(
+                "CREDENTIAL_STORE_BACKEND=memory is only allowed for local and test "
+                "environments"
+            )
+
         if (
             self.credential_store_backend.lower() == "gcp-secret-manager"
             and not self.resolved_credential_store_gcp_project_id

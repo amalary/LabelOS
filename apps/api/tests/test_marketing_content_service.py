@@ -42,6 +42,7 @@ from labelos_api.services.approval_service import (
     submit_resource_for_approval,
 )
 from labelos_api.services.marketing_content_service import (
+    ManualPublishScheduleInput,
     MarketingContentAuthorizationError,
     MarketingContentChannelCreate,
     MarketingContentChannelUpdate,
@@ -51,7 +52,6 @@ from labelos_api.services.marketing_content_service import (
     MarketingContentLifecycleError,
     MarketingContentNotFoundError,
     MarketingContentRelationshipError,
-    ManualPublishScheduleInput,
     archive_content_item,
     create_content_item,
     get_campaign_content_item,

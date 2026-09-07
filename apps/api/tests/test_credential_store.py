@@ -146,6 +146,18 @@ def test_build_credential_store_uses_memory_for_tests_and_local_defaults() -> No
     )
 
 
+def test_production_startup_rejects_in_memory_credential_store() -> None:
+    settings = Settings(
+        environment="production",
+        workos_client_id="client_prod",
+        workos_webhook_secret="whsec_prod",
+        credential_store_backend="memory",
+    )
+
+    with pytest.raises(RuntimeError, match="CREDENTIAL_STORE_BACKEND=memory"):
+        settings.validate_startup_environment()
+
+
 class FakeSecretManagerClient:
     def __init__(self) -> None:
         self.secrets: dict[str, list[bytes]] = {}
