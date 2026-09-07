@@ -27,7 +27,9 @@ Observation targets are represented by:
 - `target_type = campaign_object` with `campaign_id`,
   `campaign_object_type`, `campaign_object_id`, and matching `target_id`.
 
-Supported campaign object types are currently `goal` and `milestone`.
+Supported backend campaign object types are currently `goal`, `milestone`, and
+`marketing_content_item`. The shared frontend campaign detail analytics surface
+currently exposes goal and milestone inspection.
 
 ## Provider Boundary
 
@@ -96,13 +98,15 @@ comparison filters. Single-metric numeric series and previous-period
 aggregations execute in SQL; mixed or nonnumeric read paths preserve typed-value
 behavior in the service layer. The frontend shared read surface is used by
 workspace analytics, artist profiles, and campaign detail pages, including goal
-and milestone inspection. Realtime analytics events invalidate workspace-scoped
-analytics caches without forcing a full route refresh on the analytics page.
+and milestone inspection. Backend APIs also accept `marketing_content_item` as a
+campaign child target when the content item belongs to the supplied campaign and
+workspace. Realtime analytics events invalidate workspace-scoped analytics
+caches without forcing a full route refresh on the analytics page.
 
 Agent-facing analytics operations are structured around stable object refs:
-`workspace`, `artist_profile`, `campaign`, `goal`, and `milestone`. Campaign
-child refs carry the parent `campaign_id` so service validation can preserve
-ownership without a registry table.
+`workspace`, `artist_profile`, `campaign`, `goal`, `milestone`, and
+`marketing_content_item`. Campaign child refs carry the parent `campaign_id` so
+service validation can preserve ownership without a registry table.
 
 ## Typed Campaign Child Architecture
 
@@ -124,7 +128,7 @@ these becomes true:
 - Child-level authorization diverges from the parent campaign and cannot be
   expressed cleanly with direct ownership checks.
 - Query plans or indexes become difficult to maintain because child-object
-  targets outgrow `goal` and `milestone`.
+  targets outgrow `goal`, `milestone`, and `marketing_content_item`.
 
 Until then, adding a registry would increase write paths and consistency risks
 without improving correctness.
