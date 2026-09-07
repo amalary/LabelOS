@@ -309,6 +309,7 @@ function item(overrides: Partial<MarketingContentItem> = {}): MarketingContentIt
         marketing_content_item_id: "content_01",
         channel: "instagram",
         placement: "feed",
+        social_account_connection_id: null,
         scheduled_at: "2026-09-10T12:00:00Z",
         published_at: null,
         external_post_id: null,
@@ -2398,6 +2399,96 @@ describe("MarketingWorkspace", () => {
 
     expect(screen.getByRole("heading", { name: "Draft Posts" })).toBeInTheDocument();
     expect(screen.getByText("Draft Caption")).toBeInTheDocument();
+  });
+
+  it("selects draft post destination accounts and surfaces account warnings", async () => {
+    vi.useRealTimers();
+    mockWorkspaceProfile(["marketing.content.view", "marketing.content.create"]);
+    mockSocialAccounts([
+      socialConnection({
+        capabilities: ["content_publish"],
+        connection_method: "direct_api",
+        handle: "@artist",
+        id: "connection_auto",
+        resolved_capabilities: {
+          can_auto_publish: true,
+          can_read_account_analytics: false,
+          can_read_post_analytics: false,
+          requires_manual_publish: false,
+          supports_manual_metrics: false,
+        },
+      }),
+      socialConnection({
+        capabilities: ["manual_publish"],
+        handle: "@otherartist",
+        id: "connection_assisted",
+      }),
+      socialConnection({
+        capabilities: ["account_analytics_read"],
+        handle: "@readonly",
+        id: "connection_readonly",
+      }),
+      socialConnection({
+        handle: "@reconnect",
+        id: "connection_reconnect",
+        status: "reconnect_required",
+      }),
+      socialConnection({
+        handle: "@offline",
+        id: "connection_disconnected",
+        status: "disconnected",
+      }),
+      socialConnection({
+        handle: "@video",
+        id: "connection_youtube",
+        provider: "youtube",
+      }),
+    ]);
+
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create Draft" }));
+
+    const editor = screen.getByRole("region", { name: "Marketing content editor" });
+    const destinationSelect = within(editor).getByLabelText("Destination account");
+    expect(screen.getByText("Instagram - No account selected")).toBeInTheDocument();
+    expect(screen.getByText("@artist - Automatic Publishing")).toBeInTheDocument();
+    expect(screen.getByText("@otherartist - Assisted Publishing")).toBeInTheDocument();
+    expect(screen.queryByText("@video - Assisted Publishing")).not.toBeInTheDocument();
+
+    fireEvent.change(destinationSelect, {
+      target: { value: "connection_reconnect" },
+    });
+    expect(screen.getByText("Reconnect required")).toBeInTheDocument();
+
+    fireEvent.change(destinationSelect, {
+      target: { value: "connection_disconnected" },
+    });
+    expect(screen.getByText("Disconnected")).toBeInTheDocument();
+
+    fireEvent.change(destinationSelect, {
+      target: { value: "connection_readonly" },
+    });
+    expect(screen.getByText("Missing publishing capability")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Title"), { target: { value: "Account Draft" } });
+    fireEvent.change(destinationSelect, {
+      target: { value: "connection_auto" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save draft" }));
+
+    await waitFor(() =>
+      expect(mutationMocks.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channels: [
+            expect.objectContaining({
+              channel: "instagram",
+              social_account_connection_id: "connection_auto",
+            }),
+          ],
+        }),
+      ),
+    );
   });
 
   it("keeps calendar and approval queue navigation working after visiting drafts", () => {

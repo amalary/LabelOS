@@ -327,6 +327,7 @@ type ChannelFormRow = {
   id: string;
   channel: string;
   placement: string;
+  socialAccountConnectionId: string;
   scheduledAt: string;
   copyTextOverride: string;
   assetRefsJson: string;
@@ -394,6 +395,31 @@ function duplicateChannelTargets(channels: ChannelFormRow[]): boolean {
   return false;
 }
 
+function accountConnectionLabel(connection: SocialAccountConnection): string {
+  const handle =
+    connection.handle ?? connection.display_name ?? connection.external_account_id ?? connection.id;
+  const mode = connection.capabilities.includes("content_publish")
+    ? "Automatic Publishing"
+    : "Assisted Publishing";
+  return `${handle} - ${mode}`;
+}
+
+function accountConnectionWarning(connection: SocialAccountConnection): string | null {
+  if (connection.status === "disconnected") {
+    return "Disconnected";
+  }
+  if (connection.status === "reconnect_required") {
+    return "Reconnect required";
+  }
+  if (
+    !connection.capabilities.includes("content_publish") &&
+    !connection.capabilities.includes("manual_publish")
+  ) {
+    return "Missing publishing capability";
+  }
+  return null;
+}
+
 function emptyChannelRow(index: number): ChannelFormRow {
   return {
     assetRefsJson: "",
@@ -401,6 +427,7 @@ function emptyChannelRow(index: number): ChannelFormRow {
     copyTextOverride: "",
     id: `channel_${Date.now()}_${index}`,
     placement: index === 0 ? "feed" : "",
+    socialAccountConnectionId: "",
     scheduledAt: "",
   };
 }
@@ -427,6 +454,7 @@ function initialFormState({
         copyTextOverride: channel.copy_text_override ?? "",
         id: channel.id || `channel_${index}`,
         placement: channel.placement ?? "",
+        socialAccountConnectionId: channel.social_account_connection_id ?? "",
         scheduledAt: formatDateTimeInput(channel.scheduled_at),
       })),
       contentType: item.content_type,
@@ -462,6 +490,7 @@ function formToPayload(form: ContentFormState): MarketingContentItemCreate {
       channel: channel.channel,
       copy_text_override: channel.copyTextOverride || null,
       placement: channel.placement || null,
+      social_account_connection_id: channel.socialAccountConnectionId || null,
       scheduled_at: dateTimeInputToIso(channel.scheduledAt),
     })),
     content_type: form.contentType,
@@ -636,27 +665,33 @@ function ContentEditor({
   );
   const [clientError, setClientError] = useState<string | null>(null);
   const selectedCampaign = campaigns.find((campaign) => campaign.id === form.campaignId) ?? null;
+  const workspaceId = selectedCampaign?.workspace_id ?? item?.workspace_id ?? null;
+  const socialAccounts = useSocialAccountConnections(workspaceId, {
+    include_disconnected: true,
+    limit: 100,
+    offset: 0,
+  });
   const create = useCreateMarketingContentItem(
-    selectedCampaign?.workspace_id ?? item?.workspace_id ?? null,
+    workspaceId,
     mode === "create" ? form.campaignId || null : null,
   );
   const update = useUpdateMarketingContentItem(
-    item?.workspace_id ?? selectedCampaign?.workspace_id ?? null,
+    workspaceId,
     item?.campaign_id ?? null,
     item?.id ?? null,
   );
   const submitApproval = useSubmitMarketingContentForApproval(
-    item?.workspace_id ?? selectedCampaign?.workspace_id ?? null,
+    workspaceId,
     item?.campaign_id ?? null,
     item?.id ?? null,
   );
   const archive = useArchiveMarketingContentItem(
-    item?.workspace_id ?? selectedCampaign?.workspace_id ?? null,
+    workspaceId,
     item?.campaign_id ?? null,
     item?.id ?? null,
   );
   const transitionStatus = useTransitionMarketingContentStatus(
-    item?.workspace_id ?? selectedCampaign?.workspace_id ?? null,
+    workspaceId,
     item?.campaign_id ?? null,
     item?.id ?? null,
   );
@@ -696,6 +731,7 @@ function ContentEditor({
   const isCurrentlyApproved = item ? approvedRevisionIsCurrent(item) : false;
   const scheduleEligible = item ? canScheduleApprovedRevision(item) : false;
   const isDraftSurface = surface === "drafts";
+  const accountConnections = socialAccounts.data?.social_account_connections ?? [];
 
   const setField = (next: Partial<ContentFormState>) => {
     setClientError(null);
@@ -1003,82 +1039,135 @@ function ContentEditor({
         ) : null}
         {form.channels.map((channel, index) => (
           <div className="grid gap-3 rounded-md border border-slate-200 p-3" key={channel.id}>
-            <div className="grid gap-3 md:grid-cols-[1fr_1fr_1fr_auto]">
-              <label className="grid gap-1 text-sm font-medium text-slate-700">
-                <span>Channel</span>
-                <select
-                  className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950"
-                  disabled={!isEditable}
-                  onChange={(event) => setChannel(channel.id, { channel: event.target.value })}
-                  value={channel.channel}
-                >
-                  <option value="">Choose channel</option>
-                  {channelOptions.map((option) => (
-                    <option key={option} value={option}>
-                      {humanize(option)}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="grid gap-1 text-sm font-medium text-slate-700">
-                <span>Placement</span>
-                <input
-                  className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950"
-                  disabled={!isEditable}
-                  onChange={(event) => setChannel(channel.id, { placement: event.target.value })}
-                  placeholder="default"
-                  value={channel.placement}
-                />
-              </label>
-              <label className="grid gap-1 text-sm font-medium text-slate-700">
-                <span>Channel planned publish time</span>
-                <input
-                  aria-label="Channel planned publish time"
-                  className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950"
-                  disabled={!isEditable}
-                  onChange={(event) => setChannel(channel.id, { scheduledAt: event.target.value })}
-                  type="datetime-local"
-                  value={channel.scheduledAt}
-                />
-              </label>
-              <Button
-                className="self-end"
-                disabled={!isEditable || form.channels.length === 1}
-                onClick={() =>
-                  setForm((current) => ({
-                    ...current,
-                    channels: current.channels.filter((entry) => entry.id !== channel.id),
-                  }))
-                }
-                size="sm"
-                type="button"
-                variant="secondary"
-              >
-                Remove
-              </Button>
-            </div>
-            <label className="grid gap-1 text-sm font-medium text-slate-700">
-              <span>Channel copy override</span>
-              <textarea
-                className="min-h-16 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-950"
-                disabled={!isEditable}
-                onChange={(event) =>
-                  setChannel(channel.id, { copyTextOverride: event.target.value })
-                }
-                value={channel.copyTextOverride}
-              />
-            </label>
-            <label className="grid gap-1 text-sm font-medium text-slate-700">
-              <span>Channel asset references</span>
-              <textarea
-                className="min-h-16 rounded-md border border-slate-300 bg-white px-3 py-2 font-mono text-xs text-slate-950"
-                disabled={!isEditable}
-                onChange={(event) => setChannel(channel.id, { assetRefsJson: event.target.value })}
-                placeholder="[]"
-                value={channel.assetRefsJson}
-              />
-            </label>
-            <p className="text-xs text-slate-500">Target {index + 1}</p>
+            {(() => {
+              const providerAccounts = accountConnections.filter(
+                (connection) => connection.provider === channel.channel,
+              );
+              const selectedAccount =
+                accountConnections.find(
+                  (connection) => connection.id === channel.socialAccountConnectionId,
+                ) ?? null;
+              const accountWarning = selectedAccount
+                ? accountConnectionWarning(selectedAccount)
+                : null;
+              return (
+                <>
+                  <div className="grid gap-3 md:grid-cols-[1fr_1fr_1fr_auto]">
+                    <label className="grid gap-1 text-sm font-medium text-slate-700">
+                      <span>Channel</span>
+                      <select
+                        className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950"
+                        disabled={!isEditable}
+                        onChange={(event) =>
+                          setChannel(channel.id, {
+                            channel: event.target.value,
+                            socialAccountConnectionId: "",
+                          })
+                        }
+                        value={channel.channel}
+                      >
+                        <option value="">Choose channel</option>
+                        {channelOptions.map((option) => (
+                          <option key={option} value={option}>
+                            {humanize(option)}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="grid gap-1 text-sm font-medium text-slate-700">
+                      <span>Placement</span>
+                      <input
+                        className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950"
+                        disabled={!isEditable}
+                        onChange={(event) =>
+                          setChannel(channel.id, { placement: event.target.value })
+                        }
+                        placeholder="default"
+                        value={channel.placement}
+                      />
+                    </label>
+                    <label className="grid gap-1 text-sm font-medium text-slate-700">
+                      <span>Channel planned publish time</span>
+                      <input
+                        aria-label="Channel planned publish time"
+                        className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950"
+                        disabled={!isEditable}
+                        onChange={(event) =>
+                          setChannel(channel.id, { scheduledAt: event.target.value })
+                        }
+                        type="datetime-local"
+                        value={channel.scheduledAt}
+                      />
+                    </label>
+                    <Button
+                      className="self-end"
+                      disabled={!isEditable || form.channels.length === 1}
+                      onClick={() =>
+                        setForm((current) => ({
+                          ...current,
+                          channels: current.channels.filter((entry) => entry.id !== channel.id),
+                        }))
+                      }
+                      size="sm"
+                      type="button"
+                      variant="secondary"
+                    >
+                      Remove
+                    </Button>
+                  </div>
+                  <label className="grid gap-1 text-sm font-medium text-slate-700">
+                    <span>Destination account</span>
+                    <select
+                      className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950"
+                      disabled={!isEditable || !channel.channel}
+                      onChange={(event) =>
+                        setChannel(channel.id, { socialAccountConnectionId: event.target.value })
+                      }
+                      value={channel.socialAccountConnectionId}
+                    >
+                      <option value="">{humanize(channel.channel)} - No account selected</option>
+                      {providerAccounts.map((connection) => (
+                        <option key={connection.id} value={connection.id}>
+                          {accountConnectionLabel(connection)}
+                        </option>
+                      ))}
+                    </select>
+                    {socialAccounts.error ? (
+                      <span className="text-xs font-normal text-amber-700">
+                        Account destinations could not be loaded.
+                      </span>
+                    ) : null}
+                    {accountWarning ? (
+                      <span className="text-xs font-medium text-amber-700">{accountWarning}</span>
+                    ) : null}
+                  </label>
+                  <label className="grid gap-1 text-sm font-medium text-slate-700">
+                    <span>Channel copy override</span>
+                    <textarea
+                      className="min-h-16 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-950"
+                      disabled={!isEditable}
+                      onChange={(event) =>
+                        setChannel(channel.id, { copyTextOverride: event.target.value })
+                      }
+                      value={channel.copyTextOverride}
+                    />
+                  </label>
+                  <label className="grid gap-1 text-sm font-medium text-slate-700">
+                    <span>Channel asset references</span>
+                    <textarea
+                      className="min-h-16 rounded-md border border-slate-300 bg-white px-3 py-2 font-mono text-xs text-slate-950"
+                      disabled={!isEditable}
+                      onChange={(event) =>
+                        setChannel(channel.id, { assetRefsJson: event.target.value })
+                      }
+                      placeholder="[]"
+                      value={channel.assetRefsJson}
+                    />
+                  </label>
+                  <p className="text-xs text-slate-500">Target {index + 1}</p>
+                </>
+              );
+            })()}
           </div>
         ))}
       </div>

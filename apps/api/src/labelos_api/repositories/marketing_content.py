@@ -5,11 +5,13 @@ from uuid import UUID
 
 from labelos_database.models import (
     Artist,
+    ArtistProfile,
     Campaign,
     MarketingContentItem,
     MarketingContentItemChannel,
     MarketingContentItemStatus,
     Release,
+    SocialAccountConnection,
     UniversalProfile,
     WorkspaceMembership,
 )
@@ -21,6 +23,9 @@ from sqlalchemy.orm import selectinload
 def _content_item_load_options():
     return (
         selectinload(MarketingContentItem.channels),
+        selectinload(MarketingContentItem.channels).selectinload(
+            MarketingContentItemChannel.social_account_connection
+        ),
         selectinload(MarketingContentItem.campaign),
         selectinload(MarketingContentItem.artist),
         selectinload(MarketingContentItem.release),
@@ -307,6 +312,23 @@ async def update_channel(
     return channel
 
 
+async def get_social_account_connection(
+    session: AsyncSession,
+    workspace_id: UUID,
+    connection_id: UUID,
+) -> SocialAccountConnection | None:
+    return await session.scalar(
+        select(SocialAccountConnection)
+        .options(
+            selectinload(SocialAccountConnection.artist_profile).selectinload(
+                ArtistProfile.artist
+            )
+        )
+        .where(SocialAccountConnection.organization_id == workspace_id)
+        .where(SocialAccountConnection.id == connection_id)
+    )
+
+
 async def delete_channel(
     session: AsyncSession,
     channel_id: UUID,
@@ -331,6 +353,18 @@ async def campaign_in_workspace(
             .where(Campaign.organization_id == workspace_id)
         )
         is not None
+    )
+
+
+async def campaign_artist_id(
+    session: AsyncSession,
+    workspace_id: UUID,
+    campaign_id: UUID,
+) -> UUID | None:
+    return await session.scalar(
+        select(Campaign.primary_artist_id)
+        .where(Campaign.id == campaign_id)
+        .where(Campaign.organization_id == workspace_id)
     )
 
 

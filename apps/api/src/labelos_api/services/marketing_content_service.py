@@ -9,6 +9,8 @@ from labelos_database.models import (
     MarketingContentItemChannel,
     MarketingContentItemStatus,
     Release,
+    SocialAccountConnection,
+    SocialAccountConnectionStatus,
     User,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -81,12 +83,14 @@ CHANNEL_MATERIAL_FIELDS = frozenset(
     {
         "channel",
         "placement",
+        "social_account_connection_id",
         "scheduled_at",
         "copy_text_override",
         "asset_refs",
         "metadata_json",
     }
 )
+PUBLISHING_CAPABILITY_FIELDS = frozenset({"content_publish", "manual_publish"})
 ALLOWED_MARKETING_CONTENT_TRANSITIONS: dict[
     MarketingContentItemStatus, frozenset[MarketingContentItemStatus]
 ] = {
@@ -135,6 +139,7 @@ ALLOWED_MARKETING_CONTENT_TRANSITIONS: dict[
 class MarketingContentChannelCreate:
     channel: str
     placement: str | None = None
+    social_account_connection_id: UUID | None = None
     scheduled_at: datetime | None = None
     published_at: datetime | None = None
     external_post_id: str | None = None
@@ -148,6 +153,7 @@ class MarketingContentChannelCreate:
 class MarketingContentChannelUpdate:
     channel: str | None = None
     placement: str | None = None
+    social_account_connection_id: UUID | None = None
     scheduled_at: datetime | None = None
     published_at: datetime | None = None
     external_post_id: str | None = None
@@ -302,6 +308,11 @@ def _channel_create_values(
         "asset_refs": _json_list(payload.asset_refs, "asset_refs"),
         "metadata_json": _json_object(payload.metadata_json, "metadata_json"),
     }
+    _set_if_not_none(
+        values,
+        "social_account_connection_id",
+        payload.social_account_connection_id,
+    )
     _set_if_not_none(values, "scheduled_at", payload.scheduled_at)
     _set_if_not_none(values, "published_at", payload.published_at)
     _set_if_not_none(
@@ -328,6 +339,11 @@ def _channel_update_values(
         values["channel"] = _normalize_text(payload.channel, "channel").lower()
     if payload.placement is not None:
         values["placement"] = _normalize_text(payload.placement, "placement").lower()
+    _set_if_not_none(
+        values,
+        "social_account_connection_id",
+        payload.social_account_connection_id,
+    )
     _set_if_not_none(values, "scheduled_at", payload.scheduled_at)
     _set_if_not_none(values, "published_at", payload.published_at)
     _set_if_not_none(
@@ -597,6 +613,69 @@ async def _validate_item_relationships(
             )
 
 
+async def _validate_channel_destinations(
+    session: AsyncSession,
+    workspace_id: UUID,
+    *,
+    campaign_id: UUID,
+    artist_id: UUID | None,
+    channel_values: Sequence[Mapping[str, object]],
+) -> None:
+    campaign_artist_id = await marketing_content.campaign_artist_id(
+        session,
+        workspace_id,
+        campaign_id,
+    )
+    content_artist_id = artist_id or campaign_artist_id
+    for values in channel_values:
+        connection_id = values.get("social_account_connection_id")
+        if not isinstance(connection_id, UUID):
+            continue
+        connection = await marketing_content.get_social_account_connection(
+            session,
+            workspace_id,
+            connection_id,
+        )
+        if connection is None:
+            raise MarketingContentRelationshipError(
+                "social_account_connection_id must belong to workspace"
+            )
+        _validate_channel_connection(values, connection, content_artist_id)
+
+
+def _validate_channel_connection(
+    values: Mapping[str, object],
+    connection: SocialAccountConnection,
+    content_artist_id: UUID | None,
+) -> None:
+    if connection.provider.lower() != str(values["channel"]).lower():
+        raise MarketingContentRelationshipError(
+            "social_account_connection_id provider must match channel"
+        )
+    if connection.status == SocialAccountConnectionStatus.disconnected:
+        raise MarketingContentRelationshipError(
+            "social_account_connection_id cannot be disconnected"
+        )
+    if not PUBLISHING_CAPABILITY_FIELDS.intersection(set(connection.capabilities)):
+        raise MarketingContentRelationshipError(
+            "social_account_connection_id requires content_publish or manual_publish capability"
+        )
+    connection_artist_id = (
+        connection.artist_profile.artist_id
+        if connection.artist_profile_id is not None
+        and connection.artist_profile is not None
+        else None
+    )
+    if (
+        content_artist_id is not None
+        and connection_artist_id is not None
+        and connection_artist_id != content_artist_id
+    ):
+        raise MarketingContentRelationshipError(
+            "social_account_connection_id artist association is incompatible with content artist"
+        )
+
+
 def _clear_approval_fields(item: MarketingContentItem) -> None:
     item.approval_requested_at = None
     item.approved_at = None
@@ -660,6 +739,7 @@ def _channel_signature(channel: MarketingContentItemChannel) -> tuple:
     return (
         channel.channel,
         channel.placement,
+        channel.social_account_connection_id,
         channel.scheduled_at,
         channel.copy_text_override,
         list(channel.asset_refs),
@@ -671,6 +751,7 @@ def _channel_values_signature(values: Mapping[str, object]) -> tuple:
     return (
         values.get("channel"),
         values.get("placement"),
+        values.get("social_account_connection_id"),
         values.get("scheduled_at"),
         values.get("copy_text_override"),
         list(values.get("asset_refs", [])),
@@ -788,6 +869,13 @@ async def create_content_item(
     await _validate_item_relationships(session, workspace_id, values)
     channel_values = [_channel_create_values(channel) for channel in payload.channels]
     _assert_unique_channel_targets(channel_values)
+    await _validate_channel_destinations(
+        session,
+        workspace_id,
+        campaign_id=payload.campaign_id,
+        artist_id=payload.artist_id,
+        channel_values=channel_values,
+    )
     item = await marketing_content.create_item(session, workspace_id, values)
     if channel_values:
         await marketing_content.create_channels(session, item.id, channel_values)
@@ -1093,6 +1181,17 @@ async def update_content_item_with_channels(
     await _validate_item_relationships(session, workspace_id, relationship_values)
     channel_values = [_channel_create_values(channel) for channel in channels]
     _assert_unique_channel_targets(channel_values)
+    await _validate_channel_destinations(
+        session,
+        workspace_id,
+        campaign_id=item.campaign_id,
+        artist_id=(
+            relationship_values.get("artist_id")
+            if isinstance(relationship_values.get("artist_id"), UUID)
+            else None
+        ),
+        channel_values=channel_values,
+    )
     changed_fields = _changed_fields(item, values) if values else set()
     channel_material_change = _replacement_channels_materially_changed(
         item,
@@ -1157,6 +1256,13 @@ async def replace_channels(
     )
     channel_values = [_channel_create_values(channel) for channel in channels]
     _assert_unique_channel_targets(channel_values)
+    await _validate_channel_destinations(
+        session,
+        workspace_id,
+        campaign_id=item.campaign_id,
+        artist_id=item.artist_id,
+        channel_values=channel_values,
+    )
     material_change = _replacement_channels_materially_changed(item, channel_values)
     if not material_change:
         return item
@@ -1216,9 +1322,20 @@ async def update_channel(
             {
                 "channel": values.get("channel", row.channel),
                 "placement": values.get("placement", row.placement),
+                "social_account_connection_id": values.get(
+                    "social_account_connection_id",
+                    row.social_account_connection_id,
+                ),
             }
         )
     _assert_unique_channel_targets(prospective)
+    await _validate_channel_destinations(
+        session,
+        workspace_id,
+        campaign_id=item.campaign_id,
+        artist_id=item.artist_id,
+        channel_values=prospective,
+    )
     updated = await marketing_content.update_channel(
         session,
         channel_id,

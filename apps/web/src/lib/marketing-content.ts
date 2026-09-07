@@ -25,6 +25,7 @@ export type MarketingContentItemChannel = {
   marketing_content_item_id: string;
   channel: string;
   placement: string | null;
+  social_account_connection_id: string | null;
   scheduled_at: string | null;
   published_at: string | null;
   external_post_id: string | null;
@@ -116,6 +117,7 @@ export type MarketingContentCampaignListOptions = {
 export type MarketingContentChannelCreate = {
   channel: string;
   placement?: string | null;
+  social_account_connection_id?: string | null;
   scheduled_at?: string | null;
   copy_text_override?: string | null;
   asset_refs?: unknown[] | null;

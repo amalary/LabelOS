@@ -34,6 +34,7 @@ class MarketingContentChannelCreateRequest(BaseModel):
 
     channel: str = Field(min_length=1, max_length=80)
     placement: str | None = Field(default=None, max_length=80)
+    social_account_connection_id: UUID | None = None
     scheduled_at: datetime | None = None
     copy_text_override: str | None = Field(default=None, max_length=8000)
     asset_refs: list[Any] | None = None
@@ -100,6 +101,7 @@ class MarketingContentChannelResponse(BaseModel):
     marketing_content_item_id: UUID
     channel: str
     placement: str
+    social_account_connection_id: UUID | None
     scheduled_at: datetime | None
     published_at: datetime | None
     external_post_id: str | None
@@ -268,6 +270,7 @@ def _channel_response(
         marketing_content_item_id=channel.marketing_content_item_id,
         channel=channel.channel,
         placement=channel.placement,
+        social_account_connection_id=channel.social_account_connection_id,
         scheduled_at=channel.scheduled_at,
         published_at=channel.published_at,
         external_post_id=channel.external_post_id,

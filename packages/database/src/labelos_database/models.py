@@ -2657,6 +2657,10 @@ class MarketingContentItemChannel(Base, TimestampMixin):
         ForeignKey("marketing_content_items.id", ondelete="CASCADE"),
         nullable=False,
     )
+    social_account_connection_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("social_account_connections.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     channel: Mapped[str] = mapped_column(String(80), nullable=False)
     placement: Mapped[str] = mapped_column(
         String(80),
@@ -2686,6 +2690,7 @@ class MarketingContentItemChannel(Base, TimestampMixin):
     marketing_content_item: Mapped[MarketingContentItem] = relationship(
         back_populates="channels"
     )
+    social_account_connection: Mapped[SocialAccountConnection | None] = relationship()
 
     @validates("channel", "placement")
     def _validate_required_text(self, key: str, value: str | None) -> str:
@@ -2713,6 +2718,10 @@ class MarketingContentItemChannel(Base, TimestampMixin):
         Index(
             "ix_marketing_content_item_channels_marketing_content_item_id",
             "marketing_content_item_id",
+        ),
+        Index(
+            "ix_marketing_content_item_channels_social_account_connection_id",
+            "social_account_connection_id",
         ),
         Index("ix_marketing_content_item_channels_channel", "channel"),
         Index(
