@@ -1,6 +1,7 @@
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import StrEnum
 from uuid import UUID
 
 from labelos_database.models import (
@@ -208,6 +209,42 @@ class SocialAccountConnectionQuery:
     include_disconnected: bool = True
 
 
+class DestinationUnavailableReason(StrEnum):
+    no_connection = "NO_CONNECTION"
+    disconnected = "DISCONNECTED"
+    reconnect_required = "RECONNECT_REQUIRED"
+    connection_error = "CONNECTION_ERROR"
+    missing_capability = "MISSING_CAPABILITY"
+    provider_mismatch = "PROVIDER_MISMATCH"
+    wrong_artist = "WRONG_ARTIST"
+    wrong_workspace = "WRONG_WORKSPACE"
+
+
+@dataclass(frozen=True, kw_only=True)
+class ResolvedDestination:
+    account: SocialAccountConnection
+    usable: bool
+    supports_automatic_publication: bool
+    requires_assisted_publication: bool
+    can_provide_analytics: bool
+    unavailable_reasons: tuple[DestinationUnavailableReason, ...]
+
+
+@dataclass(frozen=True, kw_only=True)
+class DestinationResolution:
+    workspace_id: UUID
+    provider: str | None
+    artist_profile_id: UUID | None
+    desired_capability: str | None
+    accounts: list[ResolvedDestination]
+    unavailable_reasons: tuple[DestinationUnavailableReason, ...] = ()
+    requested_account: ResolvedDestination | None = None
+
+    @property
+    def usable_accounts(self) -> list[ResolvedDestination]:
+        return [account for account in self.accounts if account.usable]
+
+
 def _now() -> datetime:
     return datetime.now(UTC)
 
@@ -399,6 +436,16 @@ def _validate_list_pagination(*, limit: int, offset: int) -> None:
         )
 
 
+def _normalize_destination_provider(provider: str | None) -> str | None:
+    if provider is None:
+        return None
+    return _normalize_text(provider, "provider").lower()
+
+
+def _normalize_desired_capability(capability: str | None) -> str | None:
+    return _normalize_optional_text(capability)
+
+
 def supports_capability(
     connection_or_capabilities: SocialAccountConnection | Sequence[str],
     capability: str,
@@ -453,6 +500,67 @@ def can_read_post_analytics(
     return supports_capability(
         connection_or_capabilities,
         SOCIAL_ACCOUNT_CAPABILITY_POST_ANALYTICS_READ,
+    )
+
+
+def can_provide_analytics(
+    connection_or_capabilities: SocialAccountConnection | Sequence[str],
+) -> bool:
+    return (
+        can_read_account_analytics(connection_or_capabilities)
+        or can_read_post_analytics(connection_or_capabilities)
+        or supports_manual_metrics(connection_or_capabilities)
+    )
+
+
+def _destination_status_reason(
+    connection: SocialAccountConnection,
+) -> DestinationUnavailableReason | None:
+    if connection.status == SocialAccountConnectionStatus.disconnected:
+        return DestinationUnavailableReason.disconnected
+    if connection.status == SocialAccountConnectionStatus.reconnect_required:
+        return DestinationUnavailableReason.reconnect_required
+    if connection.status == SocialAccountConnectionStatus.error:
+        return DestinationUnavailableReason.connection_error
+    if connection.status == SocialAccountConnectionStatus.pending:
+        return DestinationUnavailableReason.reconnect_required
+    return None
+
+
+def _resolved_destination(
+    connection: SocialAccountConnection,
+    *,
+    workspace_id: UUID,
+    provider: str | None,
+    artist_profile_id: UUID | None,
+    desired_capability: str | None,
+) -> ResolvedDestination:
+    reasons: list[DestinationUnavailableReason] = []
+    if connection.organization_id != workspace_id:
+        reasons.append(DestinationUnavailableReason.wrong_workspace)
+    if provider is not None and connection.provider.lower() != provider:
+        reasons.append(DestinationUnavailableReason.provider_mismatch)
+    if (
+        artist_profile_id is not None
+        and connection.artist_profile_id is not None
+        and connection.artist_profile_id != artist_profile_id
+    ):
+        reasons.append(DestinationUnavailableReason.wrong_artist)
+    status_reason = _destination_status_reason(connection)
+    if status_reason is not None:
+        reasons.append(status_reason)
+    if desired_capability is not None and not supports_capability(
+        connection,
+        desired_capability,
+    ):
+        reasons.append(DestinationUnavailableReason.missing_capability)
+    return ResolvedDestination(
+        account=connection,
+        usable=not reasons,
+        supports_automatic_publication=can_auto_publish(connection),
+        requires_assisted_publication=requires_manual_publish(connection),
+        can_provide_analytics=can_provide_analytics(connection),
+        unavailable_reasons=tuple(dict.fromkeys(reasons)),
     )
 
 
@@ -943,6 +1051,90 @@ async def list_connections(
         include_disconnected=normalized_query.include_disconnected,
         limit=limit,
         offset=offset,
+    )
+
+
+async def resolve_destinations(
+    session: AsyncSession,
+    workspace_id: UUID,
+    *,
+    provider: str | None,
+    artist_profile_id: UUID | None = None,
+    desired_capability: str | None = None,
+    requested_connection_id: UUID | None = None,
+    actor: AuthorizationActorInput | None = None,
+) -> DestinationResolution:
+    await _require_capability(
+        session,
+        actor=actor,
+        workspace_id=workspace_id,
+        capability=Capability.marketing_account_view,
+    )
+    if (
+        artist_profile_id is not None
+        and not await social_accounts.artist_profile_in_workspace(
+            session,
+            workspace_id,
+            artist_profile_id,
+        )
+    ):
+        raise SocialAccountRelationshipError(
+            "artist_profile_id must belong to workspace"
+        )
+
+    normalized_provider = _normalize_destination_provider(provider)
+    normalized_capability = _normalize_desired_capability(desired_capability)
+    page = await social_accounts.list_connections(
+        session,
+        workspace_id,
+        provider=normalized_provider,
+        status=None,
+        artist_profile_id=None,
+        include_disconnected=True,
+        limit=MAX_SOCIAL_ACCOUNT_LIST_LIMIT,
+        offset=0,
+    )
+    accounts = [
+        _resolved_destination(
+            connection,
+            workspace_id=workspace_id,
+            provider=normalized_provider,
+            artist_profile_id=artist_profile_id,
+            desired_capability=normalized_capability,
+        )
+        for connection in page.items
+    ]
+
+    requested_account: ResolvedDestination | None = None
+    if requested_connection_id is not None:
+        requested_connection = await social_accounts.get_connection_by_id(
+            session,
+            requested_connection_id,
+        )
+        if requested_connection is None:
+            unavailable_reasons = (DestinationUnavailableReason.no_connection,)
+        else:
+            requested_account = _resolved_destination(
+                requested_connection,
+                workspace_id=workspace_id,
+                provider=normalized_provider,
+                artist_profile_id=artist_profile_id,
+                desired_capability=normalized_capability,
+            )
+            unavailable_reasons = requested_account.unavailable_reasons
+    elif not accounts:
+        unavailable_reasons = (DestinationUnavailableReason.no_connection,)
+    else:
+        unavailable_reasons = ()
+
+    return DestinationResolution(
+        workspace_id=workspace_id,
+        provider=normalized_provider,
+        artist_profile_id=artist_profile_id,
+        desired_capability=normalized_capability,
+        accounts=accounts,
+        unavailable_reasons=unavailable_reasons,
+        requested_account=requested_account,
     )
 
 

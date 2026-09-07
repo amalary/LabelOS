@@ -26,6 +26,7 @@ from sqlalchemy.pool import StaticPool
 
 from labelos_api.repositories import social_accounts
 from labelos_api.services.social_account_service import (
+    DestinationUnavailableReason,
     SocialAccountAuthorizationError,
     SocialAccountConnectionCreate,
     SocialAccountConnectionQuery,
@@ -36,6 +37,7 @@ from labelos_api.services.social_account_service import (
     SocialAccountRelationshipError,
     associate_artist_profile,
     can_auto_publish,
+    can_provide_analytics,
     can_read_account_analytics,
     can_read_post_analytics,
     check_connection_health,
@@ -46,6 +48,7 @@ from labelos_api.services.social_account_service import (
     register_assisted_connection,
     requires_manual_publish,
     resolve_capabilities,
+    resolve_destinations,
     supports_capability,
     supports_manual_metrics,
     sync_account_metadata,
@@ -400,6 +403,233 @@ def test_social_account_service_lifecycle_disconnect_and_capability_helpers(
     assert result["manual_metrics"] is False
     assert result["resolved"]["requires_manual_publish"] is True
     assert result["resolved"]["supports_manual_metrics"] is False
+
+
+def test_destination_resolver_classifies_existing_usable_and_assisted_accounts(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async def run() -> dict[str, object]:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            artist_profile = data["artist_profile"]
+            assert isinstance(workspace, Organization)
+            assert isinstance(artist_profile, ArtistProfile)
+
+            await social_accounts.create_connection(
+                session,
+                workspace.id,
+                {
+                    "provider": "instagram",
+                    "artist_profile_id": artist_profile.id,
+                    "username": "auto",
+                    "status": SocialAccountConnectionStatus.connected,
+                    "connection_method": SocialAccountConnectionMethod.direct_api,
+                    "capabilities": [
+                        "content_publish",
+                        "account_analytics_read",
+                    ],
+                },
+            )
+            await social_accounts.create_connection(
+                session,
+                workspace.id,
+                {
+                    "provider": "instagram",
+                    "artist_profile_id": artist_profile.id,
+                    "username": "assisted",
+                    "status": SocialAccountConnectionStatus.connected,
+                    "capabilities": ["manual_publish", "manual_metrics"],
+                },
+            )
+            resolution = await resolve_destinations(
+                session,
+                workspace.id,
+                provider=" Instagram ",
+                artist_profile_id=artist_profile.id,
+                desired_capability="content_publish",
+            )
+            by_username = {
+                destination.account.username: destination
+                for destination in resolution.accounts
+            }
+            return {
+                "provider": resolution.provider,
+                "desired_capability": resolution.desired_capability,
+                "account_count": len(resolution.accounts),
+                "usable_usernames": [
+                    destination.account.username
+                    for destination in resolution.usable_accounts
+                ],
+                "auto_supports_automatic": by_username[
+                    "auto"
+                ].supports_automatic_publication,
+                "auto_can_provide_analytics": by_username["auto"].can_provide_analytics,
+                "assisted_requires_assisted": by_username[
+                    "assisted"
+                ].requires_assisted_publication,
+                "assisted_can_provide_analytics": by_username[
+                    "assisted"
+                ].can_provide_analytics,
+                "assisted_reasons": by_username["assisted"].unavailable_reasons,
+                "helper_analytics": can_provide_analytics(
+                    ["manual_metrics"],
+                ),
+            }
+
+    result = asyncio.run(run())
+    assert result["provider"] == "instagram"
+    assert result["desired_capability"] == "content_publish"
+    assert result["account_count"] == 2
+    assert result["usable_usernames"] == ["auto"]
+    assert result["auto_supports_automatic"] is True
+    assert result["auto_can_provide_analytics"] is True
+    assert result["assisted_requires_assisted"] is True
+    assert result["assisted_can_provide_analytics"] is True
+    assert result["assisted_reasons"] == (
+        DestinationUnavailableReason.missing_capability,
+    )
+    assert result["helper_analytics"] is True
+
+
+def test_destination_resolver_reports_normalized_unavailability_reasons(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async def run() -> dict[str, tuple[DestinationUnavailableReason, ...]]:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            other_workspace = data["other_workspace"]
+            artist_profile = data["artist_profile"]
+            other_artist_profile = data["other_artist_profile"]
+            assert isinstance(workspace, Organization)
+            assert isinstance(other_workspace, Organization)
+            assert isinstance(artist_profile, ArtistProfile)
+            assert isinstance(other_artist_profile, ArtistProfile)
+
+            unrelated_artist = Artist(name="Other Alpha Artist", organization=workspace)
+            unrelated_profile = UniversalProfile(
+                user=User(email=f"other-alpha-{uuid4()}@example.com"),
+                slug=f"other-alpha-{uuid4()}",
+            )
+            unrelated_membership = WorkspaceMembership(
+                workspace=workspace,
+                profile=unrelated_profile,
+            )
+            unrelated_artist_profile = ArtistProfile(
+                artist=unrelated_artist,
+                universal_profile=unrelated_profile,
+                stage_name="Other Alpha Artist",
+            )
+            session.add_all([unrelated_membership, unrelated_artist_profile])
+            await session.flush()
+
+            cases = {
+                "disconnected": {
+                    "provider": "instagram",
+                    "artist_profile_id": artist_profile.id,
+                    "username": "disconnected",
+                    "status": SocialAccountConnectionStatus.disconnected,
+                    "capabilities": ["content_publish"],
+                },
+                "reconnect_required": {
+                    "provider": "instagram",
+                    "artist_profile_id": artist_profile.id,
+                    "username": "reconnect",
+                    "status": SocialAccountConnectionStatus.reconnect_required,
+                    "capabilities": ["content_publish"],
+                },
+                "connection_error": {
+                    "provider": "instagram",
+                    "artist_profile_id": artist_profile.id,
+                    "username": "error",
+                    "status": SocialAccountConnectionStatus.error,
+                    "capabilities": ["content_publish"],
+                },
+                "missing_capability": {
+                    "provider": "instagram",
+                    "artist_profile_id": artist_profile.id,
+                    "username": "readonly",
+                    "status": SocialAccountConnectionStatus.connected,
+                    "capabilities": ["account_analytics_read"],
+                },
+                "provider_mismatch": {
+                    "provider": "tiktok",
+                    "artist_profile_id": artist_profile.id,
+                    "username": "wrong-provider",
+                    "status": SocialAccountConnectionStatus.connected,
+                    "capabilities": ["content_publish"],
+                },
+                "wrong_artist": {
+                    "provider": "instagram",
+                    "artist_profile_id": unrelated_artist_profile.id,
+                    "username": "wrong-artist",
+                    "status": SocialAccountConnectionStatus.connected,
+                    "capabilities": ["content_publish"],
+                },
+            }
+            created = {
+                name: await social_accounts.create_connection(
+                    session, workspace.id, values
+                )
+                for name, values in cases.items()
+            }
+            wrong_workspace = await social_accounts.create_connection(
+                session,
+                other_workspace.id,
+                {
+                    "provider": "instagram",
+                    "artist_profile_id": other_artist_profile.id,
+                    "username": "wrong-workspace",
+                    "status": SocialAccountConnectionStatus.connected,
+                    "capabilities": ["content_publish"],
+                },
+            )
+
+            reasons: dict[str, tuple[DestinationUnavailableReason, ...]] = {}
+            for name, connection in created.items():
+                resolution = await resolve_destinations(
+                    session,
+                    workspace.id,
+                    provider="instagram",
+                    artist_profile_id=artist_profile.id,
+                    desired_capability="content_publish",
+                    requested_connection_id=connection.id,
+                )
+                assert resolution.requested_account is not None
+                reasons[name] = resolution.unavailable_reasons
+            wrong_workspace_resolution = await resolve_destinations(
+                session,
+                workspace.id,
+                provider="instagram",
+                artist_profile_id=artist_profile.id,
+                desired_capability="content_publish",
+                requested_connection_id=wrong_workspace.id,
+            )
+            missing_resolution = await resolve_destinations(
+                session,
+                workspace.id,
+                provider="youtube",
+                artist_profile_id=artist_profile.id,
+            )
+            reasons["wrong_workspace"] = wrong_workspace_resolution.unavailable_reasons
+            reasons["no_connection"] = missing_resolution.unavailable_reasons
+            return reasons
+
+    result = asyncio.run(run())
+    assert result == {
+        "disconnected": (DestinationUnavailableReason.disconnected,),
+        "reconnect_required": (DestinationUnavailableReason.reconnect_required,),
+        "connection_error": (DestinationUnavailableReason.connection_error,),
+        "missing_capability": (DestinationUnavailableReason.missing_capability,),
+        "provider_mismatch": (DestinationUnavailableReason.provider_mismatch,),
+        "wrong_artist": (DestinationUnavailableReason.wrong_artist,),
+        "wrong_workspace": (
+            DestinationUnavailableReason.wrong_workspace,
+            DestinationUnavailableReason.wrong_artist,
+        ),
+        "no_connection": (DestinationUnavailableReason.no_connection,),
+    }
 
 
 def test_social_account_service_update_and_optional_artist_association(

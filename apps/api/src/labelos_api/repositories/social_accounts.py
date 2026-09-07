@@ -73,6 +73,17 @@ async def get_connection(
     )
 
 
+async def get_connection_by_id(
+    session: AsyncSession,
+    connection_id: UUID,
+) -> SocialAccountConnection | None:
+    return await session.scalar(
+        select(SocialAccountConnection)
+        .options(*_connection_load_options())
+        .where(SocialAccountConnection.id == connection_id)
+    )
+
+
 async def list_connections(
     session: AsyncSession,
     workspace_id: UUID,
