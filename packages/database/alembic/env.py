@@ -68,7 +68,7 @@ async def run_async_migrations() -> None:
 
 
 def run_migrations_online() -> None:
-    if sys.platform == "win32":
+    if sys.platform == "win32" and sys.version_info < (3, 14):
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     asyncio.run(run_async_migrations())
 
