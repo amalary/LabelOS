@@ -58,25 +58,29 @@ class Settings(DatabaseSettings):
         return f"https://api.workos.com/sso/jwks/{self.workos_client_id}"
 
     def validate_startup_environment(self) -> None:
-        if (
-            not self.requires_strict_startup_validation
-            or self.auth_provider.lower() != "workos"
-        ):
+        if not self.requires_strict_startup_validation:
             return
 
-        missing: list[str] = []
-        if not self.workos_client_id:
-            missing.append("WORKOS_CLIENT_ID")
-        if not self.workos_issuer_url:
-            missing.append("WORKOS_ISSUER_URL")
-        if not self.workos_webhook_secret:
-            missing.append("WORKOS_WEBHOOK_SECRET")
+        if self.auth_provider.lower() == "workos":
+            missing: list[str] = []
+            if not self.workos_client_id:
+                missing.append("WORKOS_CLIENT_ID")
+            if not self.workos_issuer_url:
+                missing.append("WORKOS_ISSUER_URL")
+            if not self.workos_webhook_secret:
+                missing.append("WORKOS_WEBHOOK_SECRET")
 
-        if missing:
-            joined = ", ".join(missing)
-            raise RuntimeError(f"Missing required WorkOS API environment: {joined}")
+            if missing:
+                joined = ", ".join(missing)
+                raise RuntimeError(f"Missing required WorkOS API environment: {joined}")
 
-        _ = self.resolved_workos_jwks_url
+            _ = self.resolved_workos_jwks_url
+
+        self.validate_credential_store_backend()
+
+    def validate_credential_store_backend(self) -> None:
+        if not self.requires_strict_startup_validation:
+            return
 
         if self.credential_store_backend.lower() == "memory":
             raise RuntimeError(
@@ -84,10 +88,13 @@ class Settings(DatabaseSettings):
                 "environments"
             )
 
-        if (
-            self.credential_store_backend.lower() == "gcp-secret-manager"
-            and not self.resolved_credential_store_gcp_project_id
-        ):
+        if self.credential_store_backend.lower() != "gcp-secret-manager":
+            raise RuntimeError(
+                "CREDENTIAL_STORE_BACKEND must be gcp-secret-manager in "
+                "production-like environments"
+            )
+
+        if not self.resolved_credential_store_gcp_project_id:
             raise RuntimeError(
                 "GCP_PROJECT_ID or GOOGLE_CLOUD_PROJECT is required for the "
                 "GCP Secret Manager credential store"

@@ -218,6 +218,7 @@ class GcpSecretManagerCredentialStore:
 
 
 def build_credential_store(settings: Settings) -> CredentialStore:
+    settings.validate_credential_store_backend()
     backend = settings.credential_store_backend.lower()
     if backend == "memory":
         return InMemoryCredentialStore()

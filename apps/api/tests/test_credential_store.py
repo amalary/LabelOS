@@ -139,22 +139,86 @@ def test_credential_payload_is_redacted_by_json_formatter_logs() -> None:
     assert parsed["provider_metadata"] == {"safe": "ok"}
 
 
-def test_build_credential_store_uses_memory_for_tests_and_local_defaults() -> None:
+@pytest.mark.parametrize("environment", ["local", "development", "dev", "test"])
+def test_build_credential_store_allows_memory_for_local_and_tests(
+    environment: str,
+) -> None:
     assert isinstance(
-        build_credential_store(Settings(environment="test")),
+        build_credential_store(Settings(environment=environment)),
         InMemoryCredentialStore,
     )
 
 
-def test_production_startup_rejects_in_memory_credential_store() -> None:
+@pytest.mark.parametrize("environment", ["production", "staging"])
+def test_production_like_startup_rejects_in_memory_credential_store(
+    environment: str,
+) -> None:
     settings = Settings(
-        environment="production",
+        environment=environment,
         workos_client_id="client_prod",
         workos_webhook_secret="whsec_prod",
         credential_store_backend="memory",
     )
 
     with pytest.raises(RuntimeError, match="CREDENTIAL_STORE_BACKEND=memory"):
+        settings.validate_startup_environment()
+
+
+def test_production_like_credential_store_builder_rejects_in_memory_backend() -> None:
+    settings = Settings(
+        environment="production",
+        credential_store_backend="memory",
+    )
+
+    with pytest.raises(RuntimeError, match="CREDENTIAL_STORE_BACKEND=memory"):
+        build_credential_store(settings)
+
+
+def test_production_startup_rejects_memory_backend_for_non_workos_auth() -> None:
+    settings = Settings(
+        environment="production",
+        auth_provider="local",
+        credential_store_backend="memory",
+    )
+
+    with pytest.raises(RuntimeError, match="CREDENTIAL_STORE_BACKEND=memory"):
+        settings.validate_startup_environment()
+
+
+def test_production_startup_accepts_gcp_secret_manager_backend() -> None:
+    settings = Settings(
+        environment="production",
+        workos_client_id="client_prod",
+        workos_webhook_secret="whsec_prod",
+        credential_store_backend="gcp-secret-manager",
+        credential_store_gcp_project_id="labelos-prod",
+    )
+
+    settings.validate_startup_environment()
+
+
+def test_production_startup_rejects_unknown_credential_backend() -> None:
+    settings = Settings(
+        environment="production",
+        workos_client_id="client_prod",
+        workos_webhook_secret="whsec_prod",
+        credential_store_backend="memory-fallback",
+        credential_store_gcp_project_id="labelos-prod",
+    )
+
+    with pytest.raises(RuntimeError, match="must be gcp-secret-manager"):
+        settings.validate_startup_environment()
+
+
+def test_production_startup_requires_gcp_project_for_secret_manager() -> None:
+    settings = Settings(
+        environment="production",
+        workos_client_id="client_prod",
+        workos_webhook_secret="whsec_prod",
+        credential_store_backend="gcp-secret-manager",
+    )
+
+    with pytest.raises(RuntimeError, match="GCP_PROJECT_ID"):
         settings.validate_startup_environment()
 
 
