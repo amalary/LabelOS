@@ -1,3 +1,4 @@
+import asyncio
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -8,12 +9,18 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import IntegrityError
 from labelos_database.capabilities import (
     CAPABILITY_REGISTRY,
     is_valid_capability_identifier,
     validate_capability_identifier,
 )
-from labelos_database.models import MembershipRole, User, WorkspacePermission
+from labelos_database.models import (
+    AuthIdentity,
+    MembershipRole,
+    User,
+    WorkspacePermission,
+)
 
 from labelos_api.auth import (
     AuthenticatedPrincipal,
@@ -22,6 +29,7 @@ from labelos_api.auth import (
     principal_from_token,
     require_active_workspace_id,
     require_permission,
+    resolve_current_user,
 )
 from labelos_api.authorization import (
     INITIAL_ROLE_CAPABILITIES,
@@ -53,12 +61,21 @@ class FakeSigningKey:
 
 class FakeJwkClient:
     init_count = 0
+    urls: list[str] = []
 
     def __init__(self, url: str, **kwargs: object) -> None:
         FakeJwkClient.init_count += 1
+        FakeJwkClient.urls.append(url)
         self.url = url
 
     def get_signing_key_from_jwt(self, token: str) -> FakeSigningKey:
+        return FakeSigningKey()
+
+
+class FakeFallbackJwkClient(FakeJwkClient):
+    def get_signing_key_from_jwt(self, token: str) -> FakeSigningKey:
+        if self.url.endswith("/client_DEFAULT"):
+            raise jwt.exceptions.PyJWKClientError("test key not found")
         return FakeSigningKey()
 
 
@@ -68,6 +85,7 @@ def make_token(
     session_id: str = "session_01TEST",
     issuer: str = "https://api.workos.com",
     audience: str = "client_01TEST",
+    client_id: str | None = "client_01TEST",
     organization_id: str | None = "org_01TEST",
     role: str | None = "admin",
     roles: list[str] | None = None,
@@ -87,6 +105,8 @@ def make_token(
         "permissions": permissions or ["artists:read"],
         "exp": int(time.time()) + expires_in,
     }
+    if client_id is not None:
+        claims["client_id"] = client_id
     if role is not None:
         claims["role"] = role
     if roles is not None:
@@ -116,6 +136,7 @@ def clear_workos_jwks_cache() -> None:
 
     _cached_jwks_client.cache_clear()
     FakeJwkClient.init_count = 0
+    FakeJwkClient.urls = []
 
 
 def test_me_requires_authentication(client: TestClient) -> None:
@@ -262,7 +283,7 @@ def test_workos_jwt_rejects_incorrect_signature(
         principal_from_token(token, auth_settings())
 
 
-@pytest.mark.parametrize("claim", ["exp", "iss", "sub", "sid"])
+@pytest.mark.parametrize("claim", ["exp", "iss", "sub"])
 def test_workos_jwt_rejects_missing_required_claims(
     monkeypatch: pytest.MonkeyPatch,
     claim: str,
@@ -272,6 +293,17 @@ def test_workos_jwt_rejects_missing_required_claims(
 
     with pytest.raises(Exception, match="Token is invalid"):
         principal_from_token(token, auth_settings())
+
+
+def test_workos_jwt_accepts_missing_session_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("labelos_api.workos_jwt.PyJWKClient", FakeJwkClient)
+
+    principal = principal_from_token(make_token(omit_claims={"sid"}), auth_settings())
+
+    assert principal.subject == "user_01TEST"
+    assert principal.session_id == ""
 
 
 def test_workos_jwt_rejects_expired_token(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -285,6 +317,99 @@ def test_workos_jwt_rejects_expired_token(monkeypatch: pytest.MonkeyPatch) -> No
 def test_workos_jwt_rejects_wrong_issuer(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("labelos_api.workos_jwt.PyJWKClient", FakeJwkClient)
     token = make_token(issuer="https://issuer.example.test")
+
+    with pytest.raises(Exception, match="Token is invalid"):
+        principal_from_token(token, auth_settings())
+
+
+def test_workos_jwt_accepts_authkit_client_scoped_issuer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("labelos_api.workos_jwt.PyJWKClient", FakeJwkClient)
+
+    for issuer in (
+        "https://api.workos.com/user_management/client_01TEST",
+        "https://api.workos.com/user_management/client_01TEST/",
+    ):
+        principal = principal_from_token(make_token(issuer=issuer), auth_settings())
+
+        assert principal.subject == "user_01TEST"
+
+
+def test_workos_jwt_accepts_default_app_issuer_with_current_client_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("labelos_api.workos_jwt.PyJWKClient", FakeJwkClient)
+    token = make_token(issuer="https://api.workos.com/user_management/client_DEFAULT")
+    settings = auth_settings()
+    settings.workos_jwks_url = None
+
+    principal = principal_from_token(token, settings)
+
+    assert principal.subject == "user_01TEST"
+    assert FakeJwkClient.urls == ["https://api.workos.com/sso/jwks/client_DEFAULT"]
+
+
+def test_workos_jwt_falls_back_to_current_app_jwks_for_default_app_issuer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("labelos_api.workos_jwt.PyJWKClient", FakeFallbackJwkClient)
+    token = make_token(issuer="https://api.workos.com/user_management/client_DEFAULT")
+    settings = auth_settings()
+    settings.workos_jwks_url = None
+
+    principal = principal_from_token(token, settings)
+
+    assert principal.subject == "user_01TEST"
+    assert FakeJwkClient.urls == [
+        "https://api.workos.com/sso/jwks/client_DEFAULT",
+        "https://api.workos.com/sso/jwks/client_01TEST",
+    ]
+
+
+def test_workos_jwt_accepts_authkit_domain_issuer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("labelos_api.workos_jwt.PyJWKClient", FakeJwkClient)
+    settings = auth_settings()
+    settings.workos_jwks_url = None
+    settings.workos_issuer_url = "https://labelos-test.authkit.app"
+    token = make_token(issuer="https://labelos-test.authkit.app")
+
+    principal = principal_from_token(token, settings)
+
+    assert principal.subject == "user_01TEST"
+    assert FakeJwkClient.urls == [
+        "https://labelos-test.authkit.app/oauth2/jwks",
+    ]
+
+
+def test_workos_jwt_rejects_authkit_domain_issuer_for_wrong_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("labelos_api.workos_jwt.PyJWKClient", FakeJwkClient)
+    settings = auth_settings()
+    settings.workos_jwks_url = None
+    settings.workos_issuer_url = "https://labelos-test.authkit.app"
+    token = make_token(
+        issuer="https://labelos-test.authkit.app",
+        audience="client_OTHER",
+        client_id="client_OTHER",
+    )
+
+    with pytest.raises(Exception, match="Token is invalid"):
+        principal_from_token(token, settings)
+
+
+def test_workos_jwt_rejects_client_scoped_issuer_without_matching_client_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("labelos_api.workos_jwt.PyJWKClient", FakeJwkClient)
+    token = make_token(
+        issuer="https://api.workos.com/user_management/client_DEFAULT",
+        audience="client_OTHER",
+        client_id="client_OTHER",
+    )
 
     with pytest.raises(Exception, match="Token is invalid"):
         principal_from_token(token, auth_settings())
@@ -830,6 +955,31 @@ def test_active_workspace_requires_matching_active_membership() -> None:
     assert exc_info.value.detail == "Workspace context required"
 
 
+def test_resolve_current_user_reloads_identity_after_concurrent_create() -> None:
+    user = User(email="person@example.com", display_name="Test Person")
+    existing_identity = AuthIdentity(
+        user=user,
+        provider="workos",
+        subject="user_01TEST",
+        email="person@example.com",
+    )
+    session = _ConcurrentIdentityCreateSession(existing_identity)
+    principal = AuthenticatedPrincipal(
+        provider="workos",
+        subject="user_01TEST",
+        session_id="session_01TEST",
+        email="person@example.com",
+        display_name="Test Person",
+        organization_id=None,
+    )
+
+    context = asyncio.run(resolve_current_user(session, principal))
+
+    assert context.user is user
+    assert context.memberships == ()
+    assert session.rollback_called is True
+
+
 def test_require_permission_rejects_missing_permission() -> None:
     context = CurrentUserContext(
         user=User(email="person@example.com"),
@@ -846,6 +996,42 @@ def test_require_permission_rejects_missing_permission() -> None:
         require_permission("artists:write", context)
 
     assert exc_info.value.status_code == 403
+
+
+class _EmptyRows:
+    def all(self) -> list[object]:
+        return []
+
+
+class _ConcurrentIdentityCreateSession:
+    def __init__(self, existing_identity: AuthIdentity) -> None:
+        self.existing_identity = existing_identity
+        self.scalar_calls = 0
+        self.rollback_called = False
+
+    async def scalar(self, _statement: object) -> object | None:
+        self.scalar_calls += 1
+        if self.scalar_calls == 3:
+            return self.existing_identity
+        return None
+
+    def add(self, _instance: object) -> None:
+        return None
+
+    async def flush(self) -> None:
+        return None
+
+    async def commit(self) -> None:
+        raise IntegrityError("insert auth identity", {}, Exception("duplicate"))
+
+    async def rollback(self) -> None:
+        self.rollback_called = True
+
+    async def refresh(self, _instance: object) -> None:
+        return None
+
+    async def execute(self, _statement: object) -> _EmptyRows:
+        return _EmptyRows()
 
 
 def _override_current_user_context(

@@ -23,6 +23,7 @@ from labelos_database.models import (
 )
 from labelos_database.session import get_async_session
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -247,34 +248,10 @@ async def resolve_current_user(
     session: AsyncSession,
     principal: AuthenticatedPrincipal,
 ) -> CurrentUserContext:
-    identity = await session.scalar(
-        select(AuthIdentity)
-        .options(selectinload(AuthIdentity.user))
-        .where(AuthIdentity.provider == principal.provider)
-        .where(AuthIdentity.subject == principal.subject)
-    )
+    identity = await _load_auth_identity(session, principal)
     if identity is None:
-        if principal.email is None:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Authenticated identity is missing an email claim",
-            )
-        user = await session.scalar(select(User).where(User.email == principal.email))
-        if user is None:
-            user = User(email=principal.email, display_name=principal.display_name)
-            session.add(user)
-            await session.flush()
-        identity = AuthIdentity(
-            user_id=user.id,
-            provider=principal.provider,
-            subject=principal.subject,
-            email=principal.email,
-        )
-        session.add(identity)
-        await session.commit()
-        await session.refresh(user)
-    else:
-        user = identity.user
+        identity = await _create_auth_identity(session, principal)
+    user = identity.user
 
     if principal.organization_id is not None:
         organization = await session.scalar(
@@ -363,6 +340,52 @@ async def resolve_current_user(
         for membership, organization in rows.all()
     )
     return CurrentUserContext(user=user, principal=principal, memberships=memberships)
+
+
+async def _load_auth_identity(
+    session: AsyncSession,
+    principal: AuthenticatedPrincipal,
+) -> AuthIdentity | None:
+    return await session.scalar(
+        select(AuthIdentity)
+        .options(selectinload(AuthIdentity.user))
+        .where(AuthIdentity.provider == principal.provider)
+        .where(AuthIdentity.subject == principal.subject)
+    )
+
+
+async def _create_auth_identity(
+    session: AsyncSession,
+    principal: AuthenticatedPrincipal,
+) -> AuthIdentity:
+    if principal.email is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Authenticated identity is missing an email claim",
+        )
+
+    try:
+        user = await session.scalar(select(User).where(User.email == principal.email))
+        if user is None:
+            user = User(email=principal.email, display_name=principal.display_name)
+            session.add(user)
+            await session.flush()
+        identity = AuthIdentity(
+            user_id=user.id,
+            provider=principal.provider,
+            subject=principal.subject,
+            email=principal.email,
+        )
+        session.add(identity)
+        await session.commit()
+        await session.refresh(user)
+    except IntegrityError:
+        await session.rollback()
+        existing_identity = await _load_auth_identity(session, principal)
+        if existing_identity is None:
+            raise
+        return existing_identity
+    return identity
 
 
 async def get_current_user_context(
