@@ -65,6 +65,40 @@ from labelos_api.services.marketing_content_service import (
     update_channel,
     update_content_item,
 )
+from labelos_api.services.social_account_service import (
+    DestinationUnavailableReason,
+    check_connection_health,
+    resolved_destination_for_connection,
+)
+from labelos_api.social_accounts.providers import (
+    SocialAccountConnectionProvider,
+    SocialAccountHealth,
+    SocialAccountProviderErrorCode,
+    SocialAccountProviderKey,
+    SocialAccountProviderRegistry,
+)
+
+
+class DegradedInstagramProvider(SocialAccountConnectionProvider):
+    provider = SocialAccountProviderKey.instagram
+    connection_method = SocialAccountConnectionMethod.direct_api
+
+    def default_capabilities(self) -> tuple[str, ...]:
+        return ("content_publish",)
+
+    async def check_connection_health(
+        self,
+        *,
+        credential_ref: str | None,
+        token_expires_at=None,
+        provider_metadata=None,
+    ) -> SocialAccountHealth:
+        return SocialAccountHealth(
+            healthy=False,
+            status="reconnect_required",
+            error_code=SocialAccountProviderErrorCode.credential_revoked,
+            error_message="Provider authorization was revoked",
+        )
 
 
 async def _submit_and_approve_content(
@@ -943,6 +977,112 @@ def test_marketing_content_service_validates_optional_channel_social_account_tar
         "disconnected": True,
         "missing_capability": True,
     }
+
+
+def test_draft_post_channel_survives_social_account_reconnect_required_recovery(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = SocialAccountProviderRegistry([DegradedInstagramProvider()])
+    monkeypatch.setattr(
+        "labelos_api.social_accounts.providers.provider_registry",
+        registry,
+    )
+
+    async def run() -> dict[str, object]:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            campaign = data["campaign"]
+            artist = data["artist"]
+            artist_profile = data["artist_profile"]
+            assert isinstance(workspace, Organization)
+            assert isinstance(campaign, Campaign)
+            assert isinstance(artist, Artist)
+            assert isinstance(artist_profile, ArtistProfile)
+
+            connection = SocialAccountConnection(
+                organization=workspace,
+                artist_profile=artist_profile,
+                provider="instagram",
+                external_account_id="ig-preserved",
+                username="@preserved",
+                display_name="Preserved Account",
+                connection_method=SocialAccountConnectionMethod.direct_api,
+                status=SocialAccountConnectionStatus.connected,
+                capabilities=["content_publish"],
+                credential_ref="memory://credentials/direct",
+            )
+            session.add(connection)
+            await session.flush()
+
+            draft = await create_content_item(
+                session,
+                workspace.id,
+                MarketingContentItemCreate(
+                    campaign_id=campaign.id,
+                    title="Reconnect Integrity Draft",
+                    content_type="social_post",
+                    artist_id=artist.id,
+                    copy_text="Draft copy remains editable.",
+                    channels=[
+                        MarketingContentChannelCreate(
+                            channel="instagram",
+                            social_account_connection_id=connection.id,
+                            copy_text_override="Channel copy remains intact.",
+                        )
+                    ],
+                ),
+            )
+            await check_connection_health(
+                session,
+                workspace.id,
+                connection.id,
+                provider_registry=registry,
+            )
+            reloaded = await get_content_item(session, workspace.id, draft.id)
+            updated_connection = await session.get(
+                SocialAccountConnection,
+                connection.id,
+            )
+            assert updated_connection is not None
+            readiness = resolved_destination_for_connection(
+                updated_connection,
+                workspace_id=workspace.id,
+                provider="instagram",
+                artist_profile_id=artist_profile.id,
+                desired_capability="content_publish",
+            )
+            return {
+                "draft_status": reloaded.status,
+                "draft_title": reloaded.title,
+                "draft_copy": reloaded.copy_text,
+                "channel_fk": reloaded.channels[0].social_account_connection_id,
+                "channel_copy": reloaded.channels[0].copy_text_override,
+                "connection_status": updated_connection.status,
+                "external_account_id": updated_connection.external_account_id,
+                "username": updated_connection.username,
+                "credential_ref": updated_connection.credential_ref,
+                "readiness_usable": readiness.usable,
+                "readiness_reasons": readiness.unavailable_reasons,
+            }
+
+    result = asyncio.run(run())
+    assert result["draft_status"] == MarketingContentItemStatus.draft
+    assert result["draft_title"] == "Reconnect Integrity Draft"
+    assert result["draft_copy"] == "Draft copy remains editable."
+    assert result["channel_fk"] is not None
+    assert result["channel_copy"] == "Channel copy remains intact."
+    assert (
+        result["connection_status"] == SocialAccountConnectionStatus.reconnect_required
+    )
+    assert result["external_account_id"] == "ig-preserved"
+    assert result["username"] == "@preserved"
+    assert result["credential_ref"] == "memory://credentials/direct"
+    assert result["readiness_usable"] is False
+    assert result["readiness_reasons"] == (
+        DestinationUnavailableReason.reconnect_required,
+    )
 
 
 def test_prepare_assisted_publish_handoff_returns_scheduler_delivery_contract(

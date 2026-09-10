@@ -13,6 +13,7 @@ from labelos_api.services.credential_store import (
     CredentialPayload,
     CredentialStore,
     CredentialStoreError,
+    InvalidCredentialReferenceError,
 )
 
 
@@ -1202,9 +1203,16 @@ class YouTubeDirectSocialAccountConnectionProvider(SocialAccountConnectionProvid
             if self.credential_store is None:
                 raise CredentialNotFoundError()
             return (await self.credential_store.get(credential_ref)).expose()
+        except (CredentialNotFoundError, InvalidCredentialReferenceError) as exc:
+            raise SocialAccountProviderError(
+                SocialAccountProviderErrorCode.credential_missing,
+                "Stored YouTube credential material was not found",
+                provider=self.provider,
+                connection_method=self.connection_method,
+            ) from exc
         except CredentialStoreError as exc:
             raise SocialAccountProviderError(
-                SocialAccountProviderErrorCode.credential_expired,
+                SocialAccountProviderErrorCode.provider_unavailable,
                 "Stored YouTube credential material is unavailable",
                 provider=self.provider,
                 connection_method=self.connection_method,
@@ -1247,6 +1255,13 @@ class YouTubeDirectSocialAccountConnectionProvider(SocialAccountConnectionProvid
             ) as transient_client:
                 response = await transient_client.request(method, url, **kwargs)
         if response.status_code in {400, 401}:
+            if self._is_refresh_request(method, url, kwargs.get("data")):
+                raise SocialAccountProviderError(
+                    self._refresh_failure_code(response),
+                    "YouTube credential refresh failed",
+                    provider=self.provider,
+                    connection_method=self.connection_method,
+                )
             raise SocialAccountProviderError(
                 SocialAccountProviderErrorCode.credential_expired,
                 "YouTube credential is expired or invalid",
@@ -1291,6 +1306,31 @@ class YouTubeDirectSocialAccountConnectionProvider(SocialAccountConnectionProvid
                 connection_method=self.connection_method,
             ) from exc
         return response
+
+    def _is_refresh_request(
+        self,
+        method: str,
+        url: str,
+        data: object,
+    ) -> bool:
+        return (
+            method.upper() == "POST"
+            and url == self.config.token_endpoint
+            and isinstance(data, Mapping)
+            and data.get("grant_type") == "refresh_token"
+        )
+
+    def _refresh_failure_code(
+        self,
+        response: httpx.Response,
+    ) -> SocialAccountProviderErrorCode:
+        try:
+            body = response.json()
+        except ValueError:
+            body = {}
+        if isinstance(body, Mapping) and body.get("error") == "invalid_grant":
+            return SocialAccountProviderErrorCode.credential_revoked
+        return SocialAccountProviderErrorCode.refresh_failed
 
     def _response_json(self, response: httpx.Response) -> Mapping[str, object]:
         try:

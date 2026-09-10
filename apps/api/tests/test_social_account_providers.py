@@ -603,6 +603,97 @@ def test_youtube_direct_refresh_replaces_stored_credentials() -> None:
     )
 
 
+def test_youtube_direct_missing_stored_credentials_requires_reconnect() -> None:
+    provider, client = _youtube_provider(lambda request: httpx.Response(500))
+
+    async def run() -> SocialAccountHealth:
+        try:
+            return await provider.check_connection_health(
+                credential_ref="memory://credentials/missing"
+            )
+        finally:
+            await client.aclose()
+
+    health = asyncio.run(run())
+    assert health.healthy is False
+    assert health.error_code == SocialAccountProviderErrorCode.credential_missing
+
+
+def test_youtube_direct_credential_store_outage_stays_transient() -> None:
+    store = InMemoryCredentialStore()
+    store.fail_operations.add("get")
+    provider, client = _youtube_provider(lambda request: httpx.Response(500), store)
+
+    async def run() -> SocialAccountHealth:
+        try:
+            return await provider.check_connection_health(
+                credential_ref="memory://credentials/unavailable"
+            )
+        finally:
+            await client.aclose()
+
+    health = asyncio.run(run())
+    assert health.healthy is False
+    assert health.error_code == SocialAccountProviderErrorCode.provider_unavailable
+
+
+def test_youtube_direct_refresh_revocation_is_reconnect_required_failure() -> None:
+    store = InMemoryCredentialStore()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": "invalid_grant"})
+
+    provider, client = _youtube_provider(handler, store)
+
+    async def run() -> None:
+        try:
+            credential_ref = await store.put(
+                CredentialPayload(
+                    {
+                        "access_token": "old-access-secret",
+                        "refresh_token": "revoked-refresh-secret",
+                    }
+                )
+            )
+            with pytest.raises(SocialAccountProviderError) as exc_info:
+                await provider.refresh_credentials(credential_ref=credential_ref)
+            assert (
+                exc_info.value.code == SocialAccountProviderErrorCode.credential_revoked
+            )
+            assert "revoked-refresh-secret" not in str(exc_info.value)
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_youtube_direct_non_revocation_refresh_error_is_normalized() -> None:
+    store = InMemoryCredentialStore()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": "temporarily_unavailable"})
+
+    provider, client = _youtube_provider(handler, store)
+
+    async def run() -> None:
+        try:
+            credential_ref = await store.put(
+                CredentialPayload(
+                    {
+                        "access_token": "old-access-secret",
+                        "refresh_token": "refresh-secret",
+                    }
+                )
+            )
+            with pytest.raises(SocialAccountProviderError) as exc_info:
+                await provider.refresh_credentials(credential_ref=credential_ref)
+            assert exc_info.value.code == SocialAccountProviderErrorCode.refresh_failed
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
 def test_youtube_direct_revoke_disconnect_deletes_stored_credentials() -> None:
     store = InMemoryCredentialStore()
     requests: list[httpx.Request] = []
