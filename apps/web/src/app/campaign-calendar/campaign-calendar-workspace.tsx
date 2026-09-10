@@ -165,7 +165,8 @@ function eventDestinationSummary(event: CampaignCalendarEvent): string | null {
 }
 
 function destinationReadinessVariant(
-  readiness: NonNullable<CampaignCalendarEvent["channel"]>["destination_readiness"] | null | undefined,
+  readiness:
+    NonNullable<CampaignCalendarEvent["channel"]>["destination_readiness"] | null | undefined,
 ) {
   if (readiness?.status === "ready") {
     return "success" as const;
@@ -570,18 +571,18 @@ function CalendarList({
                         {event.description ?? eventContext(event)}
                       </p>
                     </div>
-                  <div>
-                    <p className="text-xs font-semibold uppercase text-slate-500">Campaign</p>
-                    <p className="mt-1 truncate text-sm font-medium text-slate-800">
-                      {event.campaign?.name ?? "Not linked"}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-xs font-semibold uppercase text-slate-500">Status</p>
-                    <p className="mt-1 truncate text-sm font-medium text-slate-800">
-                      {humanize(event.status)}
-                    </p>
-                  </div>
+                    <div>
+                      <p className="text-xs font-semibold uppercase text-slate-500">Campaign</p>
+                      <p className="mt-1 truncate text-sm font-medium text-slate-800">
+                        {event.campaign?.name ?? "Not linked"}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs font-semibold uppercase text-slate-500">Status</p>
+                      <p className="mt-1 truncate text-sm font-medium text-slate-800">
+                        {humanize(event.status)}
+                      </p>
+                    </div>
                   </button>
                 );
               })}

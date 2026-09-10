@@ -20,7 +20,10 @@ export async function proxyWorkspaceRequest(
     const upstream = await apiFetch(path, init);
     const body = upstream.status === 204 ? null : await upstream.text();
     return new Response(body, {
-      headers: responseHeaders(upstream.headers.get("content-type") ?? "application/json", upstream),
+      headers: responseHeaders(
+        upstream.headers.get("content-type") ?? "application/json",
+        upstream,
+      ),
       status: upstream.status,
     });
   } catch (error) {

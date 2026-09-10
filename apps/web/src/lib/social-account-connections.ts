@@ -18,23 +18,12 @@ export class SocialAccountConnectionApiError extends Error {
 }
 
 export type SocialAccountProvider =
-  | "instagram"
-  | "facebook"
-  | "tiktok"
-  | "youtube"
-  | "spotify"
-  | "x"
-  | (string & {});
+  "instagram" | "facebook" | "tiktok" | "youtube" | "spotify" | "x" | (string & {});
 
 export type SocialAccountConnectionMethod = "direct_api" | "third_party" | "assisted";
 
 export type SocialAccountConnectionStatus =
-  | "pending"
-  | "connected"
-  | "limited"
-  | "reconnect_required"
-  | "disconnected"
-  | "error";
+  "pending" | "connected" | "limited" | "reconnect_required" | "disconnected" | "error";
 
 export type SocialAccountCapability =
   | "content_publish"
@@ -770,9 +759,7 @@ export function useUpdateSocialAccountConnection(
     [connectionId, workspaceId],
   );
   return useSocialAccountConnectionMutation(
-    `social-account-connections:mutation:update:${workspaceId ?? "none"}:${
-      connectionId ?? "none"
-    }`,
+    `social-account-connections:mutation:update:${workspaceId ?? "none"}:${connectionId ?? "none"}`,
     mutation,
   );
 }
@@ -833,9 +820,7 @@ export function useCheckSocialAccountConnectionHealth(
     return checkSocialAccountConnectionHealth(workspaceId, connectionId);
   }, [connectionId, workspaceId]);
   return useSocialAccountConnectionMutation(
-    `social-account-connections:mutation:health:${workspaceId ?? "none"}:${
-      connectionId ?? "none"
-    }`,
+    `social-account-connections:mutation:health:${workspaceId ?? "none"}:${connectionId ?? "none"}`,
     mutation,
   );
 }
@@ -854,9 +839,7 @@ export function useSyncSocialAccountConnectionMetadata(
     return syncSocialAccountConnectionMetadata(workspaceId, connectionId);
   }, [connectionId, workspaceId]);
   return useSocialAccountConnectionMutation(
-    `social-account-connections:mutation:sync:${workspaceId ?? "none"}:${
-      connectionId ?? "none"
-    }`,
+    `social-account-connections:mutation:sync:${workspaceId ?? "none"}:${connectionId ?? "none"}`,
     mutation,
   );
 }

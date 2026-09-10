@@ -3,10 +3,7 @@ import { proxyWorkspaceRequest } from "../../../../workspaces/proxy";
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-export function GET(
-  request: Request,
-  context: { params: Promise<{ provider: string }> },
-) {
+export function GET(request: Request, context: { params: Promise<{ provider: string }> }) {
   const url = new URL(request.url);
   const query = new URLSearchParams(url.search);
   query.set("redirect_uri", `${url.origin}${url.pathname}`);

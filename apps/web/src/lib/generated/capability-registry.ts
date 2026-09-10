@@ -253,13 +253,15 @@ export const capabilityRegistry: readonly CapabilityDefinition[] = [
   {
     key: capabilities.marketingAccountView,
     displayName: "View social accounts",
-    description: "View workspace social account connection metadata, status, health, and connection capabilities.",
+    description:
+      "View workspace social account connection metadata, status, health, and connection capabilities.",
     systemCapability: true,
   },
   {
     key: capabilities.marketingAccountManage,
     displayName: "Manage social accounts",
-    description: "Register, update, reconnect, disconnect, associate, and synchronize workspace social account connections.",
+    description:
+      "Register, update, reconnect, disconnect, associate, and synchronize workspace social account connections.",
     systemCapability: true,
   },
   {

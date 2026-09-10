@@ -107,13 +107,14 @@ describe("social account connections proxy routes", () => {
       expect.objectContaining({ redirect: "manual" }),
     );
     expect(response.status).toBe(303);
-    expect(response.headers.get("location")).toBe(
-      "/marketing?tab=accounts&oauth=connected",
-    );
+    expect(response.headers.get("location")).toBe("/marketing?tab=accounts&oauth=connected");
   });
 
   it("forwards health and sync lifecycle requests", async () => {
-    await checkHealth(new Request("http://localhost/health", { method: "POST" }), connectionContext);
+    await checkHealth(
+      new Request("http://localhost/health", { method: "POST" }),
+      connectionContext,
+    );
     await syncMetadata(new Request("http://localhost/sync", { method: "POST" }), connectionContext);
 
     expect(apiFetch).toHaveBeenNthCalledWith(

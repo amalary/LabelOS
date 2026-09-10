@@ -126,7 +126,10 @@ describe("authenticated backend API client", () => {
     const { apiFetch } = await import("./api-client");
     tokenHelpers.requireAccessTokenForApi.mockResolvedValue("rejected_access_token");
     tokenHelpers.refreshAccessTokenForApi.mockRejectedValue(
-      new tokenHelpers.AccessTokenError("missing_session", "A signed-in WorkOS session is required."),
+      new tokenHelpers.AccessTokenError(
+        "missing_session",
+        "A signed-in WorkOS session is required.",
+      ),
     );
     vi.mocked(fetch).mockResolvedValue(new Response("unauthorized", { status: 401 }));
 

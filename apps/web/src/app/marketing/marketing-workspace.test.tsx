@@ -2678,8 +2678,7 @@ describe("MarketingWorkspace", () => {
     await waitFor(() =>
       expect(mutationMocks.socialOAuthStart).toHaveBeenCalledWith({
         provider: "youtube",
-        redirect_uri:
-          "http://localhost:3000/api/social-account-connections/oauth/youtube/callback",
+        redirect_uri: "http://localhost:3000/api/social-account-connections/oauth/youtube/callback",
         safe_redirect_path: "/marketing?tab=accounts",
       }),
     );

@@ -108,9 +108,7 @@ describe("social account connections data layer", () => {
       .mockResolvedValueOnce(Response.json({ ...socialAccountConnection, display_name: "Final" }))
       .mockResolvedValueOnce(Response.json({ ...socialAccountConnection, status: "connected" }))
       .mockResolvedValueOnce(Response.json({ ...socialAccountConnection, display_name: "Synced" }))
-      .mockResolvedValueOnce(
-        Response.json({ ...socialAccountConnection, status: "disconnected" }),
-      );
+      .mockResolvedValueOnce(Response.json({ ...socialAccountConnection, status: "disconnected" }));
 
     await expect(getSocialAccountConnection("workspace_01", "connection_01")).resolves.toEqual(
       socialAccountConnection,
@@ -236,13 +234,13 @@ describe("social account connections data layer", () => {
       });
 
     expect(shouldInvalidate("social-account-connections:list:workspace_01:default")).toBe(true);
-    expect(
-      shouldInvalidate("social-account-connections:detail:workspace_01:connection_01"),
-    ).toBe(true);
+    expect(shouldInvalidate("social-account-connections:detail:workspace_01:connection_01")).toBe(
+      true,
+    );
     expect(shouldInvalidate("social-account-connections:list:workspace_02:default")).toBe(false);
-    expect(
-      shouldInvalidate("social-account-connections:detail:workspace_01:connection_02"),
-    ).toBe(false);
+    expect(shouldInvalidate("social-account-connections:detail:workspace_01:connection_02")).toBe(
+      false,
+    );
   });
 
   it("maps failed social account connection responses to typed errors", async () => {
