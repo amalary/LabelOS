@@ -281,6 +281,7 @@ def test_campaign_calendar_projects_parent_and_channel_content_schedules(
         campaign_calendar.MARKETING_CONTENT_CHANNEL_PUBLISHED,
     ]
 
+
 def test_campaign_calendar_projects_existing_marketing_content_event_types_only(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -362,6 +363,7 @@ def test_campaign_calendar_projects_existing_marketing_content_event_types_only(
         (campaign_calendar.MARKETING_CONTENT_CHANNEL_PUBLISHED, "Full Projection"),
     ]
     assert "Unscheduled Draft" not in [title for _, title in events]
+
 
 def test_campaign_calendar_projects_approval_timestamps_with_fallbacks(
     sessionmaker: async_sessionmaker[AsyncSession],
