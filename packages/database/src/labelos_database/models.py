@@ -27,6 +27,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column, relationship, validates
 
 from labelos_database.base import Base, TimestampMixin, UUIDPrimaryKey
+from labelos_database.departments import DEFAULT_ROLE_DEPARTMENT_ACCESS
 
 _LOCALE_PATTERN = re.compile(r"^[A-Za-z]{2,3}(?:[-_][A-Za-z0-9]{2,8})*$")
 PROFILE_MODULE_RELATIONSHIPS = ("artist_profiles",)
@@ -851,16 +852,76 @@ class OrganizationMembership(Base, TimestampMixin):
     def professional_roles(self) -> tuple[str, ...]:
         return tuple(
             link.professional_role.display_name
-            for link in self.professional_role_links
+            for link in sorted(
+                self.professional_role_links,
+                key=lambda link: (
+                    not link.is_primary,
+                    (
+                        link.professional_role.display_name
+                        if link.professional_role is not None
+                        else ""
+                    ),
+                ),
+            )
             if link.status == "active" and link.professional_role is not None
         )
 
     @property
     def approved_department_access(self) -> tuple[str, ...]:
-        grants = tuple(grant.department_slug for grant in self.department_access_grants)
-        if grants:
-            return grants
-        return tuple(self.department_access)
+        grants = list(self.department_access_grants)
+        if not grants:
+            return tuple(self.department_access)
+
+        ordered: list[str] = []
+        seen: set[str] = set()
+        department_order: dict[str, int] = {}
+        for role_departments in DEFAULT_ROLE_DEPARTMENT_ACCESS.values():
+            for department_slug in role_departments:
+                department_order.setdefault(department_slug, len(department_order))
+
+        def append(department_slug: str) -> None:
+            if department_slug in seen:
+                return
+            ordered.append(department_slug)
+            seen.add(department_slug)
+
+        for department_slug in self.department_access:
+            append(department_slug)
+
+        role_default_grant_slugs = {
+            grant.department_slug for grant in grants if grant.source == "role_default"
+        }
+        if role_default_grant_slugs:
+            for link in sorted(
+                self.professional_role_links,
+                key=lambda link: (
+                    not link.is_primary,
+                    (
+                        link.professional_role.display_name
+                        if link.professional_role is not None
+                        else ""
+                    ),
+                ),
+            ):
+                if link.status != "active" or link.professional_role is None:
+                    continue
+                for department_slug in DEFAULT_ROLE_DEPARTMENT_ACCESS.get(
+                    link.professional_role.slug,
+                    [],
+                ):
+                    if department_slug in role_default_grant_slugs:
+                        append(department_slug)
+
+        for grant in sorted(
+            grants,
+            key=lambda grant: (
+                department_order.get(grant.department_slug, len(department_order)),
+                grant.department_slug,
+            ),
+        ):
+            append(grant.department_slug)
+
+        return tuple(ordered)
 
     @property
     def pending_department_access(self) -> tuple[str, ...]:
@@ -947,8 +1008,17 @@ class WorkspaceMembership(Base, TimestampMixin):
     def roles(self) -> tuple["Role", ...]:
         return tuple(
             assignment.role
-            for assignment in self.role_assignments
-            if assignment.role is not None
+            for assignment in sorted(
+                (
+                    assignment
+                    for assignment in self.role_assignments
+                    if assignment.role is not None
+                ),
+                key=lambda assignment: (
+                    assignment.assigned_at,
+                    assignment.role.key,
+                ),
+            )
         )
 
     @property
@@ -957,11 +1027,14 @@ class WorkspaceMembership(Base, TimestampMixin):
 
     @property
     def capability_keys(self) -> tuple[str, ...]:
+        seen: set[str] = set()
         capability_keys: list[str] = []
         for role in self.roles:
-            for capability in role.capabilities:
-                if capability.key not in capability_keys:
-                    capability_keys.append(capability.key)
+            for capability in sorted(role.capabilities, key=lambda item: item.key):
+                if capability.key in seen:
+                    continue
+                capability_keys.append(capability.key)
+                seen.add(capability.key)
         return tuple(capability_keys)
 
     @property

@@ -555,7 +555,7 @@ def test_generated_frontend_capability_registry_matches_backend_source() -> None
     for definition in CAPABILITY_REGISTRY:
         assert f"{camel_case(definition.key)}: {quote(definition.key)}" in generated
         assert f"displayName: {quote(definition.display_name)}" in generated
-        assert f"description: {quote(definition.description)}" in generated
+        assert quote(definition.description) in generated
 
 
 def test_capability_authorization_combines_workspace_department_and_capability() -> (

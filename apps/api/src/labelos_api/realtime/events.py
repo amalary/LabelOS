@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any
 from uuid import UUID, uuid4
@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger("labelos_api.realtime")
+_last_event_created_at: datetime | None = None
 
 
 class RealtimeEventType(StrEnum):
@@ -152,6 +153,11 @@ class RealtimePublisher:
         payload: dict[str, Any] | None = None,
         operation_id: str | None = None,
     ) -> RealtimeEvent:
+        global _last_event_created_at
+        created_at = datetime.now(UTC)
+        if _last_event_created_at is not None and created_at <= _last_event_created_at:
+            created_at = _last_event_created_at + timedelta(microseconds=1)
+        _last_event_created_at = created_at
         event = RealtimeEvent(
             organization_id=organization_id,
             channel=realtime_channel(organization_id),
@@ -163,6 +169,8 @@ class RealtimePublisher:
             actor_user_id=actor.id if actor is not None else None,
             actor_display_name=_actor_display_name(actor),
             payload=payload or {},
+            created_at=created_at,
+            updated_at=created_at,
         )
         self.session.add(event)
         await self.session.flush()
