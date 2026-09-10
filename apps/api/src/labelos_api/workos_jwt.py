@@ -92,9 +92,7 @@ def _is_accepted_token_context(claims: dict[str, object], settings: Settings) ->
             return True
         if _claim_contains(claims.get("aud"), settings.workos_client_id or ""):
             return True
-        if claims.get("client_id") is None and claims.get("aud") is None:
-            return True
-        return False
+        return claims.get("client_id") is None and claims.get("aud") is None
 
     if settings.workos_client_id is None:
         return False
