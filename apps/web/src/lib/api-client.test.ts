@@ -122,6 +122,24 @@ describe("authenticated backend API client", () => {
     });
   });
 
+  it("keeps the backend 401 visible when session refresh fails after an unauthorized response", async () => {
+    const { apiFetch } = await import("./api-client");
+    tokenHelpers.requireAccessTokenForApi.mockResolvedValue("rejected_access_token");
+    tokenHelpers.refreshAccessTokenForApi.mockRejectedValue(
+      new tokenHelpers.AccessTokenError(
+        "missing_session",
+        "A signed-in WorkOS session is required.",
+      ),
+    );
+    vi.mocked(fetch).mockResolvedValue(new Response("unauthorized", { status: 401 }));
+
+    await expect(apiFetch("/api/v1/me")).rejects.toMatchObject({
+      code: "unauthorized",
+      name: "ApiClientError",
+      status: 401,
+    });
+  });
+
   it("throws forbidden when the backend returns 403", async () => {
     const { apiFetch } = await import("./api-client");
     tokenHelpers.requireAccessTokenForApi.mockResolvedValue("server_access_token");

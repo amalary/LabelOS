@@ -39,6 +39,8 @@ class Capability(StrEnum):
     marketing_campaign_create = "marketing.campaign.create"
     marketing_campaign_edit = "marketing.campaign.edit"
     marketing_campaign_approve = "marketing.campaign.approve"
+    marketing_account_view = "marketing.account.view"
+    marketing_account_manage = "marketing.account.manage"
     marketing_content_view = "marketing.content.view"
     marketing_content_create = "marketing.content.create"
     marketing_content_edit = "marketing.content.edit"
@@ -234,6 +236,16 @@ CAPABILITY_REGISTRY: tuple[CapabilityDefinition, ...] = (
         Capability.marketing_campaign_approve,
         "Approve campaigns",
         "Approve marketing campaign plans.",
+    ),
+    _definition(
+        Capability.marketing_account_view,
+        "View social accounts",
+        "View workspace social account connection metadata, status, health, and connection capabilities.",
+    ),
+    _definition(
+        Capability.marketing_account_manage,
+        "Manage social accounts",
+        "Register, update, reconnect, disconnect, associate, and synchronize workspace social account connections.",
     ),
     _definition(
         Capability.marketing_content_view,

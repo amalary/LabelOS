@@ -114,6 +114,29 @@ PERMISSION_MATRIX = (
         allowed_roles=frozenset({"owner", "legal"}),
     ),
     MatrixAction(
+        name="workspace member views social account connections",
+        capability=Capability.marketing_account_view,
+        department="marketing",
+        target="workspace",
+        allowed_roles=frozenset(
+            {
+                "owner",
+                "admin",
+                "artist",
+                "a_and_r",
+                "manager",
+                "marketing",
+            }
+        ),
+    ),
+    MatrixAction(
+        name="marketing role manages social account connections",
+        capability=Capability.marketing_account_manage,
+        department="marketing",
+        target="workspace",
+        allowed_roles=frozenset({"owner", "admin", "manager", "marketing"}),
+    ),
+    MatrixAction(
         name="manager edits allowed artist information",
         capability=Capability.artist_profile_edit,
         department="management",
@@ -699,6 +722,92 @@ def test_unauthorized_member_cannot_assign_roles(
                 resource=AuthorizationResource(
                     workspace_id=seeded.workspace_id,
                     department="administration",
+                ),
+            )
+            return decision.allowed, decision.reason
+
+    assert asyncio.run(authorize()) == (False, "missing_capability")
+
+
+def test_social_account_manage_requires_membership_even_with_capability_grant(
+    matrix_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    seeded = asyncio.run(_seed_matrix_data(matrix_sessionmaker))
+
+    async def authorize() -> tuple[bool, str]:
+        async with matrix_sessionmaker() as session:
+            decision = await authorization_service.decide_capability(
+                session,
+                actor=seeded.role_user_ids["marketing"],
+                workspace=seeded.other_workspace_id,
+                capability=Capability.marketing_account_manage,
+                resource=AuthorizationResource(
+                    workspace_id=seeded.other_workspace_id,
+                    department="marketing",
+                ),
+            )
+            return decision.allowed, decision.reason
+
+    assert asyncio.run(authorize()) == (False, "membership_not_found")
+
+
+def test_social_account_authorization_distinguishes_view_and_manage(
+    matrix_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    seeded = asyncio.run(_seed_matrix_data(matrix_sessionmaker))
+
+    async def authorize() -> tuple[bool, str, bool, str]:
+        async with matrix_sessionmaker() as session:
+            view_decision = await authorization_service.decide_capability(
+                session,
+                actor=seeded.role_user_ids["artist"],
+                workspace=seeded.workspace_id,
+                capability=Capability.marketing_account_view,
+                resource=AuthorizationResource(
+                    workspace_id=seeded.workspace_id,
+                    department="marketing",
+                ),
+            )
+            manage_decision = await authorization_service.decide_capability(
+                session,
+                actor=seeded.role_user_ids["artist"],
+                workspace=seeded.workspace_id,
+                capability=Capability.marketing_account_manage,
+                resource=AuthorizationResource(
+                    workspace_id=seeded.workspace_id,
+                    department="marketing",
+                ),
+            )
+            return (
+                view_decision.allowed,
+                view_decision.reason,
+                manage_decision.allowed,
+                manage_decision.reason,
+            )
+
+    assert asyncio.run(authorize()) == (
+        True,
+        "capability_allowed",
+        False,
+        "missing_capability",
+    )
+
+
+def test_social_account_authorization_denies_member_without_role_capability(
+    matrix_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    seeded = asyncio.run(_seed_matrix_data(matrix_sessionmaker))
+
+    async def authorize() -> tuple[bool, str]:
+        async with matrix_sessionmaker() as session:
+            decision = await authorization_service.decide_capability(
+                session,
+                actor=seeded.unauthorized_user_id,
+                workspace=seeded.workspace_id,
+                capability=Capability.marketing_account_view,
+                resource=AuthorizationResource(
+                    workspace_id=seeded.workspace_id,
+                    department="marketing",
                 ),
             )
             return decision.allowed, decision.reason

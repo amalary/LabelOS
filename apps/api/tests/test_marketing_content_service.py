@@ -10,6 +10,7 @@ from labelos_database.models import (
     ApprovalRequest,
     ApprovalRequestStatus,
     Artist,
+    ArtistProfile,
     Campaign,
     MarketingContentItem,
     MarketingContentItemStatus,
@@ -18,6 +19,9 @@ from labelos_database.models import (
     OrganizationMembership,
     RealtimeEvent,
     Release,
+    SocialAccountConnection,
+    SocialAccountConnectionMethod,
+    SocialAccountConnectionStatus,
     UniversalProfile,
     User,
     WorkspaceMembership,
@@ -38,6 +42,7 @@ from labelos_api.services.approval_service import (
     submit_resource_for_approval,
 )
 from labelos_api.services.marketing_content_service import (
+    ManualPublishScheduleInput,
     MarketingContentAuthorizationError,
     MarketingContentChannelCreate,
     MarketingContentChannelUpdate,
@@ -54,11 +59,46 @@ from labelos_api.services.marketing_content_service import (
     list_campaign_content_items,
     list_content_items,
     list_content_items_by_date_range,
+    prepare_assisted_publish_handoff,
     replace_channels,
     transition_status,
     update_channel,
     update_content_item,
 )
+from labelos_api.services.social_account_service import (
+    DestinationUnavailableReason,
+    check_connection_health,
+    resolved_destination_for_connection,
+)
+from labelos_api.social_accounts.providers import (
+    SocialAccountConnectionProvider,
+    SocialAccountHealth,
+    SocialAccountProviderErrorCode,
+    SocialAccountProviderKey,
+    SocialAccountProviderRegistry,
+)
+
+
+class DegradedInstagramProvider(SocialAccountConnectionProvider):
+    provider = SocialAccountProviderKey.instagram
+    connection_method = SocialAccountConnectionMethod.direct_api
+
+    def default_capabilities(self) -> tuple[str, ...]:
+        return ("content_publish",)
+
+    async def check_connection_health(
+        self,
+        *,
+        credential_ref: str | None,
+        token_expires_at=None,
+        provider_metadata=None,
+    ) -> SocialAccountHealth:
+        return SocialAccountHealth(
+            healthy=False,
+            status="reconnect_required",
+            error_code=SocialAccountProviderErrorCode.credential_revoked,
+            error_message="Provider authorization was revoked",
+        )
 
 
 async def _submit_and_approve_content(
@@ -156,7 +196,17 @@ async def _seed_workspace_graph(session: AsyncSession) -> dict[str, object]:
         profile=other_profile,
     )
     artist = Artist(name="Alpha Artist", organization=workspace)
+    artist_profile = ArtistProfile(
+        artist=artist,
+        universal_profile=creator_profile,
+        stage_name="Alpha Artist",
+    )
     other_artist = Artist(name="Beta Artist", organization=other_workspace)
+    other_artist_profile = ArtistProfile(
+        artist=other_artist,
+        universal_profile=other_profile,
+        stage_name="Beta Artist",
+    )
     release = Release(title="Alpha Release", organization=workspace, artist=artist)
     alternate_release = Release(title="Alpha Side B", organization=workspace)
     other_release = Release(
@@ -182,6 +232,8 @@ async def _seed_workspace_graph(session: AsyncSession) -> dict[str, object]:
             owner_membership,
             approver_membership,
             other_membership,
+            artist_profile,
+            other_artist_profile,
             release,
             alternate_release,
             campaign,
@@ -197,7 +249,9 @@ async def _seed_workspace_graph(session: AsyncSession) -> dict[str, object]:
         "approver_profile": approver_profile,
         "other_profile": other_profile,
         "artist": artist,
+        "artist_profile": artist_profile,
         "other_artist": other_artist,
+        "other_artist_profile": other_artist_profile,
         "release": release,
         "alternate_release": alternate_release,
         "other_release": other_release,
@@ -698,6 +752,512 @@ def test_marketing_content_service_replaces_and_updates_channels(
     assert targets == [("instagram", "story"), ("threads", "default")]
     assert override == "Story cut"
     assert duplicate_rejected is True
+
+
+def test_marketing_content_service_validates_optional_channel_social_account_targets(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async def run() -> dict[str, object]:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            other_workspace = data["other_workspace"]
+            campaign = data["campaign"]
+            artist = data["artist"]
+            artist_profile = data["artist_profile"]
+            other_artist_profile = data["other_artist_profile"]
+            assert isinstance(workspace, Organization)
+            assert isinstance(other_workspace, Organization)
+            assert isinstance(campaign, Campaign)
+            assert isinstance(artist, Artist)
+            assert isinstance(artist_profile, ArtistProfile)
+            assert isinstance(other_artist_profile, ArtistProfile)
+
+            unrelated_artist = Artist(name="Other Alpha Artist", organization=workspace)
+            unrelated_profile = UniversalProfile(
+                user=User(email=f"other-alpha-{uuid4()}@example.com"),
+                slug=f"other-alpha-{uuid4()}",
+            )
+            unrelated_membership = WorkspaceMembership(
+                workspace=workspace,
+                profile=unrelated_profile,
+            )
+            unrelated_artist_profile = ArtistProfile(
+                artist=unrelated_artist,
+                universal_profile=unrelated_profile,
+                stage_name="Other Alpha Artist",
+            )
+            session.add_all([unrelated_membership, unrelated_artist_profile])
+            await session.flush()
+
+            automatic = SocialAccountConnection(
+                organization=workspace,
+                artist_profile=artist_profile,
+                provider="instagram",
+                username="@alpha",
+                connection_method=SocialAccountConnectionMethod.direct_api,
+                status=SocialAccountConnectionStatus.connected,
+                capabilities=["content_publish"],
+            )
+            assisted = SocialAccountConnection(
+                organization=workspace,
+                artist_profile=artist_profile,
+                provider="instagram",
+                username="@alpha-assisted",
+                status=SocialAccountConnectionStatus.connected,
+                capabilities=["manual_publish"],
+            )
+            wrong_provider = SocialAccountConnection(
+                organization=workspace,
+                artist_profile=artist_profile,
+                provider="tiktok",
+                username="@alpha-tiktok",
+                status=SocialAccountConnectionStatus.connected,
+                capabilities=["manual_publish"],
+            )
+            cross_workspace = SocialAccountConnection(
+                organization=other_workspace,
+                artist_profile=other_artist_profile,
+                provider="instagram",
+                username="@beta",
+                status=SocialAccountConnectionStatus.connected,
+                capabilities=["manual_publish"],
+            )
+            different_artist = SocialAccountConnection(
+                organization=workspace,
+                artist_profile=unrelated_artist_profile,
+                provider="instagram",
+                username="@other-alpha",
+                status=SocialAccountConnectionStatus.connected,
+                capabilities=["manual_publish"],
+            )
+            disconnected = SocialAccountConnection(
+                organization=workspace,
+                artist_profile=artist_profile,
+                provider="instagram",
+                username="@disconnected",
+                status=SocialAccountConnectionStatus.disconnected,
+                capabilities=["manual_publish"],
+            )
+            reconnect_required = SocialAccountConnection(
+                organization=workspace,
+                artist_profile=artist_profile,
+                provider="instagram",
+                username="@reconnect",
+                status=SocialAccountConnectionStatus.reconnect_required,
+                capabilities=["content_publish"],
+            )
+            missing_capability = SocialAccountConnection(
+                organization=workspace,
+                artist_profile=artist_profile,
+                provider="instagram",
+                username="@readonly",
+                status=SocialAccountConnectionStatus.connected,
+                capabilities=["account_analytics_read"],
+            )
+            session.add_all(
+                [
+                    automatic,
+                    assisted,
+                    wrong_provider,
+                    cross_workspace,
+                    different_artist,
+                    disconnected,
+                    reconnect_required,
+                    missing_capability,
+                ]
+            )
+            await session.flush()
+
+            no_account = await create_content_item(
+                session,
+                workspace.id,
+                MarketingContentItemCreate(
+                    campaign_id=campaign.id,
+                    title="No Account",
+                    content_type="social_post",
+                    channels=[MarketingContentChannelCreate(channel="instagram")],
+                ),
+            )
+            targeted = await create_content_item(
+                session,
+                workspace.id,
+                MarketingContentItemCreate(
+                    campaign_id=campaign.id,
+                    title="Targeted",
+                    content_type="social_post",
+                    artist_id=artist.id,
+                    channels=[
+                        MarketingContentChannelCreate(
+                            channel="instagram",
+                            placement="feed",
+                            social_account_connection_id=automatic.id,
+                        )
+                    ],
+                ),
+            )
+            multiple = await replace_channels(
+                session,
+                workspace.id,
+                targeted.id,
+                [
+                    MarketingContentChannelCreate(
+                        channel="instagram",
+                        placement="feed",
+                        social_account_connection_id=automatic.id,
+                    ),
+                    MarketingContentChannelCreate(
+                        channel="instagram",
+                        placement="story",
+                        social_account_connection_id=assisted.id,
+                    ),
+                ],
+            )
+            multiple_connection_ids = [
+                channel.social_account_connection_id for channel in multiple.channels
+            ]
+            await replace_channels(
+                session,
+                workspace.id,
+                targeted.id,
+                [
+                    MarketingContentChannelCreate(
+                        channel="instagram",
+                        placement="feed",
+                        social_account_connection_id=reconnect_required.id,
+                    )
+                ],
+            )
+
+            rejected: dict[str, bool] = {}
+            cases = {
+                "provider_mismatch": wrong_provider.id,
+                "cross_workspace": cross_workspace.id,
+                "different_artist": different_artist.id,
+                "disconnected": disconnected.id,
+                "missing_capability": missing_capability.id,
+            }
+            for name, connection_id in cases.items():
+                try:
+                    await create_content_item(
+                        session,
+                        workspace.id,
+                        MarketingContentItemCreate(
+                            campaign_id=campaign.id,
+                            title=f"Reject {name}",
+                            content_type="social_post",
+                            artist_id=artist.id,
+                            channels=[
+                                MarketingContentChannelCreate(
+                                    channel="instagram",
+                                    social_account_connection_id=connection_id,
+                                )
+                            ],
+                        ),
+                    )
+                except MarketingContentRelationshipError:
+                    rejected[name] = True
+            reloaded = await get_content_item(session, workspace.id, targeted.id)
+            return {
+                "no_account": no_account.channels[0].social_account_connection_id,
+                "multiple": multiple_connection_ids,
+                "reconnect_required": reloaded.channels[0].social_account_connection_id,
+                "rejected": rejected,
+            }
+
+    result = asyncio.run(run())
+
+    assert result["no_account"] is None
+    assert len(result["multiple"]) == 2
+    assert result["reconnect_required"] is not None
+    assert result["rejected"] == {
+        "provider_mismatch": True,
+        "cross_workspace": True,
+        "different_artist": True,
+        "disconnected": True,
+        "missing_capability": True,
+    }
+
+
+def test_draft_post_channel_survives_social_account_reconnect_required_recovery(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = SocialAccountProviderRegistry([DegradedInstagramProvider()])
+    monkeypatch.setattr(
+        "labelos_api.social_accounts.providers.provider_registry",
+        registry,
+    )
+
+    async def run() -> dict[str, object]:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            campaign = data["campaign"]
+            artist = data["artist"]
+            artist_profile = data["artist_profile"]
+            assert isinstance(workspace, Organization)
+            assert isinstance(campaign, Campaign)
+            assert isinstance(artist, Artist)
+            assert isinstance(artist_profile, ArtistProfile)
+
+            connection = SocialAccountConnection(
+                organization=workspace,
+                artist_profile=artist_profile,
+                provider="instagram",
+                external_account_id="ig-preserved",
+                username="@preserved",
+                display_name="Preserved Account",
+                connection_method=SocialAccountConnectionMethod.direct_api,
+                status=SocialAccountConnectionStatus.connected,
+                capabilities=["content_publish"],
+                credential_ref="memory://credentials/direct",
+            )
+            session.add(connection)
+            await session.flush()
+
+            draft = await create_content_item(
+                session,
+                workspace.id,
+                MarketingContentItemCreate(
+                    campaign_id=campaign.id,
+                    title="Reconnect Integrity Draft",
+                    content_type="social_post",
+                    artist_id=artist.id,
+                    copy_text="Draft copy remains editable.",
+                    channels=[
+                        MarketingContentChannelCreate(
+                            channel="instagram",
+                            social_account_connection_id=connection.id,
+                            copy_text_override="Channel copy remains intact.",
+                        )
+                    ],
+                ),
+            )
+            await check_connection_health(
+                session,
+                workspace.id,
+                connection.id,
+                provider_registry=registry,
+            )
+            reloaded = await get_content_item(session, workspace.id, draft.id)
+            updated_connection = await session.get(
+                SocialAccountConnection,
+                connection.id,
+            )
+            assert updated_connection is not None
+            readiness = resolved_destination_for_connection(
+                updated_connection,
+                workspace_id=workspace.id,
+                provider="instagram",
+                artist_profile_id=artist_profile.id,
+                desired_capability="content_publish",
+            )
+            return {
+                "draft_status": reloaded.status,
+                "draft_title": reloaded.title,
+                "draft_copy": reloaded.copy_text,
+                "channel_fk": reloaded.channels[0].social_account_connection_id,
+                "channel_copy": reloaded.channels[0].copy_text_override,
+                "connection_status": updated_connection.status,
+                "external_account_id": updated_connection.external_account_id,
+                "username": updated_connection.username,
+                "credential_ref": updated_connection.credential_ref,
+                "readiness_usable": readiness.usable,
+                "readiness_reasons": readiness.unavailable_reasons,
+            }
+
+    result = asyncio.run(run())
+    assert result["draft_status"] == MarketingContentItemStatus.draft
+    assert result["draft_title"] == "Reconnect Integrity Draft"
+    assert result["draft_copy"] == "Draft copy remains editable."
+    assert result["channel_fk"] is not None
+    assert result["channel_copy"] == "Channel copy remains intact."
+    assert (
+        result["connection_status"] == SocialAccountConnectionStatus.reconnect_required
+    )
+    assert result["external_account_id"] == "ig-preserved"
+    assert result["username"] == "@preserved"
+    assert result["credential_ref"] == "memory://credentials/direct"
+    assert result["readiness_usable"] is False
+    assert result["readiness_reasons"] == (
+        DestinationUnavailableReason.reconnect_required,
+    )
+
+
+def test_prepare_assisted_publish_handoff_returns_scheduler_delivery_contract(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async def run() -> dict[str, object]:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            campaign = data["campaign"]
+            artist = data["artist"]
+            artist_profile = data["artist_profile"]
+            assert isinstance(workspace, Organization)
+            assert isinstance(campaign, Campaign)
+            assert isinstance(artist, Artist)
+            assert isinstance(artist_profile, ArtistProfile)
+
+            assisted = SocialAccountConnection(
+                organization=workspace,
+                artist_profile=artist_profile,
+                provider="instagram",
+                username="@alpha-assisted",
+                display_name="Alpha Assisted",
+                profile_url="https://instagram.com/alpha-assisted",
+                status=SocialAccountConnectionStatus.connected,
+                capabilities=["manual_publish", "manual_metrics"],
+            )
+            session.add(assisted)
+            await session.flush()
+
+            item = await create_content_item(
+                session,
+                workspace.id,
+                MarketingContentItemCreate(
+                    campaign_id=campaign.id,
+                    title="Manual Reel",
+                    content_type="video",
+                    artist_id=artist.id,
+                    copy_text="Item caption",
+                    asset_refs=[{"asset_id": "item_asset"}],
+                    metadata_json={"hashtags": ["Alpha", "#Launch"]},
+                    channels=[
+                        MarketingContentChannelCreate(
+                            channel="instagram",
+                            placement="reel",
+                            social_account_connection_id=assisted.id,
+                            copy_text_override="Channel caption",
+                            asset_refs=[{"asset_id": "channel_asset"}],
+                            metadata_json={"hashtags": ["#Launch", "Reels"]},
+                        )
+                    ],
+                ),
+            )
+            intended_at = datetime(2026, 9, 15, 17, 30, tzinfo=UTC)
+            handoff = await prepare_assisted_publish_handoff(
+                session,
+                workspace.id,
+                item.id,
+                item.channels[0].id,
+                ManualPublishScheduleInput(intended_publication_at=intended_at),
+            )
+            return {
+                "marketing_content_id": handoff.marketing_content_id,
+                "channel_id": handoff.channel_content_item_channel_id,
+                "connection_id": handoff.social_account_connection_id,
+                "provider": handoff.provider,
+                "handle": handoff.handle,
+                "account_display": handoff.account_display,
+                "capability": handoff.capability,
+                "health_status": handoff.health_status,
+                "asset_refs": handoff.asset_refs,
+                "caption": handoff.caption,
+                "hashtags": handoff.hashtags,
+                "intended_at": handoff.intended_publication_at,
+                "safe_link": handoff.safe_profile_provider_link,
+                "instructions": handoff.manual_instructions,
+                "completion": handoff.completion,
+            }
+
+    result = asyncio.run(run())
+
+    assert result["marketing_content_id"] is not None
+    assert result["channel_id"] is not None
+    assert result["connection_id"] is not None
+    assert result["provider"] == "instagram"
+    assert result["handle"] == "@alpha-assisted"
+    assert result["account_display"] == "Alpha Assisted"
+    assert result["capability"] == "manual_publish"
+    assert result["health_status"] == "connected"
+    assert result["asset_refs"] == [{"asset_id": "channel_asset"}]
+    assert result["caption"] == "Channel caption"
+    assert result["hashtags"] == ("#Alpha", "#Launch", "#Reels")
+    assert result["intended_at"] == datetime(2026, 9, 15, 17, 30, tzinfo=UTC)
+    assert result["safe_link"] == "https://instagram.com/alpha-assisted"
+    assert "record the external post ID or URL" in str(result["instructions"])
+    assert result["completion"] is None
+
+
+def test_prepare_assisted_publish_handoff_rejects_automatic_and_missing_scheduler_time(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async def run() -> dict[str, bool]:
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace = data["workspace"]
+            campaign = data["campaign"]
+            artist_profile = data["artist_profile"]
+            assert isinstance(workspace, Organization)
+            assert isinstance(campaign, Campaign)
+            assert isinstance(artist_profile, ArtistProfile)
+
+            automatic = SocialAccountConnection(
+                organization=workspace,
+                artist_profile=artist_profile,
+                provider="instagram",
+                username="@alpha-auto",
+                connection_method=SocialAccountConnectionMethod.direct_api,
+                status=SocialAccountConnectionStatus.connected,
+                capabilities=["content_publish"],
+            )
+            session.add(automatic)
+            await session.flush()
+
+            item = await create_content_item(
+                session,
+                workspace.id,
+                MarketingContentItemCreate(
+                    campaign_id=campaign.id,
+                    title="Auto Reel",
+                    content_type="video",
+                    channels=[
+                        MarketingContentChannelCreate(
+                            channel="instagram",
+                            social_account_connection_id=automatic.id,
+                        )
+                    ],
+                ),
+            )
+            result = {"automatic_rejected": False, "naive_time_rejected": False}
+            try:
+                await prepare_assisted_publish_handoff(
+                    session,
+                    workspace.id,
+                    item.id,
+                    item.channels[0].id,
+                    ManualPublishScheduleInput(
+                        intended_publication_at=datetime(2026, 9, 15, 17, 30),
+                    ),
+                )
+            except MarketingContentRelationshipError:
+                result["naive_time_rejected"] = True
+            try:
+                await prepare_assisted_publish_handoff(
+                    session,
+                    workspace.id,
+                    item.id,
+                    item.channels[0].id,
+                    ManualPublishScheduleInput(
+                        intended_publication_at=datetime(
+                            2026, 9, 15, 17, 30, tzinfo=UTC
+                        ),
+                    ),
+                )
+            except MarketingContentRelationshipError:
+                result["automatic_rejected"] = True
+            return result
+
+    assert asyncio.run(run()) == {
+        "automatic_rejected": True,
+        "naive_time_rejected": True,
+    }
+
+
+def test_manual_publish_task_persistence_is_intentionally_deferred() -> None:
+    assert "manual_publish_tasks" not in Base.metadata.tables
 
 
 def test_marketing_content_service_filters_items(

@@ -24,6 +24,11 @@ class Settings(DatabaseSettings):
     workos_jwks_url: str | None = None
     workos_audience: str | None = None
     workos_webhook_secret: str | None = None
+    credential_store_backend: str = "memory"
+    credential_store_gcp_project_id: str | None = None
+    credential_store_secret_prefix: str = "labelos-credential"
+    youtube_oauth_client_id: str | None = None
+    youtube_oauth_client_secret: str | None = None
 
     @field_validator("allowed_frontend_origins", mode="before")
     @classmethod
@@ -53,25 +58,69 @@ class Settings(DatabaseSettings):
         return f"https://api.workos.com/sso/jwks/{self.workos_client_id}"
 
     def validate_startup_environment(self) -> None:
-        if (
-            not self.requires_strict_startup_validation
-            or self.auth_provider.lower() != "workos"
-        ):
+        if not self.requires_strict_startup_validation:
             return
 
-        missing: list[str] = []
-        if not self.workos_client_id:
-            missing.append("WORKOS_CLIENT_ID")
-        if not self.workos_issuer_url:
-            missing.append("WORKOS_ISSUER_URL")
-        if not self.workos_webhook_secret:
-            missing.append("WORKOS_WEBHOOK_SECRET")
+        if self.auth_provider.lower() == "workos":
+            missing: list[str] = []
+            if not self.workos_client_id:
+                missing.append("WORKOS_CLIENT_ID")
+            if not self.workos_issuer_url:
+                missing.append("WORKOS_ISSUER_URL")
+            if not self.workos_webhook_secret:
+                missing.append("WORKOS_WEBHOOK_SECRET")
 
-        if missing:
-            joined = ", ".join(missing)
-            raise RuntimeError(f"Missing required WorkOS API environment: {joined}")
+            if missing:
+                joined = ", ".join(missing)
+                raise RuntimeError(f"Missing required WorkOS API environment: {joined}")
 
-        _ = self.resolved_workos_jwks_url
+            _ = self.resolved_workos_jwks_url
+
+        self.validate_credential_store_backend()
+        self.validate_youtube_oauth_configuration()
+
+    def validate_youtube_oauth_configuration(self) -> None:
+        configured = bool(self.youtube_oauth_client_id) or bool(
+            self.youtube_oauth_client_secret
+        )
+        complete = bool(self.youtube_oauth_client_id) and bool(
+            self.youtube_oauth_client_secret
+        )
+        if configured and not complete:
+            raise RuntimeError(
+                "YOUTUBE_OAUTH_CLIENT_ID and YOUTUBE_OAUTH_CLIENT_SECRET must be "
+                "configured together for YouTube direct OAuth"
+            )
+
+    def validate_credential_store_backend(self) -> None:
+        if not self.requires_strict_startup_validation:
+            return
+
+        if self.credential_store_backend.lower() == "memory":
+            raise RuntimeError(
+                "CREDENTIAL_STORE_BACKEND=memory is only allowed for local and test "
+                "environments"
+            )
+
+        if self.credential_store_backend.lower() != "gcp-secret-manager":
+            raise RuntimeError(
+                "CREDENTIAL_STORE_BACKEND must be gcp-secret-manager in "
+                "production-like environments"
+            )
+
+        if not self.resolved_credential_store_gcp_project_id:
+            raise RuntimeError(
+                "GCP_PROJECT_ID or GOOGLE_CLOUD_PROJECT is required for the "
+                "GCP Secret Manager credential store"
+            )
+
+    @property
+    def resolved_credential_store_gcp_project_id(self) -> str | None:
+        return (
+            self.credential_store_gcp_project_id
+            or os.getenv("GOOGLE_CLOUD_PROJECT")
+            or os.getenv("GCP_PROJECT_ID")
+        )
 
 
 @lru_cache
@@ -96,4 +145,14 @@ def get_settings() -> Settings:
         workos_jwks_url=os.getenv("WORKOS_JWKS_URL") or None,
         workos_audience=os.getenv("WORKOS_AUDIENCE") or None,
         workos_webhook_secret=os.getenv("WORKOS_WEBHOOK_SECRET") or None,
+        credential_store_backend=os.getenv("CREDENTIAL_STORE_BACKEND", "memory"),
+        credential_store_gcp_project_id=(
+            os.getenv("CREDENTIAL_STORE_GCP_PROJECT_ID") or None
+        ),
+        credential_store_secret_prefix=os.getenv(
+            "CREDENTIAL_STORE_SECRET_PREFIX",
+            "labelos-credential",
+        ),
+        youtube_oauth_client_id=os.getenv("YOUTUBE_OAUTH_CLIENT_ID") or None,
+        youtube_oauth_client_secret=os.getenv("YOUTUBE_OAUTH_CLIENT_SECRET") or None,
     )

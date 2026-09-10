@@ -1,10 +1,15 @@
 import { ApiClientError, apiFetch } from "../../../lib/api-client";
 
-function responseHeaders(contentType = "application/json") {
-  return {
+function responseHeaders(contentType = "application/json", upstream?: Response) {
+  const headers = new Headers({
     "Cache-Control": "no-store",
     "Content-Type": contentType,
-  };
+  });
+  const location = upstream?.headers.get("location");
+  if (location) {
+    headers.set("Location", location);
+  }
+  return headers;
 }
 
 export async function proxyWorkspaceRequest(
@@ -15,7 +20,10 @@ export async function proxyWorkspaceRequest(
     const upstream = await apiFetch(path, init);
     const body = upstream.status === 204 ? null : await upstream.text();
     return new Response(body, {
-      headers: responseHeaders(upstream.headers.get("content-type") ?? "application/json"),
+      headers: responseHeaders(
+        upstream.headers.get("content-type") ?? "application/json",
+        upstream,
+      ),
       status: upstream.status,
     });
   } catch (error) {

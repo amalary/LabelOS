@@ -387,6 +387,7 @@ def test_marketing_content_campaign_crud_and_lifecycle(
     assert unscheduled_content["status"] == "draft"
     assert unscheduled_content["scheduled_at"] is None
     assert unscheduled_content["channels"][0]["scheduled_at"] is None
+    assert unscheduled_content["channels"][0]["social_account_connection_id"] is None
     assert unscheduled_content["channels"][0]["copy_text_override"] == "IG draft copy"
 
     multi_channel = client.post(
@@ -1189,6 +1190,7 @@ def test_marketing_content_openapi_contract_exposes_stable_routes(
     assert set(schemas["MarketingContentChannelCreateRequest"]["properties"]) == {
         "channel",
         "placement",
+        "social_account_connection_id",
         "scheduled_at",
         "copy_text_override",
         "asset_refs",

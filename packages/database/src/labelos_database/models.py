@@ -27,9 +27,33 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column, relationship, validates
 
 from labelos_database.base import Base, TimestampMixin, UUIDPrimaryKey
+from labelos_database.departments import DEFAULT_ROLE_DEPARTMENT_ACCESS
 
 _LOCALE_PATTERN = re.compile(r"^[A-Za-z]{2,3}(?:[-_][A-Za-z0-9]{2,8})*$")
 PROFILE_MODULE_RELATIONSHIPS = ("artist_profiles",)
+SENSITIVE_JSON_KEY_PARTS = frozenset(
+    {
+        "access_token",
+        "authorization",
+        "client_secret",
+        "code",
+        "credential",
+        "id_token",
+        "password",
+        "private_key",
+        "refresh_token",
+        "secret",
+        "token",
+    }
+)
+SENSITIVE_TEXT_PATTERNS = (
+    re.compile(
+        r"(?i)\b(access[-_]?token|refresh[-_]?token|id[-_]?token|client[-_]?secret|"
+        r"password|private[-_]?key|secret|credential)\b"
+        r"(\s*[:=]\s*)([^\s,;]+)"
+    ),
+    re.compile(r"(?i)\bbearer\s+([A-Za-z0-9._~+/=-]{6,})"),
+)
 
 
 def _required_text(value: str | None, field_name: str) -> str:
@@ -54,6 +78,31 @@ def _json_object(value: dict | None, field_name: str) -> dict:
     if not isinstance(value, dict):
         raise ValueError(f"{field_name} must be a JSON object")
     return value
+
+
+def _json_key_is_sensitive(key: str) -> bool:
+    normalized = key.lower().replace("-", "_")
+    return any(part in normalized for part in SENSITIVE_JSON_KEY_PARTS)
+
+
+def _without_sensitive_json_keys(value: object) -> object:
+    if isinstance(value, dict):
+        return {
+            key: _without_sensitive_json_keys(item)
+            for key, item in value.items()
+            if not _json_key_is_sensitive(str(key))
+        }
+    if isinstance(value, list):
+        return [_without_sensitive_json_keys(item) for item in value]
+    return value
+
+
+def _redact_sensitive_text(value: str | None) -> str | None:
+    normalized = _optional_text(value)
+    if normalized is None:
+        return None
+    redacted = SENSITIVE_TEXT_PATTERNS[1].sub("Bearer [redacted]", normalized)
+    return SENSITIVE_TEXT_PATTERNS[0].sub(r"\1\2[redacted]", redacted)
 
 
 def _json_list(value: list | None, field_name: str) -> list:
@@ -153,6 +202,27 @@ class AnalyticsMetricValueType(StrEnum):
     json = "json"
 
 
+class SocialAccountConnectionMethod(StrEnum):
+    direct_api = "direct_api"
+    third_party = "third_party"
+    assisted = "assisted"
+
+
+class SocialAccountConnectionStatus(StrEnum):
+    pending = "pending"
+    connected = "connected"
+    limited = "limited"
+    reconnect_required = "reconnect_required"
+    disconnected = "disconnected"
+    error = "error"
+
+
+class OAuthAuthorizationStateStatus(StrEnum):
+    pending = "pending"
+    consumed = "consumed"
+    expired = "expired"
+
+
 def workspace_permission_from_role(role: MembershipRole) -> WorkspacePermission:
     if role == MembershipRole.artist:
         return WorkspacePermission.member
@@ -197,6 +267,17 @@ class User(Base, TimestampMixin):
             back_populates="created_by_user",
             foreign_keys="MarketingContentItem.created_by_user_id",
         )
+    )
+    created_social_account_connections: Mapped[list["SocialAccountConnection"]] = (
+        relationship(
+            back_populates="created_by_user",
+            foreign_keys="SocialAccountConnection.created_by_user_id",
+        )
+    )
+    oauth_authorization_states: Mapped[list["OAuthAuthorizationState"]] = relationship(
+        back_populates="actor_user",
+        cascade="all, delete-orphan",
+        foreign_keys="OAuthAuthorizationState.actor_user_id",
     )
 
     __table_args__ = (
@@ -285,6 +366,12 @@ class UniversalProfile(Base, TimestampMixin):
         relationship(
             back_populates="approved_by_profile",
             foreign_keys="MarketingContentItem.approved_by_profile_id",
+        )
+    )
+    created_social_account_connections: Mapped[list["SocialAccountConnection"]] = (
+        relationship(
+            back_populates="created_by_profile",
+            foreign_keys="SocialAccountConnection.created_by_profile_id",
         )
     )
 
@@ -623,6 +710,14 @@ class Organization(Base, TimestampMixin):
         back_populates="organization",
         cascade="all, delete-orphan",
     )
+    social_account_connections: Mapped[list["SocialAccountConnection"]] = relationship(
+        back_populates="organization",
+        cascade="all, delete-orphan",
+    )
+    oauth_authorization_states: Mapped[list["OAuthAuthorizationState"]] = relationship(
+        back_populates="organization",
+        cascade="all, delete-orphan",
+    )
     ai_agents: Mapped[list["AIAgent"]] = relationship(
         back_populates="organization",
         cascade="all, delete-orphan",
@@ -757,16 +852,76 @@ class OrganizationMembership(Base, TimestampMixin):
     def professional_roles(self) -> tuple[str, ...]:
         return tuple(
             link.professional_role.display_name
-            for link in self.professional_role_links
+            for link in sorted(
+                self.professional_role_links,
+                key=lambda link: (
+                    not link.is_primary,
+                    (
+                        link.professional_role.display_name
+                        if link.professional_role is not None
+                        else ""
+                    ),
+                ),
+            )
             if link.status == "active" and link.professional_role is not None
         )
 
     @property
     def approved_department_access(self) -> tuple[str, ...]:
-        grants = tuple(grant.department_slug for grant in self.department_access_grants)
-        if grants:
-            return grants
-        return tuple(self.department_access)
+        grants = list(self.department_access_grants)
+        if not grants:
+            return tuple(self.department_access)
+
+        ordered: list[str] = []
+        seen: set[str] = set()
+        department_order: dict[str, int] = {}
+        for role_departments in DEFAULT_ROLE_DEPARTMENT_ACCESS.values():
+            for department_slug in role_departments:
+                department_order.setdefault(department_slug, len(department_order))
+
+        def append(department_slug: str) -> None:
+            if department_slug in seen:
+                return
+            ordered.append(department_slug)
+            seen.add(department_slug)
+
+        for department_slug in self.department_access:
+            append(department_slug)
+
+        role_default_grant_slugs = {
+            grant.department_slug for grant in grants if grant.source == "role_default"
+        }
+        if role_default_grant_slugs:
+            for link in sorted(
+                self.professional_role_links,
+                key=lambda link: (
+                    not link.is_primary,
+                    (
+                        link.professional_role.display_name
+                        if link.professional_role is not None
+                        else ""
+                    ),
+                ),
+            ):
+                if link.status != "active" or link.professional_role is None:
+                    continue
+                for department_slug in DEFAULT_ROLE_DEPARTMENT_ACCESS.get(
+                    link.professional_role.slug,
+                    [],
+                ):
+                    if department_slug in role_default_grant_slugs:
+                        append(department_slug)
+
+        for grant in sorted(
+            grants,
+            key=lambda grant: (
+                department_order.get(grant.department_slug, len(department_order)),
+                grant.department_slug,
+            ),
+        ):
+            append(grant.department_slug)
+
+        return tuple(ordered)
 
     @property
     def pending_department_access(self) -> tuple[str, ...]:
@@ -853,8 +1008,17 @@ class WorkspaceMembership(Base, TimestampMixin):
     def roles(self) -> tuple["Role", ...]:
         return tuple(
             assignment.role
-            for assignment in self.role_assignments
-            if assignment.role is not None
+            for assignment in sorted(
+                (
+                    assignment
+                    for assignment in self.role_assignments
+                    if assignment.role is not None
+                ),
+                key=lambda assignment: (
+                    assignment.assigned_at,
+                    assignment.role.key,
+                ),
+            )
         )
 
     @property
@@ -863,11 +1027,14 @@ class WorkspaceMembership(Base, TimestampMixin):
 
     @property
     def capability_keys(self) -> tuple[str, ...]:
+        seen: set[str] = set()
         capability_keys: list[str] = []
         for role in self.roles:
-            for capability in role.capabilities:
-                if capability.key not in capability_keys:
-                    capability_keys.append(capability.key)
+            for capability in sorted(role.capabilities, key=lambda item: item.key):
+                if capability.key in seen:
+                    continue
+                capability_keys.append(capability.key)
+                seen.add(capability.key)
         return tuple(capability_keys)
 
     @property
@@ -1630,6 +1797,9 @@ class ArtistProfile(Base, TimestampMixin, ProfileModuleMixin):
     analytics_observations: Mapped[list["AnalyticsObservation"]] = relationship(
         back_populates="artist_profile",
     )
+    social_account_connections: Mapped[list["SocialAccountConnection"]] = relationship(
+        back_populates="artist_profile"
+    )
 
     @validates("stage_name", "career_stage")
     def _validate_optional_text(self, _key: str, value: str | None) -> str | None:
@@ -1655,6 +1825,164 @@ class ArtistProfile(Base, TimestampMixin, ProfileModuleMixin):
         Index("ix_artist_profiles_universal_profile_id", "universal_profile_id"),
         Index("ix_artist_profiles_stage_name", "stage_name"),
         Index("ix_artist_profiles_career_stage", "career_stage"),
+    )
+
+
+class SocialAccountConnection(Base, TimestampMixin, OrganizationOwnedMixin):
+    __tablename__ = "social_account_connections"
+
+    id: Mapped[UUIDPrimaryKey]
+    artist_profile_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("artist_profiles.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    provider: Mapped[str] = mapped_column(String(80), nullable=False)
+    external_account_id: Mapped[str | None] = mapped_column(String(255))
+    username: Mapped[str | None] = mapped_column(String(255))
+    display_name: Mapped[str | None] = mapped_column(String(255))
+    profile_url: Mapped[str | None] = mapped_column(String(2048))
+    connection_method: Mapped[SocialAccountConnectionMethod] = mapped_column(
+        Enum(
+            SocialAccountConnectionMethod,
+            name="social_account_connection_method",
+            values_callable=lambda methods: [method.value for method in methods],
+        ),
+        nullable=False,
+        default=SocialAccountConnectionMethod.assisted,
+        server_default=SocialAccountConnectionMethod.assisted.value,
+    )
+    status: Mapped[SocialAccountConnectionStatus] = mapped_column(
+        Enum(
+            SocialAccountConnectionStatus,
+            name="social_account_connection_status",
+            values_callable=lambda statuses: [status.value for status in statuses],
+        ),
+        nullable=False,
+        default=SocialAccountConnectionStatus.pending,
+        server_default=SocialAccountConnectionStatus.pending.value,
+    )
+    capabilities: Mapped[list[str]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+        server_default="[]",
+    )
+    credential_ref: Mapped[str | None] = mapped_column(String(500))
+    token_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_health_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    last_error_code: Mapped[str | None] = mapped_column(String(120))
+    last_error_message: Mapped[str | None] = mapped_column(String(2000))
+    provider_metadata: Mapped[dict] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+        server_default="{}",
+    )
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_by_profile_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("universal_profiles.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    organization: Mapped[Organization] = relationship(
+        back_populates="social_account_connections"
+    )
+    artist_profile: Mapped[ArtistProfile | None] = relationship(
+        back_populates="social_account_connections"
+    )
+    created_by_user: Mapped[User | None] = relationship(
+        back_populates="created_social_account_connections",
+        foreign_keys=[created_by_user_id],
+    )
+    created_by_profile: Mapped[UniversalProfile | None] = relationship(
+        back_populates="created_social_account_connections",
+        foreign_keys=[created_by_profile_id],
+    )
+
+    @validates("provider")
+    def _validate_provider(self, key: str, value: str | None) -> str:
+        return _required_text(value, key)
+
+    @validates(
+        "external_account_id",
+        "username",
+        "display_name",
+        "credential_ref",
+        "last_error_code",
+    )
+    def _validate_optional_text(self, _key: str, value: str | None) -> str | None:
+        return _optional_text(value)
+
+    @validates("last_error_message")
+    def _validate_last_error_message(
+        self,
+        _key: str,
+        value: str | None,
+    ) -> str | None:
+        redacted = _redact_sensitive_text(value)
+        return redacted[:2000] if redacted is not None else None
+
+    @validates("profile_url")
+    def _validate_profile_url(self, _key: str, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _validate_url(value)
+
+    @validates("capabilities")
+    def _validate_capabilities(self, key: str, value: list | None) -> list:
+        return _json_list(value, key)
+
+    @validates("provider_metadata")
+    def _validate_provider_metadata(self, key: str, value: dict | None) -> dict:
+        sanitized = _without_sensitive_json_keys(_json_object(value, key))
+        if not isinstance(sanitized, dict):
+            raise ValueError(f"{key} must be a JSON object")
+        return sanitized
+
+    __table_args__ = (
+        Index("ix_social_account_connections_organization_id", "organization_id"),
+        Index(
+            "ix_social_account_connections_organization_provider",
+            "organization_id",
+            "provider",
+        ),
+        Index(
+            "ix_social_account_connections_organization_status",
+            "organization_id",
+            "status",
+        ),
+        Index(
+            "ix_social_account_connections_organization_artist_profile",
+            "organization_id",
+            "artist_profile_id",
+        ),
+        Index(
+            "ix_social_account_connections_provider_external_account",
+            "provider",
+            "external_account_id",
+        ),
+        Index(
+            "uq_social_account_connections_org_provider_external",
+            "organization_id",
+            "provider",
+            "connection_method",
+            "external_account_id",
+            unique=True,
+            postgresql_where=(
+                external_account_id.is_not(None)
+                & (status != SocialAccountConnectionStatus.disconnected)
+            ),
+            sqlite_where=(
+                external_account_id.is_not(None)
+                & (status != SocialAccountConnectionStatus.disconnected)
+            ),
+        ),
     )
 
 
@@ -2461,6 +2789,10 @@ class MarketingContentItemChannel(Base, TimestampMixin):
         ForeignKey("marketing_content_items.id", ondelete="CASCADE"),
         nullable=False,
     )
+    social_account_connection_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("social_account_connections.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     channel: Mapped[str] = mapped_column(String(80), nullable=False)
     placement: Mapped[str] = mapped_column(
         String(80),
@@ -2490,6 +2822,7 @@ class MarketingContentItemChannel(Base, TimestampMixin):
     marketing_content_item: Mapped[MarketingContentItem] = relationship(
         back_populates="channels"
     )
+    social_account_connection: Mapped[SocialAccountConnection | None] = relationship()
 
     @validates("channel", "placement")
     def _validate_required_text(self, key: str, value: str | None) -> str:
@@ -2518,11 +2851,114 @@ class MarketingContentItemChannel(Base, TimestampMixin):
             "ix_marketing_content_item_channels_marketing_content_item_id",
             "marketing_content_item_id",
         ),
+        Index(
+            "ix_marketing_content_item_channels_social_account_connection_id",
+            "social_account_connection_id",
+        ),
         Index("ix_marketing_content_item_channels_channel", "channel"),
         Index(
             "ix_marketing_content_item_channels_channel_scheduled_at",
             "channel",
             "scheduled_at",
+        ),
+    )
+
+
+class OAuthAuthorizationState(Base, TimestampMixin, OrganizationOwnedMixin):
+    __tablename__ = "oauth_authorization_states"
+
+    id: Mapped[UUIDPrimaryKey]
+    state_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    actor_user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    provider: Mapped[str] = mapped_column(String(80), nullable=False)
+    connection_method: Mapped[SocialAccountConnectionMethod] = mapped_column(
+        Enum(
+            SocialAccountConnectionMethod,
+            name="social_account_connection_method",
+            values_callable=lambda methods: [method.value for method in methods],
+        ),
+        nullable=False,
+    )
+    status: Mapped[OAuthAuthorizationStateStatus] = mapped_column(
+        Enum(
+            OAuthAuthorizationStateStatus,
+            name="oauth_authorization_state_status",
+            values_callable=lambda statuses: [status.value for status in statuses],
+        ),
+        nullable=False,
+        default=OAuthAuthorizationStateStatus.pending,
+        server_default=OAuthAuthorizationStateStatus.pending.value,
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    safe_redirect_path: Mapped[str] = mapped_column(String(2048), nullable=False)
+    pkce_credential_ref: Mapped[str | None] = mapped_column(String(500))
+
+    organization: Mapped[Organization] = relationship(
+        back_populates="oauth_authorization_states"
+    )
+    actor_user: Mapped[User] = relationship(
+        back_populates="oauth_authorization_states",
+        foreign_keys=[actor_user_id],
+    )
+
+    @validates("state_hash")
+    def _validate_state_hash(self, key: str, value: str | None) -> str:
+        normalized = _required_text(value, key)
+        if len(normalized) != 64 or not all(
+            character in "0123456789abcdef" for character in normalized
+        ):
+            raise ValueError("state_hash must be a lowercase SHA-256 hex digest")
+        return normalized
+
+    @validates("provider")
+    def _validate_provider(self, key: str, value: str | None) -> str:
+        return _required_text(value, key).lower()
+
+    @validates("safe_redirect_path")
+    def _validate_safe_redirect_path(self, key: str, value: str | None) -> str:
+        normalized = _required_text(value, key)
+        parsed = urlparse(normalized)
+        if (
+            parsed.scheme
+            or parsed.netloc
+            or not normalized.startswith("/")
+            or normalized.startswith("//")
+            or "\\" in normalized
+        ):
+            raise ValueError("safe_redirect_path must be a relative application path")
+        return normalized
+
+    @validates("pkce_credential_ref")
+    def _validate_pkce_credential_ref(
+        self,
+        _key: str,
+        value: str | None,
+    ) -> str | None:
+        return _optional_text(value)
+
+    __table_args__ = (
+        UniqueConstraint("state_hash", name="uq_oauth_authorization_states_hash"),
+        Index("ix_oauth_authorization_states_organization_id", "organization_id"),
+        Index(
+            "ix_oauth_authorization_states_org_provider_method",
+            "organization_id",
+            "provider",
+            "connection_method",
+        ),
+        Index(
+            "ix_oauth_authorization_states_actor_user_id",
+            "actor_user_id",
+        ),
+        Index(
+            "ix_oauth_authorization_states_status_expires_at",
+            "status",
+            "expires_at",
         ),
     )
 

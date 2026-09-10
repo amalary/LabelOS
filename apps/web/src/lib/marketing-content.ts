@@ -20,11 +20,30 @@ export class MarketingContentApiError extends Error {
 export type MarketingContentItemStatus =
   "draft" | "in_review" | "approved" | "scheduled" | "published" | "cancelled" | "archived";
 
+export type MarketingContentDestinationAccount = {
+  id: string;
+  provider: string;
+  handle: string | null;
+  display_name: string | null;
+  connection_method: string;
+  status: string;
+};
+
+export type MarketingContentDestinationReadiness = {
+  planning_valid: boolean;
+  delivery_ready: boolean;
+  status: string;
+  label: string;
+  warning: string | null;
+  account: MarketingContentDestinationAccount | null;
+};
+
 export type MarketingContentItemChannel = {
   id: string;
   marketing_content_item_id: string;
   channel: string;
   placement: string | null;
+  social_account_connection_id: string | null;
   scheduled_at: string | null;
   published_at: string | null;
   external_post_id: string | null;
@@ -32,6 +51,7 @@ export type MarketingContentItemChannel = {
   copy_text_override: string | null;
   asset_refs: unknown[];
   metadata: Record<string, unknown>;
+  destination_readiness?: MarketingContentDestinationReadiness;
   created_at: string;
   updated_at: string;
 };
@@ -116,6 +136,7 @@ export type MarketingContentCampaignListOptions = {
 export type MarketingContentChannelCreate = {
   channel: string;
   placement?: string | null;
+  social_account_connection_id?: string | null;
   scheduled_at?: string | null;
   copy_text_override?: string | null;
   asset_refs?: unknown[] | null;

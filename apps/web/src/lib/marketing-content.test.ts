@@ -39,6 +39,7 @@ const marketingContentItem = {
       marketing_content_item_id: "content_01",
       channel: "instagram",
       placement: "feed",
+      social_account_connection_id: null,
       scheduled_at: "2026-09-10T12:00:00Z",
       published_at: null,
       external_post_id: null,

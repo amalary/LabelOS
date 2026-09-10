@@ -25,6 +25,11 @@ from labelos_api.services.marketing_content_service import (
     MarketingContentNotFoundError,
     MarketingContentRelationshipError,
 )
+from labelos_api.services.social_account_service import (
+    DestinationUnavailableReason,
+    ResolvedDestination,
+    resolved_destination_for_connection,
+)
 
 router = APIRouter(prefix="/workspaces", tags=["marketing-content"])
 
@@ -34,6 +39,7 @@ class MarketingContentChannelCreateRequest(BaseModel):
 
     channel: str = Field(min_length=1, max_length=80)
     placement: str | None = Field(default=None, max_length=80)
+    social_account_connection_id: UUID | None = None
     scheduled_at: datetime | None = None
     copy_text_override: str | None = Field(default=None, max_length=8000)
     asset_refs: list[Any] | None = None
@@ -100,6 +106,7 @@ class MarketingContentChannelResponse(BaseModel):
     marketing_content_item_id: UUID
     channel: str
     placement: str
+    social_account_connection_id: UUID | None
     scheduled_at: datetime | None
     published_at: datetime | None
     external_post_id: str | None
@@ -107,8 +114,27 @@ class MarketingContentChannelResponse(BaseModel):
     copy_text_override: str | None
     asset_refs: list[Any]
     metadata: dict[str, Any]
+    destination_readiness: "MarketingContentDestinationReadinessResponse"
     created_at: datetime
     updated_at: datetime
+
+
+class MarketingContentDestinationAccountResponse(BaseModel):
+    id: UUID
+    provider: str
+    handle: str | None
+    display_name: str | None
+    connection_method: str
+    status: str
+
+
+class MarketingContentDestinationReadinessResponse(BaseModel):
+    planning_valid: bool
+    delivery_ready: bool
+    status: str
+    label: str
+    warning: str | None
+    account: MarketingContentDestinationAccountResponse | None
 
 
 class MarketingContentApprovalStateResponse(BaseModel):
@@ -268,6 +294,7 @@ def _channel_response(
         marketing_content_item_id=channel.marketing_content_item_id,
         channel=channel.channel,
         placement=channel.placement,
+        social_account_connection_id=channel.social_account_connection_id,
         scheduled_at=channel.scheduled_at,
         published_at=channel.published_at,
         external_post_id=channel.external_post_id,
@@ -275,9 +302,125 @@ def _channel_response(
         copy_text_override=channel.copy_text_override,
         asset_refs=list(channel.asset_refs),
         metadata=dict(channel.metadata_json),
+        destination_readiness=_destination_readiness(channel),
         created_at=channel.created_at,
         updated_at=channel.updated_at,
     )
+
+
+def _destination_readiness(
+    channel: MarketingContentItemChannel,
+) -> MarketingContentDestinationReadinessResponse:
+    connection = channel.social_account_connection
+    if channel.social_account_connection_id is None or connection is None:
+        return MarketingContentDestinationReadinessResponse(
+            planning_valid=True,
+            delivery_ready=False,
+            status="missing_account",
+            label="No Account Selected",
+            warning=(
+                "Missing account is a delivery warning; content planning remains "
+                "valid."
+            ),
+            account=None,
+        )
+    destination = resolved_destination_for_connection(
+        connection,
+        workspace_id=connection.organization_id,
+        provider=channel.channel,
+    )
+    return _destination_readiness_response(destination)
+
+
+def _destination_readiness_response(
+    destination: ResolvedDestination,
+) -> MarketingContentDestinationReadinessResponse:
+    account = destination.account
+    publishing_capable = bool(
+        destination.supports_automatic_publication
+        or destination.requires_assisted_publication
+    )
+    reasons = list(destination.unavailable_reasons)
+    if not publishing_capable:
+        reasons.append(DestinationUnavailableReason.missing_capability)
+    unique_reasons = tuple(dict.fromkeys(reasons))
+    delivery_ready = destination.usable and publishing_capable
+    if delivery_ready and destination.supports_automatic_publication:
+        status = "ready"
+        label = "Ready"
+        warning = None
+    elif delivery_ready and destination.requires_assisted_publication:
+        status = "assisted"
+        label = "Assisted Publishing"
+        warning = "Delivery requires assisted publishing."
+    else:
+        status = _destination_unavailable_status(unique_reasons)
+        label = _destination_unavailable_label(status)
+        warning = _destination_unavailable_warning(status)
+    return MarketingContentDestinationReadinessResponse(
+        planning_valid=True,
+        delivery_ready=delivery_ready,
+        status=status,
+        label=label,
+        warning=warning,
+        account=MarketingContentDestinationAccountResponse(
+            id=account.id,
+            provider=account.provider,
+            handle=account.username,
+            display_name=account.display_name,
+            connection_method=account.connection_method.value,
+            status=account.status.value,
+        ),
+    )
+
+
+def _destination_unavailable_status(
+    reasons: tuple[DestinationUnavailableReason, ...],
+) -> str:
+    if DestinationUnavailableReason.disconnected in reasons:
+        return "disconnected"
+    if DestinationUnavailableReason.reconnect_required in reasons:
+        return "reconnect_required"
+    if DestinationUnavailableReason.connection_error in reasons:
+        return "connection_error"
+    if DestinationUnavailableReason.missing_capability in reasons:
+        return "missing_capability"
+    if DestinationUnavailableReason.provider_mismatch in reasons:
+        return "provider_mismatch"
+    if DestinationUnavailableReason.wrong_artist in reasons:
+        return "wrong_artist"
+    if DestinationUnavailableReason.wrong_workspace in reasons:
+        return "wrong_workspace"
+    return "unavailable"
+
+
+def _destination_unavailable_label(status_value: str) -> str:
+    labels = {
+        "disconnected": "Disconnected",
+        "reconnect_required": "Reconnect Required",
+        "connection_error": "Connection Error",
+        "missing_capability": "Missing Publishing Capability",
+        "provider_mismatch": "Provider Mismatch",
+        "wrong_artist": "Wrong Artist",
+        "wrong_workspace": "Wrong Workspace",
+    }
+    return labels.get(status_value, "Unavailable")
+
+
+def _destination_unavailable_warning(status_value: str) -> str:
+    warnings = {
+        "disconnected": (
+            "Selected account is disconnected; choose another account before "
+            "delivery."
+        ),
+        "reconnect_required": "Selected account must be reconnected before delivery.",
+        "connection_error": "Selected account needs attention before delivery.",
+        "missing_capability": "Selected account cannot publish this content.",
+        "provider_mismatch": "Selected account provider does not match this channel.",
+        "wrong_artist": "Selected account is attached to a different artist.",
+        "wrong_workspace": "Selected account belongs to a different workspace.",
+    }
+    return warnings.get(status_value, "Selected account is not delivery ready.")
 
 
 def _approval_state(

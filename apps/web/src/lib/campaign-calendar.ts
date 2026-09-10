@@ -54,10 +54,29 @@ export type CampaignCalendarReleaseContext = {
   artist_id: string | null;
 };
 
+export type CampaignCalendarDestinationAccountContext = {
+  id: string;
+  provider: string;
+  handle: string | null;
+  display_name: string | null;
+  connection_method: string;
+  status: string;
+};
+
+export type CampaignCalendarDestinationReadinessContext = {
+  planning_valid: boolean;
+  delivery_ready: boolean;
+  status: string;
+  label: string;
+  warning: string | null;
+  account: CampaignCalendarDestinationAccountContext | null;
+};
+
 export type CampaignCalendarChannelContext = {
   id: string;
   channel: string;
   placement: string;
+  destination_readiness?: CampaignCalendarDestinationReadinessContext | null;
 };
 
 export type CampaignCalendarApprovalContext = {
@@ -314,7 +333,12 @@ function normalizeCampaignCalendarResponse(
       campaign: event.campaign ?? null,
       artist: event.artist ?? null,
       release: event.release ?? null,
-      channel: event.channel ?? null,
+      channel: event.channel
+        ? {
+            ...event.channel,
+            destination_readiness: event.channel.destination_readiness ?? null,
+          }
+        : null,
       approval: event.approval
         ? {
             ...event.approval,

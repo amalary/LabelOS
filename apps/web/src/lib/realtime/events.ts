@@ -43,6 +43,10 @@ export type RealtimeEventType =
   | "marketing.content.approval_requested"
   | "marketing.content.approved"
   | "marketing.content.published"
+  | "marketing.social_account.connected"
+  | "marketing.social_account.updated"
+  | "marketing.social_account.disconnected"
+  | "marketing.social_account.health_changed"
   | "approval.updated"
   | "agent.started"
   | "agent.completed"
@@ -110,6 +114,10 @@ export const activityEventTypes = new Set<RealtimeEventType>([
   "marketing.content.approval_requested",
   "marketing.content.approved",
   "marketing.content.published",
+  "marketing.social_account.connected",
+  "marketing.social_account.updated",
+  "marketing.social_account.disconnected",
+  "marketing.social_account.health_changed",
   "approval.updated",
   "agent.started",
   "agent.completed",
@@ -161,6 +169,10 @@ export const refetchEventTypes = new Set<RealtimeEventType>([
   "marketing.content.approval_requested",
   "marketing.content.approved",
   "marketing.content.published",
+  "marketing.social_account.connected",
+  "marketing.social_account.updated",
+  "marketing.social_account.disconnected",
+  "marketing.social_account.health_changed",
   "approval.updated",
   "agent.started",
   "agent.completed",

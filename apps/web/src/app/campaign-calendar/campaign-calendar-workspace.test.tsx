@@ -284,7 +284,26 @@ describe("CampaignCalendarWorkspace", () => {
         source_type: "marketing_content_channel",
         source_id: "channel_01",
         title: "TikTok cutdown",
-        channel: { id: "channel_01", channel: "tiktok", placement: "feed" },
+        channel: {
+          id: "channel_01",
+          channel: "tiktok",
+          placement: "feed",
+          destination_readiness: {
+            account: {
+              connection_method: "assisted",
+              display_name: "Mira TikTok",
+              handle: "@mira",
+              id: "connection_assisted",
+              provider: "tiktok",
+              status: "connected",
+            },
+            delivery_ready: true,
+            label: "Assisted Publishing",
+            planning_valid: true,
+            status: "assisted",
+            warning: "Delivery requires assisted publishing.",
+          },
+        },
         sort_key: "2026-09-10T18:00:00Z|marketing.content.channel_scheduled|channel_01",
       }),
       event({
@@ -318,6 +337,7 @@ describe("CampaignCalendarWorkspace", () => {
     expect(
       within(day).getByRole("button", { name: "Channel schedule: TikTok cutdown" }),
     ).toBeInTheDocument();
+    expect(within(day).getByText("Tiktok @mira Assisted Publishing")).toBeInTheDocument();
     expect(within(day).getByText("CHAN")).toBeInTheDocument();
     expect(
       within(day).getByRole("button", { name: "Approval requested: Approval requested" }),
