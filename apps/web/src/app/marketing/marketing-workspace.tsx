@@ -54,7 +54,9 @@ import {
   type SocialAccountProvider,
   useCreateAssistedSocialAccountConnection,
   useDisconnectSocialAccountConnection,
+  navigateToSocialAccountAuthorization,
   useSocialAccountConnections,
+  useStartSocialAccountOAuthConnection,
   useUpdateSocialAccountConnection,
 } from "../../lib/social-account-connections";
 import { useActiveWorkspace, useActiveWorkspaceProfile } from "../../lib/workspace-context";
@@ -2851,6 +2853,10 @@ function capabilityText(connection: SocialAccountConnection): string {
   return labels.length ? labels.join(", ") : "No capabilities configured";
 }
 
+function isYouTubeDirectOAuthEnabled(): boolean {
+  return process.env.NEXT_PUBLIC_YOUTUBE_DIRECT_OAUTH_ENABLED === "true";
+}
+
 function SocialAccountsTab({
   campaigns,
   canManage,
@@ -2866,11 +2872,13 @@ function SocialAccountsTab({
     offset: 0,
   });
   const create = useCreateAssistedSocialAccountConnection(workspaceId);
+  const youtubeOAuth = useStartSocialAccountOAuthConnection(workspaceId);
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState<SocialAccountFormState>(() => emptySocialAccountForm());
   const [clientError, setClientError] = useState<string | null>(null);
   const accountItems = accounts.data?.social_account_connections ?? [];
   const artistOptions = campaignArtistOptions(campaigns);
+  const youtubeDirectOAuthEnabled = isYouTubeDirectOAuthEnabled();
 
   function updateCapability(capability: SocialAccountCapability, checked: boolean) {
     setForm((current) => ({
@@ -2905,6 +2913,21 @@ function SocialAccountsTab({
     }
   }
 
+  async function connectYouTube() {
+    setClientError(null);
+    try {
+      const redirectUri = `${window.location.origin}/api/social-account-connections/oauth/youtube/callback`;
+      const result = await youtubeOAuth.mutate({
+        provider: "youtube",
+        redirect_uri: redirectUri,
+        safe_redirect_path: "/marketing?tab=accounts",
+      });
+      navigateToSocialAccountAuthorization(result.authorization_url);
+    } catch (error) {
+      setClientError((error as Error).message);
+    }
+  }
+
   return (
     <section className="grid gap-4" aria-label="Social account connections">
       <Card className="grid gap-1">
@@ -2912,11 +2935,22 @@ function SocialAccountsTab({
           <div>
             <h2 className="text-lg font-semibold text-slate-950">Social Account Connections</h2>
             <p className="text-sm text-slate-500">
-              Registered social accounts using Assisted Mode until provider OAuth is available.
+              Registered destinations for assisted and direct provider workflows.
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <Badge>{accountItems.length} accounts</Badge>
+            {canManage && youtubeDirectOAuthEnabled ? (
+              <Button
+                disabled={youtubeOAuth.isMutating}
+                onClick={connectYouTube}
+                size="sm"
+                type="button"
+                variant="secondary"
+              >
+                {youtubeOAuth.isMutating ? "Connecting..." : "Connect YouTube"}
+              </Button>
+            ) : null}
             {canManage ? (
               <Button onClick={() => setShowForm((current) => !current)} size="sm" type="button">
                 {showForm ? "Close" : "Register Account"}
@@ -2944,9 +2978,17 @@ function SocialAccountsTab({
               <div className="rounded-md border border-slate-200 p-3" key={provider}>
                 <p className="text-sm font-semibold text-slate-950">{providerLabel(provider)}</p>
                 <p className="mt-1 text-xs text-slate-500">
-                  {count ? `${count} registered` : "Direct connection not yet available"}
+                  {count
+                    ? `${count} registered`
+                    : provider === "youtube" && youtubeDirectOAuthEnabled
+                      ? "Ready for direct connection"
+                      : "Direct connection not yet available"}
                 </p>
-                <p className="mt-2 text-xs font-medium text-slate-700">Assisted Mode supported</p>
+                <p className="mt-2 text-xs font-medium text-slate-700">
+                  {provider === "youtube" && youtubeDirectOAuthEnabled
+                    ? "Direct API supported"
+                    : "Assisted Mode supported"}
+                </p>
               </div>
             );
           })}

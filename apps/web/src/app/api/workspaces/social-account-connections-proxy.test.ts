@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ApiClientError, apiFetch } from "../../../lib/api-client";
+import { GET as globalOauthCallback } from "../social-account-connections/oauth/[provider]/callback/route";
 import { GET as oauthCallback } from "./[workspaceId]/social-account-connections/oauth/[provider]/callback/route";
 import { POST as oauthStart } from "./[workspaceId]/social-account-connections/oauth/start/route";
 import { POST as checkHealth } from "./[workspaceId]/social-account-connections/[connectionId]/health/route";
@@ -26,6 +27,9 @@ const connectionContext = {
 };
 const callbackContext = {
   params: Promise.resolve({ workspaceId: "workspace_01", provider: "youtube" }),
+};
+const globalCallbackContext = {
+  params: Promise.resolve({ provider: "youtube" }),
 };
 
 describe("social account connections proxy routes", () => {
@@ -79,6 +83,32 @@ describe("social account connections proxy routes", () => {
     expect(response.status).toBe(303);
     expect(response.headers.get("location")).toBe(
       "/workspace/settings?tab=connections&oauth=connected",
+    );
+  });
+
+  it("forwards stable OAuth callback requests without a workspace path segment", async () => {
+    vi.mocked(apiFetch).mockResolvedValue(
+      new Response(null, {
+        status: 303,
+        headers: { Location: "/marketing?tab=accounts&oauth=connected" },
+      }),
+    );
+
+    const response = await globalOauthCallback(
+      new Request(
+        "https://app.labelos.test/api/social-account-connections/oauth/youtube/callback?state=state_01&code=code_01",
+      ),
+      globalCallbackContext,
+    );
+
+    expect(apiFetch).toHaveBeenCalledWith(
+      "/api/v1/social-account-connections/oauth/youtube/callback" +
+        "?state=state_01&code=code_01&redirect_uri=https%3A%2F%2Fapp.labelos.test%2Fapi%2Fsocial-account-connections%2Foauth%2Fyoutube%2Fcallback",
+      expect.objectContaining({ redirect: "manual" }),
+    );
+    expect(response.status).toBe(303);
+    expect(response.headers.get("location")).toBe(
+      "/marketing?tab=accounts&oauth=connected",
     );
   });
 

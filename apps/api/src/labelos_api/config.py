@@ -77,6 +77,20 @@ class Settings(DatabaseSettings):
             _ = self.resolved_workos_jwks_url
 
         self.validate_credential_store_backend()
+        self.validate_youtube_oauth_configuration()
+
+    def validate_youtube_oauth_configuration(self) -> None:
+        configured = bool(self.youtube_oauth_client_id) or bool(
+            self.youtube_oauth_client_secret
+        )
+        complete = bool(self.youtube_oauth_client_id) and bool(
+            self.youtube_oauth_client_secret
+        )
+        if configured and not complete:
+            raise RuntimeError(
+                "YOUTUBE_OAUTH_CLIENT_ID and YOUTUBE_OAUTH_CLIENT_SECRET must be "
+                "configured together for YouTube direct OAuth"
+            )
 
     def validate_credential_store_backend(self) -> None:
         if not self.requires_strict_startup_validation:

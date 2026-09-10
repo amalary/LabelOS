@@ -25,6 +25,8 @@ const mutationMocks = vi.hoisted(() => ({
   create: vi.fn(),
   socialCreate: vi.fn(),
   socialDisconnect: vi.fn(),
+  socialNavigate: vi.fn(),
+  socialOAuthStart: vi.fn(),
   socialUpdate: vi.fn(),
   status: vi.fn(),
   update: vi.fn(),
@@ -67,6 +69,8 @@ const socialHookState = vi.hoisted(() => ({
   list: null as SocialAccountConnectionsList | null,
   listError: null as Error | null,
   listLoading: false,
+  oauthStartError: null as Error | null,
+  oauthStartMutating: false,
   listReload: vi.fn(),
   updateError: null as Error | null,
   updateMutating: false,
@@ -201,6 +205,7 @@ vi.mock("../../lib/social-account-connections", async () => {
   );
   return {
     ...actual,
+    navigateToSocialAccountAuthorization: mutationMocks.socialNavigate,
     useCreateAssistedSocialAccountConnection: vi.fn(() => ({
       data: null,
       error: socialHookState.createError,
@@ -221,6 +226,13 @@ vi.mock("../../lib/social-account-connections", async () => {
       isLoading: socialHookState.listLoading,
       isMutating: false,
       reload: socialHookState.listReload,
+    })),
+    useStartSocialAccountOAuthConnection: vi.fn(() => ({
+      data: null,
+      error: socialHookState.oauthStartError,
+      isMutating: socialHookState.oauthStartMutating,
+      mutate: mutationMocks.socialOAuthStart,
+      reset: vi.fn(),
     })),
     useUpdateSocialAccountConnection: vi.fn(() => ({
       data: null,
@@ -683,6 +695,8 @@ describe("MarketingWorkspace", () => {
     socialHookState.listError = null;
     socialHookState.listLoading = false;
     socialHookState.listReload = vi.fn();
+    socialHookState.oauthStartError = null;
+    socialHookState.oauthStartMutating = false;
     socialHookState.updateError = null;
     socialHookState.updateMutating = false;
     realtimeHookState.recentActivityEvents = [];
@@ -705,6 +719,12 @@ describe("MarketingWorkspace", () => {
     mutationMocks.create.mockResolvedValue(item({ status: "draft" }));
     mutationMocks.socialCreate.mockResolvedValue(socialConnection());
     mutationMocks.socialDisconnect.mockResolvedValue(socialConnection({ status: "disconnected" }));
+    mutationMocks.socialOAuthStart.mockResolvedValue({
+      authorization_url: "https://accounts.google.com/o/oauth2/v2/auth?state=state_01",
+      expires_at: "2026-09-07T12:10:00Z",
+      scopes: ["https://www.googleapis.com/auth/youtube.readonly"],
+      state: "state_01",
+    });
     mutationMocks.socialUpdate.mockResolvedValue(socialConnection({ display_name: "Mira Final" }));
     mutationMocks.update.mockResolvedValue(item({ title: "Updated Teaser" }));
     mutationMocks.status.mockResolvedValue(item({ status: "in_review" }));
@@ -723,6 +743,7 @@ describe("MarketingWorkspace", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    vi.unstubAllEnvs();
   });
 
   it("renders month content with one multi-channel item instead of duplicate cards", () => {
@@ -2639,6 +2660,32 @@ describe("MarketingWorkspace", () => {
       limit: 100,
       offset: 0,
     });
+  });
+
+  it("starts configured direct YouTube OAuth from social accounts", async () => {
+    vi.useRealTimers();
+    vi.stubEnv("NEXT_PUBLIC_YOUTUBE_DIRECT_OAUTH_ENABLED", "true");
+    mockWorkspaceProfile([
+      "marketing.content.view",
+      "marketing.account.view",
+      "marketing.account.manage",
+    ]);
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Accounts" }));
+    expect(screen.getByText("Ready for direct connection")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Connect YouTube" }));
+
+    await waitFor(() =>
+      expect(mutationMocks.socialOAuthStart).toHaveBeenCalledWith({
+        provider: "youtube",
+        redirect_uri:
+          "http://localhost:3000/api/social-account-connections/oauth/youtube/callback",
+        safe_redirect_path: "/marketing?tab=accounts",
+      }),
+    );
+    expect(mutationMocks.socialNavigate).toHaveBeenCalledWith(
+      "https://accounts.google.com/o/oauth2/v2/auth?state=state_01",
+    );
   });
 
   it("registers an assisted social account with safe metadata", async () => {

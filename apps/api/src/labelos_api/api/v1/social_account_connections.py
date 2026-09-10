@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import RedirectResponse
 from labelos_database.models import (
     SocialAccountConnection,
+    SocialAccountConnectionMethod,
     SocialAccountConnectionStatus,
     WorkspaceMembership,
 )
@@ -15,7 +16,11 @@ from sqlalchemy import select
 
 from labelos_api.auth import CurrentUserContext, SessionDep, get_current_user_context
 from labelos_api.config import Settings, get_settings
-from labelos_api.services import oauth_connection_service, social_account_service
+from labelos_api.services import (
+    oauth_connection_service,
+    oauth_state_service,
+    social_account_service,
+)
 from labelos_api.services.credential_store import (
     CredentialStore,
     CredentialStoreError,
@@ -44,6 +49,10 @@ from labelos_api.social_accounts.providers import (
 )
 
 router = APIRouter(prefix="/workspaces", tags=["social-account-connections"])
+oauth_router = APIRouter(
+    prefix="/social-account-connections",
+    tags=["social-account-connections"],
+)
 
 SENSITIVE_METADATA_KEY_PARTS = frozenset(
     {
@@ -408,8 +417,54 @@ async def start_social_account_oauth_connection(
     )
 
 
+@oauth_router.get("/oauth/{provider}/callback")
+async def complete_global_social_account_oauth_connection(
+    request: Request,
+    provider: str,
+    session: SessionDep,
+    context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
+    credential_store: Annotated[
+        CredentialStore,
+        Depends(get_credential_store_dependency),
+    ],
+    registry: Annotated[
+        SocialAccountProviderRegistry,
+        Depends(get_social_account_provider_registry),
+    ],
+    state: str | None = None,
+    code: str | None = None,
+    error: str | None = None,
+    redirect_uri: str | None = None,
+) -> RedirectResponse:
+    workspace_id = await oauth_state_service.workspace_id_for_state(
+        session,
+        state=state,
+        actor_user_id=context.user.id,
+        provider=provider,
+        connection_method=SocialAccountConnectionMethod.direct_api,
+    )
+    if workspace_id is None:
+        return RedirectResponse(
+            _oauth_redirect("/workspace/settings?tab=connections", "failed"),
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+    return await _complete_social_account_oauth_connection(
+        request=request,
+        workspace_id=workspace_id,
+        provider=provider,
+        session=session,
+        context=context,
+        credential_store=credential_store,
+        registry=registry,
+        state=state,
+        code=code,
+        error=error,
+        redirect_uri=redirect_uri,
+    )
+
+
 @router.get("/{workspace_id}/social-account-connections/oauth/{provider}/callback")
-async def complete_social_account_oauth_connection(
+async def complete_workspace_social_account_oauth_connection(
     request: Request,
     workspace_id: UUID,
     provider: str,
@@ -427,6 +482,35 @@ async def complete_social_account_oauth_connection(
     code: str | None = None,
     error: str | None = None,
     redirect_uri: str | None = None,
+) -> RedirectResponse:
+    return await _complete_social_account_oauth_connection(
+        request=request,
+        workspace_id=workspace_id,
+        provider=provider,
+        session=session,
+        context=context,
+        credential_store=credential_store,
+        registry=registry,
+        state=state,
+        code=code,
+        error=error,
+        redirect_uri=redirect_uri,
+    )
+
+
+async def _complete_social_account_oauth_connection(
+    *,
+    request: Request,
+    workspace_id: UUID,
+    provider: str,
+    session: SessionDep,
+    context: CurrentUserContext,
+    credential_store: CredentialStore,
+    registry: SocialAccountProviderRegistry,
+    state: str | None,
+    code: str | None,
+    error: str | None,
+    redirect_uri: str | None,
 ) -> RedirectResponse:
     redirect_path = "/workspace/settings?tab=connections&oauth=failed"
     try:
@@ -451,20 +535,45 @@ async def complete_social_account_oauth_connection(
         SocialAccountRelationshipError,
     ) as exc:
         _service_error(exc)
-    except OAuthConnectionError as exc:
-        redirect_path = _oauth_failure_redirect(session, state, str(exc))
-    except (OAuthStateError, SocialAccountProviderError, CredentialStoreError) as exc:
-        redirect_path = _oauth_failure_redirect(session, state, str(exc))
+    except OAuthConnectionError:
+        redirect_path = await _oauth_failure_redirect_for_state(
+            session,
+            state=state,
+            workspace_id=workspace_id,
+            actor_user_id=context.user.id,
+            provider=provider,
+        )
+    except (OAuthStateError, SocialAccountProviderError, CredentialStoreError):
+        redirect_path = await _oauth_failure_redirect_for_state(
+            session,
+            state=state,
+            workspace_id=workspace_id,
+            actor_user_id=context.user.id,
+            provider=provider,
+        )
     return RedirectResponse(redirect_path, status_code=status.HTTP_303_SEE_OTHER)
 
 
-def _oauth_failure_redirect(
+async def _oauth_failure_redirect_for_state(
     session: SessionDep,
+    *,
     state: str | None,
-    _detail: str,
+    workspace_id: UUID,
+    actor_user_id: UUID,
+    provider: str,
 ) -> str:
-    # Failure redirects intentionally carry only status, never provider tokens/codes.
-    return _oauth_redirect("/workspace/settings?tab=connections", "failed")
+    redirect_path = await oauth_state_service.safe_redirect_path_for_state(
+        session,
+        state=state,
+        workspace_id=workspace_id,
+        actor_user_id=actor_user_id,
+        provider=provider,
+        connection_method=SocialAccountConnectionMethod.direct_api,
+    )
+    return _oauth_redirect(
+        redirect_path or "/workspace/settings?tab=connections",
+        "failed",
+    )
 
 
 def _request_url_without_query(request: Request) -> str:

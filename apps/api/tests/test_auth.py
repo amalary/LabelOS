@@ -9,7 +9,6 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
-from sqlalchemy.exc import IntegrityError
 from labelos_database.capabilities import (
     CAPABILITY_REGISTRY,
     is_valid_capability_identifier,
@@ -21,6 +20,7 @@ from labelos_database.models import (
     User,
     WorkspacePermission,
 )
+from sqlalchemy.exc import IntegrityError
 
 from labelos_api.auth import (
     AuthenticatedPrincipal,
@@ -1299,3 +1299,46 @@ def test_workos_jwks_url_defaults_to_client_id() -> None:
     assert settings.resolved_workos_jwks_url == (
         "https://api.workos.com/sso/jwks/client_01TEST"
     )
+
+
+@pytest.mark.parametrize(
+    ("client_id", "client_secret"),
+    [
+        ("youtube-client", None),
+        (None, "youtube-secret"),
+    ],
+)
+def test_production_startup_requires_complete_youtube_oauth_credentials(
+    client_id: str | None,
+    client_secret: str | None,
+) -> None:
+    settings = Settings(
+        environment="production",
+        auth_provider="workos",
+        workos_client_id="client_01TEST",
+        workos_issuer_url="https://api.workos.com",
+        workos_webhook_secret="whsec_01TEST",
+        credential_store_backend="gcp-secret-manager",
+        credential_store_gcp_project_id="labelos-prod",
+        youtube_oauth_client_id=client_id,
+        youtube_oauth_client_secret=client_secret,
+    )
+
+    with pytest.raises(RuntimeError, match="YOUTUBE_OAUTH_CLIENT_ID"):
+        settings.validate_startup_environment()
+
+
+def test_production_startup_allows_disabled_youtube_oauth() -> None:
+    settings = Settings(
+        environment="production",
+        auth_provider="workos",
+        workos_client_id="client_01TEST",
+        workos_issuer_url="https://api.workos.com",
+        workos_webhook_secret="whsec_01TEST",
+        credential_store_backend="gcp-secret-manager",
+        credential_store_gcp_project_id="labelos-prod",
+        youtube_oauth_client_id=None,
+        youtube_oauth_client_secret=None,
+    )
+
+    settings.validate_startup_environment()

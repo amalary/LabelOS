@@ -670,6 +670,10 @@ export async function startSocialAccountOAuthConnection(
   );
 }
 
+export function navigateToSocialAccountAuthorization(authorizationUrl: string): void {
+  window.location.assign(authorizationUrl);
+}
+
 export async function checkSocialAccountConnectionHealth(
   workspaceId: string,
   connectionId: string,

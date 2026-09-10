@@ -248,6 +248,68 @@ async def consume_state(
     return OAuthStateConsumption(record=consumed, pkce_payload=pkce_payload)
 
 
+async def safe_redirect_path_for_state(
+    session: AsyncSession,
+    *,
+    state: str | None,
+    workspace_id: UUID,
+    actor_user_id: UUID,
+    provider: str,
+    connection_method: SocialAccountConnectionMethod | str,
+) -> str | None:
+    try:
+        normalized_state = _validate_state_nonce(state)
+        expected_provider = canonical_provider_key(provider)
+        expected_method = _coerce_method(connection_method)
+    except OAuthStateError:
+        return None
+
+    record = await oauth_states.get_state_by_hash(
+        session,
+        _state_hash(normalized_state),
+    )
+    if record is None:
+        return None
+    if (
+        record.organization_id != workspace_id
+        or record.actor_user_id != actor_user_id
+        or record.provider != expected_provider
+        or record.connection_method != expected_method
+    ):
+        return None
+    return record.safe_redirect_path
+
+
+async def workspace_id_for_state(
+    session: AsyncSession,
+    *,
+    state: str | None,
+    actor_user_id: UUID,
+    provider: str,
+    connection_method: SocialAccountConnectionMethod | str,
+) -> UUID | None:
+    try:
+        normalized_state = _validate_state_nonce(state)
+        expected_provider = canonical_provider_key(provider)
+        expected_method = _coerce_method(connection_method)
+    except OAuthStateError:
+        return None
+
+    record = await oauth_states.get_state_by_hash(
+        session,
+        _state_hash(normalized_state),
+    )
+    if record is None:
+        return None
+    if (
+        record.actor_user_id != actor_user_id
+        or record.provider != expected_provider
+        or record.connection_method != expected_method
+    ):
+        return None
+    return record.organization_id
+
+
 async def cleanup_expired_states(
     session: AsyncSession,
     *,

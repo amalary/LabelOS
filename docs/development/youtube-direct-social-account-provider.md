@@ -41,3 +41,27 @@ returned by the token endpoint, not from requested scopes.
 Google revocation invalidates OAuth scopes previously granted to the project and
 can invalidate access or refresh tokens for clients registered under that
 project.
+
+## Production Enablement Checklist
+
+Keep `NEXT_PUBLIC_YOUTUBE_DIRECT_OAUTH_ENABLED=false` until the backend has both
+`YOUTUBE_OAUTH_CLIENT_ID` and `YOUTUBE_OAUTH_CLIENT_SECRET` configured. In
+production-like environments, LabelOS startup rejects a partial YouTube OAuth
+configuration so the direct provider cannot be accidentally half-enabled.
+
+Register this Authorized redirect URI on the Google OAuth web client before
+turning on the web feature flag:
+
+```text
+https://<your-web-domain>/api/social-account-connections/oauth/youtube/callback
+```
+
+Local testing uses the same path under `http://localhost:3000`. The callback
+route resolves the LabelOS workspace from the OAuth state record; the workspace
+id is intentionally not part of the registered provider redirect URI.
+
+The Marketing Accounts UI starts OAuth with
+`safe_redirect_path=/marketing?tab=accounts`. Successful and expected failed
+callbacks append only `oauth=connected` or `oauth=failed` to that safe relative
+path; provider codes, tokens, and error descriptions are not placed in the
+redirect URL.

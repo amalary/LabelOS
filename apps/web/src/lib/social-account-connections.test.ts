@@ -192,7 +192,7 @@ describe("social account connections data layer", () => {
       startSocialAccountOAuthConnection("workspace_01", {
         provider: "youtube",
         redirect_uri:
-          "https://app.labelos.test/api/workspaces/workspace_01/social-account-connections/oauth/youtube/callback",
+          "https://app.labelos.test/api/social-account-connections/oauth/youtube/callback",
         scopes: ["publish"],
       }),
     ).resolves.toMatchObject({ state: "state_01" });
