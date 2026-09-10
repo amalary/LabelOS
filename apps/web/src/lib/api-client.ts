@@ -127,7 +127,7 @@ export async function apiFetch(path: string, init: ApiFetchInit = {}): Promise<R
   let refreshedAccessToken: string;
   try {
     refreshedAccessToken = await refreshAccessTokenForApi();
-  } catch (error) {
+  } catch {
     return assertAuthorizedResponse(response);
   }
 
