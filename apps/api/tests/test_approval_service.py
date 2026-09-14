@@ -23,8 +23,7 @@ from labelos_database.models import (
     WorkspacePermission,
 )
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from labelos_api.authorization import ActorKind, AuthorizationActor
 from labelos_api.repositories.approval_resources import (
@@ -99,12 +98,8 @@ def _agent_actor(user: User, *, execution_id: str = "exec_approval_test") -> Age
 
 
 @pytest.fixture
-def sessionmaker() -> Iterator[async_sessionmaker[AsyncSession]]:
-    engine = create_async_engine(
-        "sqlite+aiosqlite://",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
+def sessionmaker(database_test_engine) -> Iterator[async_sessionmaker[AsyncSession]]:
+    engine = database_test_engine
 
     async def prepare_database() -> None:
         async with engine.begin() as connection:
@@ -112,7 +107,6 @@ def sessionmaker() -> Iterator[async_sessionmaker[AsyncSession]]:
 
     asyncio.run(prepare_database())
     yield async_sessionmaker(bind=engine, expire_on_commit=False)
-    asyncio.run(engine.dispose())
 
 
 async def _seed_actor(

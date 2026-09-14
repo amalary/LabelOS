@@ -89,17 +89,7 @@ MATERIAL_FIELDS = frozenset(
         "scheduled_at",
     }
 )
-CHANNEL_MATERIAL_FIELDS = frozenset(
-    {
-        "channel",
-        "placement",
-        "social_account_connection_id",
-        "scheduled_at",
-        "copy_text_override",
-        "asset_refs",
-        "metadata_json",
-    }
-)
+CHANNEL_MATERIAL_FIELDS = marketing_content.CHANNEL_MATERIAL_FIELDS
 PUBLISHING_CAPABILITY_FIELDS = frozenset({"content_publish", "manual_publish"})
 ALLOWED_MARKETING_CONTENT_TRANSITIONS: dict[
     MarketingContentItemStatus, frozenset[MarketingContentItemStatus]
@@ -824,50 +814,6 @@ def _changed_fields(
     }
 
 
-def _changed_channel_fields(
-    channel: MarketingContentItemChannel,
-    values: Mapping[str, object],
-) -> set[str]:
-    return {
-        field
-        for field, value in values.items()
-        if _value_changed(getattr(channel, field), value)
-    }
-
-
-def _channel_signature(channel: MarketingContentItemChannel) -> tuple:
-    return (
-        channel.channel,
-        channel.placement,
-        channel.social_account_connection_id,
-        channel.scheduled_at,
-        channel.copy_text_override,
-        list(channel.asset_refs),
-        dict(channel.metadata_json),
-    )
-
-
-def _channel_values_signature(values: Mapping[str, object]) -> tuple:
-    return (
-        values.get("channel"),
-        values.get("placement"),
-        values.get("social_account_connection_id"),
-        values.get("scheduled_at"),
-        values.get("copy_text_override"),
-        list(values.get("asset_refs", [])),
-        dict(values.get("metadata_json", {})),
-    )
-
-
-def _replacement_channels_materially_changed(
-    item: MarketingContentItem,
-    channel_values: Sequence[Mapping[str, object]],
-) -> bool:
-    current = sorted(_channel_signature(channel) for channel in item.channels)
-    proposed = sorted(_channel_values_signature(values) for values in channel_values)
-    return current != proposed
-
-
 async def _apply_material_change(
     session: AsyncSession,
     *,
@@ -933,7 +879,9 @@ async def _load_content_item_for_workspace(
     workspace_id: UUID,
     content_item_id: UUID,
 ) -> MarketingContentItem:
-    item = await marketing_content.get_item(session, workspace_id, content_item_id)
+    item = await marketing_content.get_item_for_update(
+        session, content_item_id, workspace_id=workspace_id
+    )
     if item is None:
         raise MarketingContentNotFoundError("Marketing content item not found")
     return item
@@ -1278,6 +1226,7 @@ async def update_content_item(
     )
     values = _update_values(payload)
     if not values:
+        await session.commit()
         return item
     relationship_values = dict(values)
     relationship_values.setdefault("campaign_id", item.campaign_id)
@@ -1288,6 +1237,7 @@ async def update_content_item(
     await _validate_item_relationships(session, workspace_id, relationship_values)
     changed_fields = _changed_fields(item, values)
     if not changed_fields:
+        await session.commit()
         return item
     material_change = bool(payload.material_change and changed_fields & MATERIAL_FIELDS)
     if material_change:
@@ -1360,44 +1310,44 @@ async def update_content_item_with_channels(
         channel_values=channel_values,
     )
     changed_fields = _changed_fields(item, values) if values else set()
-    channel_material_change = _replacement_channels_materially_changed(
-        item,
-        channel_values,
-    )
+    reconciliation = marketing_content.plan_channel_reconciliation(item, channel_values)
     item_material_change = bool(
         payload.material_change and changed_fields & MATERIAL_FIELDS
     )
-    if not changed_fields and not channel_material_change:
+    if not changed_fields and not reconciliation.changed:
+        await session.commit()
         return item
-    if item_material_change or channel_material_change:
-        await _apply_material_change(
+    try:
+        if item_material_change or reconciliation.material_change:
+            await _apply_material_change(
+                session,
+                workspace_id=workspace_id,
+                item=item,
+                actor=actor,
+            )
+        if changed_fields:
+            updated = await marketing_content.update_item(
+                session,
+                workspace_id,
+                content_item_id,
+                {key: values[key] for key in changed_fields},
+            )
+            if updated is None:
+                raise MarketingContentNotFoundError("Marketing content item not found")
+            item = updated
+        await marketing_content.apply_channel_reconciliation(session, reconciliation)
+        await _publish_content_event(
             session,
             workspace_id=workspace_id,
-            item=item,
+            event_type=RealtimeEventType.marketing_content_updated,
             actor=actor,
+            item=item,
+            status=item.status,
         )
-    if changed_fields:
-        updated = await marketing_content.update_item(
-            session,
-            workspace_id,
-            content_item_id,
-            {key: values[key] for key in changed_fields},
-        )
-        if updated is None:
-            raise MarketingContentNotFoundError("Marketing content item not found")
-        item = updated
-    if channel_material_change:
-        await marketing_content.replace_channels(session, item.id, channel_values)
-        session.expire(item, ["channels"])
-    await _publish_content_event(
-        session,
-        workspace_id=workspace_id,
-        event_type=RealtimeEventType.marketing_content_updated,
-        actor=actor,
-        item=item,
-        status=item.status,
-    )
-    await session.commit()
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        raise
     return await get_content_item(session, workspace_id, item.id)
 
 
@@ -1409,48 +1359,14 @@ async def replace_channels(
     *,
     actor: AuthorizationActorInput | None = None,
 ) -> MarketingContentItem:
-    item = await _load_content_item_for_workspace(
+    return await update_content_item_with_channels(
         session,
         workspace_id,
         content_item_id,
-    )
-    await _require_capability(
-        session,
-        actor=actor,
-        workspace_id=workspace_id,
-        capability=Capability.marketing_content_edit,
-        campaign_id=item.campaign_id,
-    )
-    channel_values = [_channel_create_values(channel) for channel in channels]
-    _assert_unique_channel_targets(channel_values)
-    await _validate_channel_destinations(
-        session,
-        workspace_id,
-        campaign_id=item.campaign_id,
-        artist_id=item.artist_id,
-        channel_values=channel_values,
-    )
-    material_change = _replacement_channels_materially_changed(item, channel_values)
-    if not material_change:
-        return item
-    await marketing_content.replace_channels(session, item.id, channel_values)
-    session.expire(item, ["channels"])
-    await _apply_material_change(
-        session,
-        workspace_id=workspace_id,
-        item=item,
+        MarketingContentItemUpdate(),
+        channels,
         actor=actor,
     )
-    await _publish_content_event(
-        session,
-        workspace_id=workspace_id,
-        event_type=RealtimeEventType.marketing_content_updated,
-        actor=actor,
-        item=item,
-        status=item.status,
-    )
-    await session.commit()
-    return await get_content_item(session, workspace_id, item.id)
 
 
 async def update_channel(
@@ -1479,17 +1395,20 @@ async def update_channel(
         raise MarketingContentNotFoundError("Marketing content channel not found")
     values = _channel_update_values(payload)
     if not values:
+        await session.commit()
         return channel
-    changed_fields = _changed_channel_fields(channel, values)
+    changed_fields = marketing_content.changed_channel_fields(channel, values)
     if not changed_fields:
+        await session.commit()
         return channel
     prospective = []
     for row in item.channels:
+        row_values = values if row.id == channel_id else {}
         prospective.append(
             {
-                "channel": values.get("channel", row.channel),
-                "placement": values.get("placement", row.placement),
-                "social_account_connection_id": values.get(
+                "channel": row_values.get("channel", row.channel),
+                "placement": row_values.get("placement", row.placement),
+                "social_account_connection_id": row_values.get(
                     "social_account_connection_id",
                     row.social_account_connection_id,
                 ),
@@ -1546,6 +1465,7 @@ async def transition_status(
     )
     next_status = _assert_transition_allowed(item.status, status)
     if next_status == item.status:
+        await session.commit()
         return item
     if next_status == MarketingContentItemStatus.in_review:
         try:

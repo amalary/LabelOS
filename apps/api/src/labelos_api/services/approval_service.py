@@ -269,9 +269,12 @@ async def _load_resource(
     workspace_id: UUID,
     resource_type: str,
     resource_id: UUID,
+    for_update: bool = False,
 ) -> tuple[ApprovalResourceAdapter, object]:
     adapter = _adapter(resource_type)
-    resource = await adapter.resolve(session, workspace_id, resource_id)
+    resource = await adapter.resolve(
+        session, workspace_id, resource_id, for_update=for_update
+    )
     if resource is None:
         raise ApprovalResourceNotFoundError("Approval resource not found")
     return adapter, resource
@@ -299,6 +302,24 @@ async def _lock_request(
     workspace_id: UUID,
     approval_request_id: UUID,
 ) -> ApprovalRequest:
+    # Resource identity is immutable. Read it without a lock, then acquire the
+    # parent lock before the request lock, matching content-edit lock order.
+    identity = (
+        await session.execute(
+            select(ApprovalRequest.resource_type, ApprovalRequest.resource_id)
+            .where(ApprovalRequest.organization_id == workspace_id)
+            .where(ApprovalRequest.id == approval_request_id)
+        )
+    ).one_or_none()
+    if identity is None:
+        raise ApprovalRequestNotFoundError("Approval request not found")
+    await _load_resource(
+        session,
+        workspace_id=workspace_id,
+        resource_type=identity.resource_type,
+        resource_id=identity.resource_id,
+        for_update=True,
+    )
     request = await session.scalar(
         select(ApprovalRequest)
         .options(
@@ -310,6 +331,7 @@ async def _lock_request(
         .where(ApprovalRequest.organization_id == workspace_id)
         .where(ApprovalRequest.id == approval_request_id)
         .with_for_update()
+        .execution_options(populate_existing=True)
     )
     if request is None:
         raise ApprovalRequestNotFoundError("Approval request not found")
@@ -567,6 +589,7 @@ async def submit_resource_for_approval(
         workspace_id=workspace_id,
         resource_type=resource_type,
         resource_id=resource_id,
+        for_update=True,
     )
     await _require_capability(
         session,
@@ -1240,6 +1263,7 @@ async def resubmit_resource(
         workspace_id=workspace_id,
         resource_type=resource_type,
         resource_id=resource_id,
+        for_update=True,
     )
     if previous.resource_type != resource_type or previous.resource_id != resource_id:
         raise ApprovalInvalidTransitionError(
@@ -1331,7 +1355,7 @@ async def record_current_approval_invalidated(
     actor: AuthorizationActorInput | None = None,
     reason: str | None = None,
 ) -> ApprovalRequest:
-    request = await _load_request(
+    request = await _lock_request(
         session,
         workspace_id=workspace_id,
         approval_request_id=approval_request_id,

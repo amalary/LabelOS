@@ -24,8 +24,7 @@ from labelos_database.models import (
     WorkspacePermission,
 )
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from labelos_api.auth import (
     AuthenticatedPrincipal,
@@ -61,15 +60,12 @@ class SeededMarketingContentApi:
 @pytest.fixture
 def marketing_content_client(
     monkeypatch: pytest.MonkeyPatch,
+    database_test_engine,
 ) -> Iterator[
     tuple[TestClient, async_sessionmaker[AsyncSession], SeededMarketingContentApi]
 ]:
     monkeypatch.setenv("APP_ENV", "test")
-    engine = create_async_engine(
-        "sqlite+aiosqlite://",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
+    engine = database_test_engine
     sessionmaker = async_sessionmaker(bind=engine, expire_on_commit=False)
 
     async def prepare_database() -> SeededMarketingContentApi:
@@ -228,8 +224,6 @@ def marketing_content_client(
 
     with TestClient(app) as client:
         yield client, sessionmaker, seeded
-
-    asyncio.run(engine.dispose())
 
 
 def _set_context(
@@ -1252,7 +1246,10 @@ def test_marketing_content_draft_authoring_accepts_multi_channel_overrides_only(
     assert created.status_code == 201
     content = created.json()
     assert content["status"] == "draft"
-    assert content["scheduled_at"] == "2026-09-10T12:00:00Z"
+    item_schedule = datetime.fromisoformat(content["scheduled_at"])
+    if item_schedule.tzinfo is None:
+        item_schedule = item_schedule.replace(tzinfo=UTC)
+    assert item_schedule == scheduled_at
     assert [channel["channel"] for channel in content["channels"]] == [
         "instagram",
         "tiktok",
@@ -1263,7 +1260,10 @@ def test_marketing_content_draft_authoring_accepts_multi_channel_overrides_only(
     assert content["channels"][0]["published_at"] is None
     assert content["channels"][0]["external_post_id"] is None
     assert content["channels"][0]["external_url"] is None
-    assert content["channels"][1]["scheduled_at"] == "2026-09-11T16:30:00"
+    channel_schedule = datetime.fromisoformat(content["channels"][1]["scheduled_at"])
+    if channel_schedule.tzinfo is None:
+        channel_schedule = channel_schedule.replace(tzinfo=UTC)
+    assert channel_schedule == tiktok_scheduled_at
     assert content["channels"][1]["copy_text_override"] == "TikTok cut"
 
 
@@ -2267,3 +2267,64 @@ def test_approval_queue_openapi_contract_exposes_stable_routes(
         "cancelled",
     }
     assert "available_actions" in schemas["ApprovalRequestDetailResponse"]["properties"]
+
+
+def test_channel_replacement_api_preserves_ids_and_rejects_duplicates(
+    marketing_content_client,
+):
+    client, _sessionmaker, seeded = marketing_content_client
+    _set_context(client, seeded)
+    base = _base(seeded)
+    channels = [
+        {"channel": "Instagram", "placement": "Feed", "copy_text_override": "Original"},
+        {"channel": "Threads"},
+    ]
+    response = client.post(base, json={**_draft_payload(seeded), "channels": channels})
+    assert response.status_code == 201
+    original = response.json()
+    url = f"{base}/{original['id']}"
+    original_ids = [row["id"] for row in original["channels"]]
+    noop = client.patch(url, json={"channels": list(reversed(channels))})
+    assert noop.status_code == 200
+    assert [row["id"] for row in noop.json()["channels"]] == original_ids
+    assert noop.json()["content_revision"] == original["content_revision"]
+    channels[0]["copy_text_override"] = "Updated"
+    edited = client.patch(url, json={"title": "Updated parent", "channels": channels})
+    assert edited.status_code == 200
+    assert [row["id"] for row in edited.json()["channels"]] == original_ids
+    assert edited.json()["content_revision"] == original["content_revision"] + 1
+    assert edited.json()["channels"][0]["copy_text_override"] == "Updated"
+    channels[0]["scheduled_at"] = "2026-10-01T12:00:00+00:00"
+    scheduled = client.patch(url, json={"channels": channels})
+    assert scheduled.status_code == 200
+    assert [row["id"] for row in scheduled.json()["channels"]] == original_ids
+    assert scheduled.json()["content_revision"] == original["content_revision"] + 2
+    # A second API request reads timestamps back from the database.
+    same_schedule = client.patch(url, json={"channels": channels})
+    assert same_schedule.status_code == 200
+    assert (
+        same_schedule.json()["content_revision"] == scheduled.json()["content_revision"]
+    )
+    duplicate = client.patch(
+        url,
+        json={
+            "title": "Must roll back",
+            "channels": [
+                channels[0],
+                {"channel": "instagram", "placement": "feed"},
+            ],
+        },
+    )
+    assert duplicate.status_code == 400
+    after_failure = client.get(url).json()
+    assert after_failure["title"] == "Updated parent"
+    assert [row["id"] for row in after_failure["channels"]] == original_ids
+    assert after_failure["content_revision"] == scheduled.json()["content_revision"]
+    added = client.patch(url, json={"channels": [*channels, {"channel": "TikTok"}]})
+    assert added.status_code == 200
+    added_ids = [row["id"] for row in added.json()["channels"]]
+    assert added_ids[:2] == original_ids
+    assert len(set(added_ids) - set(original_ids)) == 1
+    removed = client.patch(url, json={"channels": [channels[0]]})
+    assert removed.status_code == 200
+    assert [row["id"] for row in removed.json()["channels"]] == original_ids[:1]
