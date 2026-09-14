@@ -77,11 +77,14 @@ Publishing Delivery will provide:
 
 ## Future Scheduler Consumption
 
-When a scheduler selects an approved channel whose resolved destination requires
-assisted publishing, it should call `prepare_assisted_publish_handoff` with the
-content item ID, channel ID, and selected intended publication timestamp.
+The initial [Scheduling Engine contract](scheduling-engine-contract.md) blocks
+manual-only destinations with `manual_delivery_required`. It does not create or
+assign manual publishing tasks. `prepare_assisted_publish_handoff` remains a
+read-only preparation DTO and is not evidence of durable acceptance.
 
-The scheduler can enqueue or pass the returned DTO to Publishing Delivery. That
-future layer owns any durable task row, assignee state, reminders, failure
-history, and final write-back of `published_at`, `external_post_id`, and
-`external_url` to `MarketingContentItemChannel`.
+A future Publishing Delivery manual workflow may consume this DTO with the
+content item ID, stable channel ID, and intended publication timestamp. Delivery
+owns durable task rows, assignment, reminders, failure history, and final
+write-back of `published_at`, `external_post_id`, and `external_url`. Supporting
+manual scheduling handoff requires an explicit extension of the Scheduling
+acceptance contract; a DTO or no-op receiver cannot mark a job `handed_off`.
