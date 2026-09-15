@@ -317,6 +317,59 @@ def test_reconciliation_validates_ids_against_parent_and_rejects_double_claims(
     asyncio.run(run())
 
 
+def test_timezone_reconciliation_result_retains_identity_and_advances_generation(
+    sessionmaker,
+):
+    async def run():
+        async with sessionmaker() as session:
+            item = await seed_item(session)
+            item_id = item.id
+            rows = list(item.channels)
+            values = [
+                {
+                    "id": row.id,
+                    **{
+                        field: getattr(row, field)
+                        for field in marketing_content.CHANNEL_VALUE_FIELDS
+                    },
+                }
+                for row in rows
+            ]
+            values[0].update(
+                schedule_timezone="UTC",
+                schedule_local_time="2027-06-15T09:30:00",
+                schedule_offset_seconds=0,
+                scheduled_at=datetime(2027, 6, 15, 9, 30, tzinfo=UTC),
+            )
+            result = await marketing_content.reconcile_channels(
+                session, item_id, values
+            )
+            assert result.updated_channel_ids == (rows[0].id,)
+            assert result.retained_channel_ids == tuple(row.id for row in rows)
+            assert result.created_channel_ids == result.removed_channel_ids == ()
+            assert result.material_change
+            assert rows[0].schedule_generation == 2
+
+            assert rows[1].schedule_generation == 1
+            result = await marketing_content.reconcile_channels(
+                session, item_id, values
+            )
+            assert result.updated_channel_ids == ()
+            assert not result.material_change
+            assert rows[0].schedule_generation == 2
+
+            await marketing_content.update_channel(
+                session, rows[0].id, {"schedule_timezone": "Etc/UTC"}
+            )
+            assert rows[0].schedule_generation == 3
+            await marketing_content.update_channel(
+                session, rows[0].id, {"schedule_timezone": "Etc/UTC"}
+            )
+            assert rows[0].schedule_generation == 3
+
+    asyncio.run(run())
+
+
 def test_explicit_id_swap_releases_unique_keys_and_rolls_back_without_commit(
     sessionmaker,
 ):

@@ -339,6 +339,115 @@ def _draft_payload(
     return payload
 
 
+@pytest.mark.parametrize(
+    "schedule,code",
+    [
+        (
+            {"schedule_timezone": "EST", "schedule_local_time": "2026-11-01T01:30"},
+            "invalid_timezone",
+        ),
+        (
+            {
+                "schedule_timezone": "America/New_York",
+                "schedule_local_time": "2026-03-08T02:30",
+            },
+            "nonexistent_local_time",
+        ),
+        (
+            {
+                "schedule_timezone": "America/New_York",
+                "schedule_local_time": "2026-11-01T01:30",
+            },
+            "disambiguation_required",
+        ),
+        ({"schedule_local_time": "2027-01-01T12:00"}, "timezone_required"),
+        (
+            {
+                "schedule_timezone": "UTC",
+                "schedule_local_time": "2027-01-01T12:00",
+                "scheduled_at": "2027-01-01T13:00Z",
+            },
+            "timezone_instant_mismatch",
+        ),
+    ],
+)
+def test_api_schedule_validation_codes(marketing_content_client, schedule, code):
+    client, _, seeded = marketing_content_client
+    _set_context(client, seeded)
+    response = client.post(
+        _base(seeded),
+        json={
+            **_draft_payload(seeded),
+            "channels": [{"channel": "instagram", **schedule}],
+        },
+    )
+    assert response.status_code == 422
+    assert response.json()["code"] == code
+
+
+def test_api_explicit_schedule_round_trip_and_legacy(marketing_content_client):
+    client, _, seeded = marketing_content_client
+    _set_context(client, seeded)
+    payload = {
+        **_draft_payload(seeded),
+        "channels": [
+            {
+                "channel": "instagram",
+                "schedule_timezone": "America/New_York",
+                "schedule_local_time": "2026-11-01T01:30",
+                "schedule_disambiguation": "later",
+            }
+        ],
+    }
+    response = client.post(_base(seeded), json=payload)
+    assert response.status_code == 201
+    item = response.json()
+    channel = item["channels"][0]
+    assert datetime.fromisoformat(channel["scheduled_at"]) == datetime(
+        2026, 11, 1, 6, 30, tzinfo=UTC
+    )
+    assert channel["schedule_timezone"] == "America/New_York"
+    assert channel["schedule_local_time"] == "2026-11-01T01:30:00"
+    assert channel["schedule_offset_seconds"] == -18000
+    response = client.patch(
+        f"{_base(seeded)}/{item['id']}",
+        json={"channels": [{"id": channel["id"], **payload["channels"][0]}]},
+    )
+    assert response.status_code == 200
+    assert response.json()["content_revision"] == item["content_revision"]
+    assert response.json()["channels"][0]["id"] == channel["id"]
+    legacy = client.post(
+        _base(seeded),
+        json={
+            **_draft_payload(seeded),
+            "channels": [{"channel": "instagram", "scheduled_at": "2027-01-01T12:00Z"}],
+        },
+    ).json()["channels"][0]
+    assert legacy["schedule_timezone"] is None
+    assert legacy["schedule_local_time"] is None
+
+
+@pytest.mark.parametrize(
+    "value, code",
+    [
+        ("2027-01-01T12:00", "timestamp_timezone_required"),
+        ("not a timestamp", "invalid_timestamp"),
+    ],
+)
+def test_api_naive_schedule_has_stable_code(marketing_content_client, value, code):
+    client, _, seeded = marketing_content_client
+    _set_context(client, seeded)
+    response = client.post(
+        _base(seeded),
+        json={
+            **_draft_payload(seeded),
+            "channels": [{"channel": "instagram", "scheduled_at": value}],
+        },
+    )
+    assert response.status_code == 422
+    assert response.json()["code"] == code
+
+
 def test_marketing_content_routes_require_authentication(client: TestClient) -> None:
     response = client.get(
         f"/api/v1/workspaces/{uuid4()}/campaigns/{uuid4()}/marketing-content"
@@ -1187,6 +1296,10 @@ def test_marketing_content_openapi_contract_exposes_stable_routes(
         "channel",
         "placement",
         "social_account_connection_id",
+        "schedule_timezone",
+        "schedule_local_time",
+        "schedule_disambiguation",
+        "schedule_offset_seconds",
         "scheduled_at",
         "copy_text_override",
         "asset_refs",

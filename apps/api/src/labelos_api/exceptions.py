@@ -7,11 +7,21 @@ from starlette import status
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from labelos_api.models import ErrorResponse
+from labelos_api.scheduling.timezones import ScheduleValidationError
 
 logger = logging.getLogger(__name__)
 
 
 def register_exception_handlers(app: FastAPI) -> None:
+    @app.exception_handler(ScheduleValidationError)
+    async def schedule_validation_exception_handler(
+        request: Request, exc: ScheduleValidationError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            content={**ErrorResponse(detail=str(exc)).model_dump(), "code": exc.code},
+        )
+
     @app.exception_handler(StarletteHTTPException)
     async def http_exception_handler(
         request: Request, exc: StarletteHTTPException
@@ -30,6 +40,15 @@ def register_exception_handlers(app: FastAPI) -> None:
         request: Request, exc: RequestValidationError
     ) -> JSONResponse:
         logger.info("Validation error", extra={"path": request.url.path})
+        for error in exc.errors():
+            if error["type"] in {"timestamp_timezone_required", "invalid_timestamp"}:
+                return JSONResponse(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    content={
+                        **ErrorResponse(detail=error["msg"]).model_dump(),
+                        "code": error["type"],
+                    },
+                )
         return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             content=ErrorResponse(detail="Request validation failed").model_dump(),

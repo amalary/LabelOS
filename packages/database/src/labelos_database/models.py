@@ -2801,6 +2801,12 @@ class MarketingContentItemChannel(Base, TimestampMixin):
         server_default="default",
     )
     scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    schedule_generation: Mapped[int] = mapped_column(
+        Integer, default=1, server_default="1", nullable=False
+    )
+    schedule_timezone: Mapped[str | None] = mapped_column(String(255))
+    schedule_local_time: Mapped[str | None] = mapped_column(String(32))
+    schedule_offset_seconds: Mapped[int | None] = mapped_column(Integer)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     external_post_id: Mapped[str | None] = mapped_column(String(255))
     external_url: Mapped[str | None] = mapped_column(String(2048))

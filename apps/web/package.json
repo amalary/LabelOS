@@ -14,6 +14,7 @@
     "clean": "node -e \"require('fs').rmSync('.next',{recursive:true,force:true})\""
   },
   "dependencies": {
+    "@js-temporal/polyfill": "0.5.1",
     "@label-os/ui": "workspace:*",
     "@workos-inc/authkit-nextjs": "^4.3.0",
     "@workos-inc/node": "^10.8.0",

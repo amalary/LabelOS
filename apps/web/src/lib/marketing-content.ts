@@ -44,6 +44,10 @@ export type MarketingContentItemChannel = {
   channel: string;
   placement: string | null;
   social_account_connection_id: string | null;
+  schedule_generation?: number;
+  schedule_timezone?: string | null;
+  schedule_local_time?: string | null;
+  schedule_offset_seconds?: number | null;
   scheduled_at: string | null;
   published_at: string | null;
   external_post_id: string | null;
@@ -137,6 +141,10 @@ export type MarketingContentChannelCreate = {
   channel: string;
   placement?: string | null;
   social_account_connection_id?: string | null;
+  schedule_timezone?: string | null;
+  schedule_local_time?: string | null;
+  schedule_offset_seconds?: number | null;
+  schedule_disambiguation?: "earlier" | "later" | null;
   scheduled_at?: string | null;
   copy_text_override?: string | null;
   asset_refs?: unknown[] | null;

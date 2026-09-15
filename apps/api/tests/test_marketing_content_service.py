@@ -2303,6 +2303,144 @@ def test_failed_channel_reconciliation_rolls_back_channels_parent_and_approval(
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("entrypoint", ["replace", "combined", "single"])
+@pytest.mark.parametrize("edit", ["timezone", "time", "legacy"])
+def test_schedule_edits_invalidate_once_with_prior_context(
+    sessionmaker, monkeypatch, entrypoint, edit
+):
+    from labelos_api.services import content_invalidation
+
+    async def run():
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace_id = data["workspace"].id
+            original = dict(
+                channel="instagram",
+                schedule_timezone="UTC",
+                schedule_local_time="2027-06-15T16:30",
+            )
+            if edit == "legacy":
+                original = dict(
+                    channel="instagram",
+                    scheduled_at=datetime(2027, 6, 15, 16, 30, tzinfo=UTC),
+                )
+            item = await create_content_item(
+                session,
+                workspace_id,
+                MarketingContentItemCreate(
+                    campaign_id=data["campaign"].id,
+                    title="Schedule",
+                    content_type="image",
+                    channels=[MarketingContentChannelCreate(**original)],
+                ),
+            )
+            item_id, channel_id = item.id, item.channels[0].id
+            approved = await _submit_and_approve_content(session, workspace_id, item_id)
+            revision, request_id = (
+                approved.content_revision,
+                approved.approval_request_id,
+            )
+            calls = []
+
+            async def capture(active_session, invalidation, *, actor):
+                assert active_session is session
+                assert item.channels[0].schedule_timezone == (
+                    None if edit == "legacy" else "UTC"
+                )
+                assert item.content_revision == revision
+                calls.append(invalidation)
+
+            monkeypatch.setattr(
+                content_invalidation, "invalidate_content_channels", capture
+            )
+            await replace_channels(
+                session,
+                workspace_id,
+                item_id,
+                [MarketingContentChannelCreate(**original)],
+            )
+            assert calls == []
+            assert item.channels[0].schedule_generation == 1
+            assert item.content_revision == revision
+            assert item.approval_request_id == request_id
+            change = dict(
+                channel="instagram",
+                schedule_timezone=(
+                    "America/Los_Angeles" if edit == "timezone" else "UTC"
+                ),
+                schedule_local_time=(
+                    "2027-06-15T09:30" if edit == "timezone" else "2027-06-15T17:30"
+                ),
+            )
+            if edit == "legacy":
+                change["schedule_local_time"] = "2027-06-15T16:30"
+            if entrypoint == "single":
+                await update_channel(
+                    session,
+                    workspace_id,
+                    item_id,
+                    channel_id,
+                    MarketingContentChannelUpdate(**change),
+                )
+            elif entrypoint == "combined":
+                await update_content_item_with_channels(
+                    session,
+                    workspace_id,
+                    item_id,
+                    MarketingContentItemUpdate(title="Changed", material_change=True),
+                    [MarketingContentChannelCreate(**change)],
+                )
+            else:
+                await replace_channels(
+                    session,
+                    workspace_id,
+                    item_id,
+                    [MarketingContentChannelCreate(**change)],
+                )
+            result = await get_content_item(session, workspace_id, item_id)
+            assert result.channels[0].id == channel_id
+            assert result.channels[0].schedule_generation == 2
+            assert result.content_revision == revision + 1
+            assert result.status == MarketingContentItemStatus.draft
+            assert result.approved_revision == revision
+            assert result.approved_revision != result.content_revision
+            assert len(calls) == 1
+            assert calls[0].previous_content_revision == revision
+            assert calls[0].previous_approval_request_id == request_id
+            assert calls[0].materially_changed_channel_ids == (channel_id,)
+            assert calls[0].removed_channel_ids == ()
+            history = await get_approval_history(session, workspace_id, request_id)
+            assert history[-1].decision.value == "invalidated"
+
+    asyncio.run(run())
+
+
+def test_service_rejects_naive_schedule(sessionmaker):
+    from labelos_api.scheduling.timezones import ScheduleValidationError
+
+    async def run():
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            with pytest.raises(ScheduleValidationError) as error:
+                await create_content_item(
+                    session,
+                    data["workspace"].id,
+                    MarketingContentItemCreate(
+                        campaign_id=data["campaign"].id,
+                        title="Naive",
+                        content_type="image",
+                        channels=[
+                            MarketingContentChannelCreate(
+                                channel="instagram", scheduled_at=datetime(2027, 1, 1)
+                            )
+                        ],
+                    ),
+                )
+            assert error.value.code == "timestamp_timezone_required"
+
+    asyncio.run(run())
+
+
 def test_material_invalidation_hook_captures_old_authority_and_removals_before_delete(
     sessionmaker, monkeypatch
 ):

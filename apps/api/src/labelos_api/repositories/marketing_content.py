@@ -50,6 +50,9 @@ CHANNEL_MATERIAL_FIELDS = frozenset(
         "placement",
         "social_account_connection_id",
         "scheduled_at",
+        "schedule_timezone",
+        "schedule_local_time",
+        "schedule_offset_seconds",
         "copy_text_override",
         "asset_refs",
         "metadata_json",
@@ -189,6 +192,8 @@ async def apply_channel_reconciliation(
     session: AsyncSession, plan: ChannelReconciliationPlan
 ) -> ChannelReconciliationResult:
     for row, values in plan.updated:
+        if values.keys() & CHANNEL_MATERIAL_FIELDS:
+            row.schedule_generation += 1
         for field, value in values.items():
             setattr(row, field, value)
         if "social_account_connection_id" in values:
@@ -522,7 +527,8 @@ async def update_channel(
     channel = await _get_channel_for_update(session, channel_id)
     if channel is None:
         return None
-    if changed_channel_fields(channel, values) & {"channel", "placement"}:
+    changed = changed_channel_fields(channel, values)
+    if changed & {"channel", "placement"}:
         item = await get_item_for_update(session, channel.marketing_content_item_id)
         assert item is not None
         replacements = [
@@ -536,6 +542,8 @@ async def update_channel(
         plan = plan_channel_reconciliation(item, replacements)
         await apply_channel_reconciliation(session, plan)
         return plan.created[0]
+    if changed & CHANNEL_MATERIAL_FIELDS:
+        channel.schedule_generation += 1
     for key, value in values.items():
         setattr(channel, key, value)
     if "social_account_connection_id" in values:

@@ -1811,7 +1811,7 @@ describe("MarketingWorkspace", () => {
         content_type: "social_post",
         copy_text: "Presave starts now.",
         release_id: "release_01",
-        scheduled_at: new Date("2026-09-10T09:00").toISOString(),
+        scheduled_at: "2026-09-10T16:00:00Z",
         title: "Channel-aware launch draft",
       }),
     );
@@ -1821,7 +1821,7 @@ describe("MarketingWorkspace", () => {
         channel: "instagram",
         copy_text_override: "IG draft copy",
         placement: "feed",
-        scheduled_at: new Date("2026-09-10T10:30").toISOString(),
+        scheduled_at: "2026-09-10T17:30:00Z",
       }),
     ]);
     expect(mutationMocks.approvalSubmit).not.toHaveBeenCalled();
@@ -1873,19 +1873,132 @@ describe("MarketingWorkspace", () => {
             channel: "instagram",
             copy_text_override: "IG-specific cut",
             placement: "reel",
-            scheduled_at: new Date("2026-09-10T11:00").toISOString(),
+            scheduled_at: "2026-09-10T18:00:00Z",
           }),
           expect.objectContaining({
             asset_refs: [{ id: "tt_asset", type: "video" }],
             channel: "tiktok",
             copy_text_override: "TikTok-specific cut",
             placement: "video",
-            scheduled_at: new Date("2026-09-10T12:00").toISOString(),
+            scheduled_at: "2026-09-10T19:00:00Z",
           }),
         ],
         title: "Multi-channel draft",
       }),
     );
+  });
+
+  it.each(["earlier", "later"] as const)(
+    "requires an explicit %s DST occurrence and retains invalid input",
+    async (choice) => {
+      vi.useRealTimers();
+      mockWorkspaceProfile(["marketing.content.view", "marketing.content.create"]);
+      render(<MarketingWorkspace />);
+      fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+      fireEvent.click(screen.getByRole("button", { name: "Create Draft" }));
+      const editor = within(screen.getByRole("region", { name: "Marketing content editor" }));
+      fireEvent.change(editor.getByLabelText("Title"), { target: { value: "DST launch" } });
+      fireEvent.change(editor.getByLabelText("Channel authoring timezone"), {
+        target: { value: "America/New_York" },
+      });
+      fireEvent.change(editor.getByLabelText("Channel planned publish time"), {
+        target: { value: "2026-03-08T02:30" },
+      });
+      fireEvent.click(editor.getByRole("button", { name: "Save draft" }));
+      expect(mutationMocks.create).not.toHaveBeenCalled();
+      expect(editor.getByLabelText("Channel planned publish time")).toHaveValue("2026-03-08T02:30");
+      expect(
+        editor.getAllByRole("alert").some((alert) => alert.textContent?.includes("does not exist")),
+      ).toBe(true);
+      fireEvent.change(editor.getByLabelText("Channel planned publish time"), {
+        target: { value: "2026-11-01T01:30" },
+      });
+      fireEvent.click(editor.getByRole("button", { name: "Save draft" }));
+      expect(mutationMocks.create).not.toHaveBeenCalled();
+      expect(editor.getByLabelText("Schedule occurrence")).toHaveValue("");
+      fireEvent.change(editor.getByLabelText("Schedule occurrence"), { target: { value: choice } });
+      fireEvent.click(editor.getByRole("button", { name: "Save draft" }));
+      await waitFor(() => expect(mutationMocks.create).toHaveBeenCalled());
+      expect(mutationMocks.create.mock.calls[0]?.[0].channels[0]).toMatchObject({
+        scheduled_at: choice === "earlier" ? "2026-11-01T05:30:00Z" : "2026-11-01T06:30:00Z",
+        schedule_timezone: "America/New_York",
+        schedule_disambiguation: choice,
+      });
+    },
+  );
+
+  it("retains authoring input after a server validation error", async () => {
+    vi.useRealTimers();
+    mockWorkspaceProfile(["marketing.content.view", "marketing.content.create"]);
+    mutationMocks.create.mockRejectedValueOnce(
+      new Error("The timestamp does not match the selected local time and timezone."),
+    );
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create Draft" }));
+    const editor = within(screen.getByRole("region", { name: "Marketing content editor" }));
+    fireEvent.change(editor.getByLabelText("Title"), { target: { value: "Keep this draft" } });
+    fireEvent.change(editor.getByLabelText("Channel authoring timezone"), {
+      target: { value: "America/New_York" },
+    });
+    fireEvent.change(editor.getByLabelText("Channel planned publish time"), {
+      target: { value: "2027-06-15T09:30" },
+    });
+    fireEvent.click(editor.getByRole("button", { name: "Save draft" }));
+    await waitFor(() => expect(editor.getByRole("alert")).toHaveTextContent("does not match"));
+    expect(editor.getByLabelText("Title")).toHaveValue("Keep this draft");
+    expect(editor.getByLabelText("Channel authoring timezone")).toHaveValue("America/New_York");
+    expect(editor.getByLabelText("Channel planned publish time")).toHaveValue("2027-06-15T09:30");
+  });
+
+  it("preserves legacy timestamps on an unchanged save without guessing their timezone", async () => {
+    vi.useRealTimers();
+    mockWorkspaceProfile(["marketing.content.view", "marketing.content.edit"]);
+    mockCalendar([item()]);
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: /Single Teaser/ }));
+    const editor = within(screen.getByRole("region", { name: "Marketing content editor" }));
+    expect(editor.getByLabelText("Channel authoring timezone")).toHaveValue("");
+    expect(
+      editor.getByText(/Legacy planning time shown in America\/Los_Angeles/),
+    ).toBeInTheDocument();
+    fireEvent.click(editor.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(mutationMocks.update).toHaveBeenCalled());
+    expect(mutationMocks.update.mock.calls[0]?.[0].channels[0]).toMatchObject({
+      id: "channel_01",
+      scheduled_at: "2026-09-10T12:00:00Z",
+    });
+    expect(mutationMocks.update.mock.calls[0]?.[0].channels[0]).not.toHaveProperty(
+      "schedule_timezone",
+    );
+  });
+
+  it("edits a persisted authoring timezone independently of the calendar display zone", async () => {
+    vi.useRealTimers();
+    mockWorkspaceProfile(["marketing.content.view", "marketing.content.edit"]);
+    mockCalendar([
+      item({
+        channels: [
+          channel({
+            schedule_timezone: "America/New_York",
+            schedule_local_time: "2026-09-10T08:00:00",
+            schedule_offset_seconds: -14400,
+          }),
+        ],
+      }),
+    ]);
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: /Single Teaser/ }));
+    const editor = within(screen.getByRole("region", { name: "Marketing content editor" }));
+    expect(editor.getByLabelText("Channel authoring timezone")).toHaveValue("America/New_York");
+    expect(editor.getByLabelText("Channel planned publish time")).toHaveValue("2026-09-10T08:00");
+    fireEvent.click(editor.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(mutationMocks.update).toHaveBeenCalled());
+    expect(mutationMocks.update.mock.calls[0]?.[0].channels[0]).toMatchObject({
+      id: "channel_01",
+      scheduled_at: "2026-09-10T12:00:00Z",
+      schedule_timezone: "America/New_York",
+    });
   });
 
   it("shows Draft Posts validation errors before creating", () => {

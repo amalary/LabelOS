@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Annotated, Any, NoReturn
 from uuid import UUID
 
@@ -11,9 +11,11 @@ from labelos_database.models import (
     WorkspaceMembership,
 )
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic_core import PydanticCustomError
 from sqlalchemy import select
 
 from labelos_api.auth import CurrentUserContext, SessionDep, get_current_user_context
+from labelos_api.scheduling.timezones import ScheduleValidationError, utc_instant
 from labelos_api.services import marketing_content_service
 from labelos_api.services.marketing_content_service import (
     MarketingContentAuthorizationError,
@@ -42,12 +44,16 @@ class MarketingContentChannelCreateRequest(BaseModel):
     placement: str | None = Field(default=None, max_length=80)
     social_account_connection_id: UUID | None = None
     scheduled_at: datetime | None = None
+    schedule_timezone: str | None = None
+    schedule_local_time: str | None = None
+    schedule_disambiguation: str | None = None
+    schedule_offset_seconds: int | None = None
     copy_text_override: str | None = Field(default=None, max_length=8000)
     asset_refs: list[Any] | None = None
 
-    @field_validator("scheduled_at")
+    @field_validator("scheduled_at", mode="before")
     @classmethod
-    def require_timezone(cls, value: datetime | None) -> datetime | None:
+    def require_timezone(cls, value: datetime | str | None) -> datetime | None:
         return _require_timezone(value)
 
 
@@ -64,9 +70,9 @@ class MarketingContentCreateRequest(BaseModel):
     scheduled_at: datetime | None = None
     channels: list[MarketingContentChannelCreateRequest] = Field(default_factory=list)
 
-    @field_validator("scheduled_at")
+    @field_validator("scheduled_at", mode="before")
     @classmethod
-    def require_timezone(cls, value: datetime | None) -> datetime | None:
+    def require_timezone(cls, value: datetime | str | None) -> datetime | None:
         return _require_timezone(value)
 
 
@@ -87,9 +93,9 @@ class MarketingContentUpdateRequest(BaseModel):
     scheduled_at: datetime | None = None
     channels: list[MarketingContentChannelReplacementRequest] | None = None
 
-    @field_validator("scheduled_at")
+    @field_validator("scheduled_at", mode="before")
     @classmethod
-    def require_timezone(cls, value: datetime | None) -> datetime | None:
+    def require_timezone(cls, value: datetime | str | None) -> datetime | None:
         return _require_timezone(value)
 
     @model_validator(mode="after")
@@ -113,6 +119,10 @@ class MarketingContentChannelResponse(BaseModel):
     placement: str
     social_account_connection_id: UUID | None
     scheduled_at: datetime | None
+    schedule_generation: int
+    schedule_timezone: str | None = None
+    schedule_local_time: str | None = None
+    schedule_offset_seconds: int | None = None
     published_at: datetime | None
     external_post_id: str | None
     external_url: str | None
@@ -188,10 +198,11 @@ class MarketingContentListResponse(BaseModel):
     offset: int
 
 
-def _require_timezone(value: datetime | None) -> datetime | None:
-    if value is not None and (value.tzinfo is None or value.utcoffset() is None):
-        raise ValueError("Datetime must include timezone information")
-    return value
+def _require_timezone(value: datetime | str | None) -> datetime | None:
+    try:
+        return utc_instant(value) if value is not None else None
+    except ScheduleValidationError as exc:
+        raise PydanticCustomError(exc.code, "{message}", {"message": str(exc)}) from exc
 
 
 def _not_found() -> HTTPException:
@@ -223,9 +234,12 @@ def _service_error(
         MarketingContentNotFoundError
         | MarketingContentRelationshipError
         | MarketingContentLifecycleError
+        | ScheduleValidationError
         | MarketingContentAuthorizationError
     ),
 ) -> NoReturn:
+    if isinstance(exc, ScheduleValidationError):
+        raise exc
     if isinstance(exc, MarketingContentAuthorizationError):
         _raise_capability_denial(exc.reason)
     if isinstance(exc, MarketingContentNotFoundError):
@@ -293,6 +307,14 @@ def _update_payload(
     )
 
 
+def _stored_schedule_instant(value: datetime | None) -> datetime | None:
+    # Only for persisted UTC schedule columns: SQLite drops their tzinfo on read.
+    # Untrusted authoring timestamps must instead pass utc_instant unchanged.
+    if value is None:
+        return None
+    return utc_instant(value.replace(tzinfo=UTC) if value.tzinfo is None else value)
+
+
 def _channel_response(
     channel: MarketingContentItemChannel,
 ) -> MarketingContentChannelResponse:
@@ -302,7 +324,11 @@ def _channel_response(
         channel=channel.channel,
         placement=channel.placement,
         social_account_connection_id=channel.social_account_connection_id,
-        scheduled_at=channel.scheduled_at,
+        scheduled_at=_stored_schedule_instant(channel.scheduled_at),
+        schedule_generation=channel.schedule_generation,
+        schedule_timezone=channel.schedule_timezone,
+        schedule_local_time=channel.schedule_local_time,
+        schedule_offset_seconds=channel.schedule_offset_seconds,
         published_at=channel.published_at,
         external_post_id=channel.external_post_id,
         external_url=channel.external_url,
@@ -510,7 +536,7 @@ def _content_response(item: MarketingContentItem) -> MarketingContentResponse:
         owner_profile_id=item.owner_profile_id,
         created_by_user_id=item.created_by_user_id,
         created_by_profile_id=item.created_by_profile_id,
-        scheduled_at=item.scheduled_at,
+        scheduled_at=_stored_schedule_instant(item.scheduled_at),
         published_at=item.published_at,
         approval_requested_at=item.approval_requested_at,
         approval_request_id=item.approval_request_id,
@@ -601,6 +627,7 @@ async def list_workspace_marketing_content(
     except (
         MarketingContentNotFoundError,
         MarketingContentRelationshipError,
+        ScheduleValidationError,
         MarketingContentLifecycleError,
         MarketingContentAuthorizationError,
         ValueError,
@@ -610,6 +637,7 @@ async def list_workspace_marketing_content(
             (
                 MarketingContentNotFoundError,
                 MarketingContentRelationshipError,
+                ScheduleValidationError,
                 MarketingContentLifecycleError,
                 MarketingContentAuthorizationError,
             ),
@@ -643,6 +671,7 @@ async def list_campaign_marketing_content(
     except (
         MarketingContentNotFoundError,
         MarketingContentRelationshipError,
+        ScheduleValidationError,
         MarketingContentAuthorizationError,
     ) as exc:
         _service_error(exc)
@@ -683,6 +712,7 @@ async def create_marketing_content(
     except (
         MarketingContentNotFoundError,
         MarketingContentRelationshipError,
+        ScheduleValidationError,
         MarketingContentAuthorizationError,
     ) as exc:
         _service_error(exc)
@@ -756,6 +786,7 @@ async def update_marketing_content(
     except (
         MarketingContentNotFoundError,
         MarketingContentRelationshipError,
+        ScheduleValidationError,
         MarketingContentLifecycleError,
         MarketingContentAuthorizationError,
     ) as exc:
@@ -807,6 +838,7 @@ async def update_marketing_content_status(
     except (
         MarketingContentNotFoundError,
         MarketingContentRelationshipError,
+        ScheduleValidationError,
         MarketingContentLifecycleError,
         MarketingContentAuthorizationError,
     ) as exc:

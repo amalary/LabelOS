@@ -41,6 +41,10 @@ channel/placement ordering. IDs become durable only when the caller commits.
 
 ## Material changes and transactions
 
+The [timezone-safe authoring foundation](timezone-safe-scheduling.md) adds explicit
+channel timezone/wall-time/offset context and a server-owned generation counter.
+Those scheduling edits are material and preserve the reconciliation rules below.
+
 Channel copy, asset references, destination, scheduled time, metadata, channel,
 placement, additions, and removals are material. A logical edit increments the
 parent revision once, including combined parent/channel edits, and uses existing

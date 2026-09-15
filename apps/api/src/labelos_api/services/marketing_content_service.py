@@ -30,6 +30,7 @@ from labelos_api.repositories import approvals, marketing_content
 from labelos_api.repositories.approval_resources import (
     MARKETING_CONTENT_ITEM_RESOURCE_TYPE,
 )
+from labelos_api.scheduling.timezones import schedule_values, utc_instant
 from labelos_api.services import approval_service, content_invalidation
 from labelos_api.services.approval_service import (
     ApprovalDuplicateActiveRequestError,
@@ -141,6 +142,10 @@ class MarketingContentChannelCreate:
     placement: str | None = None
     social_account_connection_id: UUID | None = None
     scheduled_at: datetime | None = None
+    schedule_timezone: str | None = None
+    schedule_local_time: str | None = None
+    schedule_disambiguation: str | None = None
+    schedule_offset_seconds: int | None = None
     published_at: datetime | None = None
     external_post_id: str | None = None
     external_url: str | None = None
@@ -160,6 +165,10 @@ class MarketingContentChannelUpdate:
     placement: str | None = None
     social_account_connection_id: UUID | None = None
     scheduled_at: datetime | None = None
+    schedule_timezone: str | None = None
+    schedule_local_time: str | None = None
+    schedule_disambiguation: str | None = None
+    schedule_offset_seconds: int | None = None
     published_at: datetime | None = None
     external_post_id: str | None = None
     external_url: str | None = None
@@ -359,7 +368,15 @@ def _channel_create_values(
         "social_account_connection_id",
         payload.social_account_connection_id,
     )
-    _set_if_not_none(values, "scheduled_at", payload.scheduled_at)
+    values.update(
+        schedule_values(
+            scheduled_at=payload.scheduled_at,
+            schedule_timezone=payload.schedule_timezone,
+            schedule_local_time=payload.schedule_local_time,
+            schedule_disambiguation=payload.schedule_disambiguation,
+            schedule_offset_seconds=payload.schedule_offset_seconds,
+        )
+    )
     _set_if_not_none(values, "published_at", payload.published_at)
     _set_if_not_none(
         values,
@@ -390,7 +407,25 @@ def _channel_update_values(
         "social_account_connection_id",
         payload.social_account_connection_id,
     )
-    _set_if_not_none(values, "scheduled_at", payload.scheduled_at)
+    if any(
+        value is not None
+        for value in (
+            payload.scheduled_at,
+            payload.schedule_timezone,
+            payload.schedule_local_time,
+            payload.schedule_disambiguation,
+            payload.schedule_offset_seconds,
+        )
+    ):
+        values.update(
+            schedule_values(
+                scheduled_at=payload.scheduled_at,
+                schedule_timezone=payload.schedule_timezone,
+                schedule_local_time=payload.schedule_local_time,
+                schedule_disambiguation=payload.schedule_disambiguation,
+                schedule_offset_seconds=payload.schedule_offset_seconds,
+            )
+        )
     _set_if_not_none(values, "published_at", payload.published_at)
     _set_if_not_none(
         values,
@@ -541,7 +576,11 @@ def _create_values(payload: MarketingContentItemCreate) -> dict[str, object]:
     _set_if_not_none(values, "artist_id", payload.artist_id)
     _set_if_not_none(values, "release_id", payload.release_id)
     _set_if_not_none(values, "copy_text", _normalize_optional_text(payload.copy_text))
-    _set_if_not_none(values, "scheduled_at", payload.scheduled_at)
+    _set_if_not_none(
+        values,
+        "scheduled_at",
+        utc_instant(payload.scheduled_at) if payload.scheduled_at is not None else None,
+    )
     _set_if_not_none(values, "published_at", payload.published_at)
     _set_if_not_none(values, "created_by_user_id", payload.created_by_user_id)
     _set_if_not_none(values, "created_by_profile_id", payload.created_by_profile_id)
@@ -563,7 +602,11 @@ def _update_values(payload: MarketingContentItemUpdate) -> dict[str, object]:
         values["asset_refs"] = _json_list(payload.asset_refs, "asset_refs")
     if payload.metadata_json is not None:
         values["metadata_json"] = _json_object(payload.metadata_json, "metadata_json")
-    _set_if_not_none(values, "scheduled_at", payload.scheduled_at)
+    _set_if_not_none(
+        values,
+        "scheduled_at",
+        utc_instant(payload.scheduled_at) if payload.scheduled_at is not None else None,
+    )
     _set_if_not_none(values, "published_at", payload.published_at)
     _set_if_not_none(values, "owner_profile_id", payload.owner_profile_id)
     if payload.clear_artist:

@@ -1,5 +1,13 @@
 "use client";
 
+import {
+  occurrenceLabel,
+  resolveSchedule,
+  scheduleFromInstant,
+  scheduleOccurrences,
+  type ScheduleDisambiguation,
+} from "../../lib/schedule-timezones";
+
 import { Badge, Button, Card, EmptyState, LoadingState, PageHeader, cn } from "@label-os/ui";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -358,11 +366,15 @@ type ContentEditorSurface = "calendar" | "drafts";
 
 type ChannelFormRow = {
   id: string;
+  legacyInstant?: string | null;
+  legacyLocalTime?: string;
   persistedId?: string;
   channel: string;
   placement: string;
   socialAccountConnectionId: string;
   scheduledAt: string;
+  scheduleTimezone: string;
+  scheduleChoice: ScheduleDisambiguation;
   copyTextOverride: string;
   assetRefsJson: string;
 };
@@ -377,21 +389,65 @@ type ContentFormState = {
   assetRefsJson: string;
   ownerProfileId: string;
   scheduledAt: string;
+  scheduleTimezone: string;
+  scheduleChoice: ScheduleDisambiguation;
   channels: ChannelFormRow[];
 };
 
 const contentTypeOptions = ["social_post", "video", "email", "ad", "press", "playlist_pitch"];
 
-function formatDateTimeInput(value: string | null): string {
-  return value ? value.slice(0, 16) : "";
-}
-
 function selectedDateInput(dateKey: string | null): string {
   return dateKey ? `${dateKey}T09:00` : "";
 }
 
-function dateTimeInputToIso(value: string): string | null {
-  return value ? new Date(value).toISOString() : null;
+function ScheduleFeedback({
+  localTime,
+  timeZone,
+  choice,
+  disabled,
+  onChoice,
+}: {
+  localTime: string;
+  timeZone: string;
+  choice: ScheduleDisambiguation;
+  disabled: boolean;
+  onChoice: (choice: ScheduleDisambiguation) => void;
+}) {
+  if (!localTime || !timeZone) return null;
+  try {
+    const occurrences = scheduleOccurrences(localTime, timeZone);
+    return (
+      <div className="text-xs text-slate-600">
+        {occurrences.length > 1 && (
+          <label className="grid gap-1">
+            This local time occurs twice. Choose an occurrence.
+            <select
+              aria-label="Schedule occurrence"
+              disabled={disabled}
+              value={choice}
+              onChange={(event) => onChoice(event.target.value as ScheduleDisambiguation)}
+            >
+              <option value="">Select earlier or later</option>
+              <option value="earlier">Earlier: {occurrenceLabel(occurrences[0]!)}</option>
+              <option value="later">Later: {occurrenceLabel(occurrences[1]!)}</option>
+            </select>
+          </label>
+        )}
+        {(occurrences.length === 1 || choice) && (
+          <p>
+            Time to store: {localTime} in {timeZone};{" "}
+            {occurrenceLabel(occurrences[choice === "later" ? occurrences.length - 1 : 0]!)}
+          </p>
+        )}
+      </div>
+    );
+  } catch (error) {
+    return (
+      <p role="alert" className="text-sm text-red-700">
+        {error instanceof Error ? error.message : "Invalid schedule."}
+      </p>
+    );
+  }
 }
 
 function parseAssetRefs(value: string, fieldName: string): unknown[] {
@@ -454,7 +510,7 @@ function accountConnectionWarning(connection: SocialAccountConnection): string |
   return null;
 }
 
-function emptyChannelRow(index: number): ChannelFormRow {
+function emptyChannelRow(index: number, timeZone = "UTC"): ChannelFormRow {
   return {
     assetRefsJson: "",
     channel: index === 0 ? "instagram" : "",
@@ -463,6 +519,8 @@ function emptyChannelRow(index: number): ChannelFormRow {
     placement: index === 0 ? "feed" : "",
     socialAccountConnectionId: "",
     scheduledAt: "",
+    scheduleTimezone: timeZone,
+    scheduleChoice: "",
   };
 }
 
@@ -471,7 +529,9 @@ function initialFormState({
   createDate,
   filters,
   item,
+  timeZone,
 }: {
+  timeZone: string;
   campaigns: Campaign[];
   createDate: string | null;
   filters: CalendarFilters;
@@ -490,13 +550,27 @@ function initialFormState({
         persistedId: channel.id,
         placement: channel.placement ?? "",
         socialAccountConnectionId: channel.social_account_connection_id ?? "",
-        scheduledAt: formatDateTimeInput(channel.scheduled_at),
+        scheduledAt: scheduleFromInstant(
+          channel.scheduled_at,
+          channel.schedule_timezone || timeZone,
+        ).localTime,
+        scheduleTimezone: channel.schedule_timezone ?? (channel.scheduled_at ? "" : timeZone),
+        scheduleChoice: channel.schedule_timezone
+          ? scheduleFromInstant(channel.scheduled_at, channel.schedule_timezone).choice
+          : "",
+        legacyInstant: channel.schedule_timezone ? null : channel.scheduled_at,
+        legacyLocalTime: scheduleFromInstant(
+          channel.scheduled_at,
+          channel.schedule_timezone || timeZone,
+        ).localTime,
       })),
       contentType: item.content_type,
       copyText: item.copy_text ?? "",
       ownerProfileId: item.owner_profile_id ?? "",
       releaseId: item.release_id ?? "",
-      scheduledAt: formatDateTimeInput(item.scheduled_at),
+      scheduledAt: scheduleFromInstant(item.scheduled_at, timeZone).localTime,
+      scheduleTimezone: timeZone,
+      scheduleChoice: scheduleFromInstant(item.scheduled_at, timeZone).choice,
       title: item.title,
     };
   }
@@ -506,12 +580,14 @@ function initialFormState({
     assetRefsJson: "",
     artistId: campaign?.primary_artist?.id ?? "",
     campaignId,
-    channels: [emptyChannelRow(0)],
+    channels: [emptyChannelRow(0, timeZone)],
     contentType: "social_post",
     copyText: "",
     ownerProfileId: campaign?.owner_profile_id ?? "",
     releaseId: campaign?.release?.id ?? "",
     scheduledAt: selectedDateInput(createDate),
+    scheduleTimezone: timeZone,
+    scheduleChoice: "",
     title: "",
   };
 }
@@ -527,13 +603,21 @@ function formToPayload(form: ContentFormState): MarketingContentItemCreate {
       copy_text_override: channel.copyTextOverride || null,
       placement: channel.placement || null,
       social_account_connection_id: channel.socialAccountConnectionId || null,
-      scheduled_at: dateTimeInputToIso(channel.scheduledAt),
+      ...(channel.scheduledAt
+        ? !channel.scheduleTimezone &&
+          channel.legacyInstant &&
+          channel.scheduledAt === channel.legacyLocalTime
+          ? { scheduled_at: channel.legacyInstant }
+          : resolveSchedule(channel.scheduledAt, channel.scheduleTimezone, channel.scheduleChoice)
+        : { scheduled_at: null }),
     })),
     content_type: form.contentType,
     copy_text: form.copyText || null,
     owner_profile_id: form.ownerProfileId || null,
     release_id: form.releaseId || null,
-    scheduled_at: dateTimeInputToIso(form.scheduledAt),
+    scheduled_at: form.scheduledAt
+      ? resolveSchedule(form.scheduledAt, form.scheduleTimezone, form.scheduleChoice).scheduled_at
+      : null,
     title: form.title,
   };
 }
@@ -697,7 +781,7 @@ function ContentEditor({
   timeZone: string;
 }) {
   const [form, setForm] = useState(() =>
-    initialFormState({ campaigns, createDate, filters, item }),
+    initialFormState({ campaigns, createDate, filters, item, timeZone }),
   );
   const [clientError, setClientError] = useState<string | null>(null);
   const selectedCampaign = campaigns.find((campaign) => campaign.id === form.campaignId) ?? null;
@@ -1023,12 +1107,22 @@ function ContentEditor({
             aria-label="Planned publish time"
             className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950"
             disabled={!isEditable}
-            onChange={(event) => setField({ scheduledAt: event.target.value })}
+            onChange={(event) => setField({ scheduledAt: event.target.value, scheduleChoice: "" })}
+            step="any"
             type="datetime-local"
             value={form.scheduledAt}
           />
-          <span className="text-xs font-normal text-slate-500">Calendar timezone: {timeZone}</span>
+          <span className="text-xs font-normal text-slate-500">
+            Planning timezone: {form.scheduleTimezone}. Calendar display timezone: {timeZone}.
+          </span>
         </label>
+        <ScheduleFeedback
+          localTime={form.scheduledAt}
+          timeZone={form.scheduleTimezone}
+          choice={form.scheduleChoice}
+          disabled={!isEditable}
+          onChoice={(scheduleChoice) => setField({ scheduleChoice })}
+        />
         <label className="grid gap-1 text-sm font-medium text-slate-700 md:col-span-2">
           <span>Core Copy / Caption</span>
           <textarea
@@ -1058,7 +1152,7 @@ function ContentEditor({
             onClick={() =>
               setForm((current) => ({
                 ...current,
-                channels: [...current.channels, emptyChannelRow(current.channels.length)],
+                channels: [...current.channels, emptyChannelRow(current.channels.length, timeZone)],
               }))
             }
             size="sm"
@@ -1129,12 +1223,45 @@ function ContentEditor({
                         className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950"
                         disabled={!isEditable}
                         onChange={(event) =>
-                          setChannel(channel.id, { scheduledAt: event.target.value })
+                          setChannel(channel.id, {
+                            scheduledAt: event.target.value,
+                            scheduleChoice: "",
+                          })
                         }
+                        step="any"
                         type="datetime-local"
                         value={channel.scheduledAt}
                       />
                     </label>
+                    <label className="grid gap-1 text-sm font-medium text-slate-700">
+                      <span>Channel authoring timezone</span>
+                      <input
+                        aria-label="Channel authoring timezone"
+                        className="h-10 rounded-md border border-slate-300 bg-white px-3"
+                        disabled={!isEditable}
+                        placeholder="America/Los_Angeles"
+                        value={channel.scheduleTimezone}
+                        onChange={(event) =>
+                          setChannel(channel.id, {
+                            scheduleTimezone: event.target.value,
+                            scheduleChoice: "",
+                          })
+                        }
+                      />
+                      {channel.legacyInstant && !channel.scheduleTimezone && (
+                        <span>
+                          Legacy planning time shown in {timeZone}. Confirm an IANA timezone to
+                          author a schedule.
+                        </span>
+                      )}
+                    </label>
+                    <ScheduleFeedback
+                      localTime={channel.scheduledAt}
+                      timeZone={channel.scheduleTimezone}
+                      choice={channel.scheduleChoice}
+                      disabled={!isEditable}
+                      onChoice={(scheduleChoice) => setChannel(channel.id, { scheduleChoice })}
+                    />
                     <Button
                       className="self-end"
                       disabled={!isEditable || form.channels.length === 1}
