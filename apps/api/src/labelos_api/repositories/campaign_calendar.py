@@ -19,7 +19,7 @@ from labelos_database.models import (
     MarketingContentItemStatus,
     SocialAccountConnection,
 )
-from sqlalchemy import Select, and_, or_, select
+from sqlalchemy import ColumnElement, Select, and_, false, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -78,6 +78,7 @@ class CampaignCalendarEvent:
     social_account_connection: SocialAccountConnection | None = None
     approval_request_id: UUID | None = None
     approval_request: ApprovalRequest | None = None
+    content_item: MarketingContentItem | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -286,7 +287,7 @@ def _filter_campaign_status(statement: Select, query: CampaignCalendarEventQuery
         if campaign_statuses:
             statement = statement.where(Campaign.status.in_(campaign_statuses))
         else:
-            statement = statement.where(False)
+            statement = statement.where(false())
     elif not query.include_archived:
         statement = statement.where(Campaign.status != CampaignStatus.archived)
     return statement
@@ -302,7 +303,7 @@ def _filter_content_status(statement: Select, query: CampaignCalendarEventQuery)
             filters.append(MarketingContentItem.status.in_(content_statuses))
         if request_statuses:
             filters.append(ApprovalRequest.status.in_(request_statuses))
-        statement = statement.where(or_(*filters) if filters else False)
+        statement = statement.where(or_(*filters) if filters else false())
     elif not query.include_archived:
         statement = statement.where(
             MarketingContentItem.status != MarketingContentItemStatus.archived
@@ -314,7 +315,7 @@ def _filter_campaign_dates(statement: Select, query: CampaignCalendarEventQuery)
     start_date, end_date = _date_bounds(query.range_start, query.range_end)
     date_filters = []
     if CAMPAIGN_START in _requested_event_types(query):
-        conditions = [Campaign.start_date.is_not(None)]
+        conditions: list[ColumnElement[bool]] = [Campaign.start_date.is_not(None)]
         if start_date is not None:
             conditions.append(Campaign.start_date >= start_date)
         if end_date is not None:
@@ -358,7 +359,7 @@ def _filter_content_dates(statement: Select, query: CampaignCalendarEventQuery):
     ):
         if event_type not in event_types:
             continue
-        conditions = [field.is_not(None)]
+        conditions: list[ColumnElement[bool]] = [field.is_not(None)]
         if start_datetime is not None:
             conditions.append(field >= start_datetime)
         if end_datetime is not None:
@@ -600,6 +601,7 @@ def _content_event(
         release_id=release_id,
         release_title=release_title,
         release_artist_id=release_artist_id,
+        content_item=item,
         content_item_id=item.id,
         content_item_title=item.title,
         approval_request_id=approval_request_id,

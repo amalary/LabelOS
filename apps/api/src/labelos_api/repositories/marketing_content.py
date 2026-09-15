@@ -335,7 +335,21 @@ async def get_item_for_update(
         statement = statement.where(
             MarketingContentItem.organization_id == workspace_id
         )
-    return await session.scalar(statement)
+    item = await session.scalar(statement)
+    if item is not None:
+        # Child mutations and snapshot verification follow the same parent-first
+        # protocol. Refresh again under ordered child locks, never cached intent.
+        await session.scalars(
+            select(MarketingContentItemChannel)
+            .options(
+                selectinload(MarketingContentItemChannel.social_account_connection)
+            )
+            .where(MarketingContentItemChannel.marketing_content_item_id == item.id)
+            .order_by(MarketingContentItemChannel.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    return item
 
 
 async def get_item_for_campaign(

@@ -6,6 +6,7 @@ from enum import Enum
 from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from labelos_database.models import MarketingContentItem
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from labelos_api.authorization import (
@@ -20,7 +21,7 @@ from labelos_api.repositories.approval_resources import (
     MARKETING_CONTENT_ITEM_RESOURCE_TYPE,
     get_approval_resource_adapter,
 )
-from labelos_api.services import approval_service
+from labelos_api.services import approval_service, scheduling_eligibility
 from labelos_api.services.social_account_service import (
     DestinationUnavailableReason,
     ResolvedDestination,
@@ -105,6 +106,7 @@ class CampaignCalendarChannelContext:
     channel: str
     placement: str
     destination_readiness: CampaignCalendarDestinationReadinessContext | None = None
+    scheduling_eligibility: dict[str, object] | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -182,6 +184,14 @@ async def list_campaign_calendar_events(
             include_published=query.include_published,
         ),
     )
+    content_items = {
+        event.content_item.id: event.content_item
+        for event in repository_events
+        if event.content_item is not None
+    }
+    readiness = await scheduling_eligibility.evaluate_content_batch(
+        session, workspace_id, list(content_items.values())
+    )
     normalized = [
         event
         for event in [
@@ -191,6 +201,11 @@ async def list_campaign_calendar_events(
                 actor=actor,
                 event=event,
                 timezone=timezone,
+                readiness=(
+                    readiness.get(event.content_item_id)
+                    if event.content_item_id is not None
+                    else None
+                ),
             )
             for event in repository_events
         ]
@@ -278,6 +293,7 @@ async def _normalize_event(
     actor: AuthorizationActorInput | None,
     event: campaign_calendar.CampaignCalendarEvent,
     timezone: ZoneInfo,
+    readiness: scheduling_eligibility.ContentSchedulingReadiness | None = None,
 ) -> NormalizedCampaignCalendarEvent:
     source_id = str(event.source_id)
     parent_id = _source_parent_id(event)
@@ -287,6 +303,7 @@ async def _normalize_event(
         workspace_id=workspace_id,
         actor=actor,
         event=event,
+        readiness=readiness,
     )
     sort_key = _sort_key(starts_at, event.event_type, event.source_id)
     return NormalizedCampaignCalendarEvent(
@@ -306,7 +323,7 @@ async def _normalize_event(
         campaign=_campaign_context(event),
         artist=_artist_context(event),
         release=_release_context(event),
-        channel=_channel_context(event),
+        channel=_channel_context(event, readiness),
         approval=approval,
         url=None,
         sort_key=sort_key,
@@ -390,22 +407,28 @@ def _release_context(
 
 def _channel_context(
     event: campaign_calendar.CampaignCalendarEvent,
+    readiness: scheduling_eligibility.ContentSchedulingReadiness | None = None,
 ) -> CampaignCalendarChannelContext | None:
     if event.channel_id is None or event.channel is None or event.placement is None:
         return None
+    eligibility = readiness.channels.get(event.channel_id) if readiness else None
     return CampaignCalendarChannelContext(
         id=str(event.channel_id),
         channel=event.channel,
         placement=event.placement,
-        destination_readiness=_destination_readiness(event),
+        destination_readiness=_destination_readiness(event, eligibility),
+        scheduling_eligibility=eligibility.projection() if eligibility else None,
     )
 
 
 def _destination_readiness(
     event: campaign_calendar.CampaignCalendarEvent,
+    eligibility: scheduling_eligibility.SchedulingEligibility | None = None,
 ) -> CampaignCalendarDestinationReadinessContext:
     connection = event.social_account_connection
-    if connection is None:
+    if eligibility is not None and eligibility.destination_resolution is not None:
+        return _destination_readiness_response(eligibility.destination_resolution)
+    if connection is None or eligibility is not None:
         return CampaignCalendarDestinationReadinessContext(
             planning_valid=True,
             delivery_ready=False,
@@ -522,6 +545,7 @@ async def _approval_context(
     workspace_id: UUID,
     actor: AuthorizationActorInput | None,
     event: campaign_calendar.CampaignCalendarEvent,
+    readiness: scheduling_eligibility.ContentSchedulingReadiness | None = None,
 ) -> CampaignCalendarApprovalContext | None:
     request = getattr(event, "approval_request", None)
     if request is None:
@@ -548,18 +572,20 @@ async def _approval_context(
         )
     approved_revision_is_current = None
     can_schedule = None
-    if request.resource_type == MARKETING_CONTENT_ITEM_RESOURCE_TYPE:
+    if readiness is not None:
+        approved_revision_is_current = readiness.approved_revision_is_current
+        can_schedule = readiness.planning_can_schedule
+    elif request.resource_type == MARKETING_CONTENT_ITEM_RESOURCE_TYPE:
         adapter = get_approval_resource_adapter(request.resource_type)
         resource = await adapter.resolve(session, workspace_id, request.resource_id)
-        if resource is not None:
-            approved_revision_is_current = adapter.approved_revision_is_current(
-                resource,
-                request,
+        if isinstance(resource, MarketingContentItem):
+            approved_revision_is_current = (
+                await scheduling_eligibility.has_current_approval(
+                    session, workspace_id, resource
+                )
             )
-            can_schedule = (
-                state == "approved"
-                and approved_revision_is_current
-                and _has_schedule_target(resource)
+            can_schedule = scheduling_eligibility.planning_can_schedule(
+                resource, approval_current=approved_revision_is_current
             )
     return CampaignCalendarApprovalContext(
         request_id=str(request.id),
@@ -568,16 +594,6 @@ async def _approval_context(
         approved_revision_is_current=approved_revision_is_current,
         can_schedule=can_schedule,
         available_actions=actions,
-    )
-
-
-def _has_schedule_target(resource: object) -> bool:
-    return bool(
-        getattr(resource, "scheduled_at", None) is not None
-        or any(
-            getattr(channel, "scheduled_at", None) is not None
-            for channel in getattr(resource, "channels", ())
-        )
     )
 
 

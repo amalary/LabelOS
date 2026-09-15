@@ -58,6 +58,7 @@ class CampaignCalendarDestinationReadinessContextResponse(BaseModel):
 
 
 class CampaignCalendarChannelContextResponse(BaseModel):
+    scheduling_eligibility: dict[str, object] | None = None
     id: UUID
     channel: str
     placement: str

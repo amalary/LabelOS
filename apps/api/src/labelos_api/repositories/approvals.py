@@ -1,16 +1,17 @@
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID
 
 from labelos_database.models import (
     ApprovalDecision,
+    ApprovalDecisionValue,
     ApprovalRequest,
     ApprovalRequestStage,
     ApprovalRequestStatus,
     ApprovalStageStatus,
 )
-from sqlalchemy import Select, func, or_, select
+from sqlalchemy import Select, func, or_, select, tuple_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -19,6 +20,7 @@ from labelos_api.repositories.approval_resources import (
     MARKETING_CONTENT_ITEM_RESOURCE_TYPE,
     get_approval_resource_adapter,
 )
+from labelos_api.scheduling.contracts import ApprovalEvidence
 
 ACTIVE_REQUEST_STATUSES = frozenset(
     {
@@ -296,8 +298,21 @@ async def find_conflicting_or_resolved_request(
     resource_type: str,
     resource_id: UUID,
     resource_revision: int,
+    *,
+    for_update: bool = False,
 ) -> ApprovalRequest | None:
     get_approval_resource_adapter(resource_type)
+    if for_update:
+        # Caller holds the resource parent/channel locks. Lock all candidates in
+        # ID order before selecting authority; parent lock also fences inserts.
+        await session.scalars(
+            _resource_revision_statement(
+                organization_id, resource_type, resource_id, resource_revision
+            )
+            .order_by(ApprovalRequest.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
     return await session.scalar(
         _resource_revision_statement(
             organization_id,
@@ -310,12 +325,155 @@ async def find_conflicting_or_resolved_request(
                 tuple(ACTIVE_REQUEST_STATUSES | RESOLVED_REQUEST_STATUSES)
             )
         )
-        .order_by(
-            ApprovalRequest.status.in_(ACTIVE_REQUEST_STATUSES).desc(),
-            ApprovalRequest.created_at.desc(),
-            ApprovalRequest.id.desc(),
-        )
+        .order_by(*_authority_order())
+        .limit(1)
+        .execution_options(populate_existing=for_update)
     )
+
+
+async def get_request_for_update(
+    session: AsyncSession, organization_id: UUID, approval_request_id: UUID
+) -> ApprovalRequest | None:
+    """Reload request and stages under locks; caller must lock its parent first."""
+    request = await session.scalar(
+        select(ApprovalRequest)
+        .options(*_request_load_options())
+        .where(
+            ApprovalRequest.organization_id == organization_id,
+            ApprovalRequest.id == approval_request_id,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if request is not None:
+        await session.scalars(
+            select(ApprovalRequestStage)
+            .options(
+                selectinload(ApprovalRequestStage.decisions),
+                selectinload(ApprovalRequestStage.assigned_profile),
+            )
+            .where(ApprovalRequestStage.approval_request_id == request.id)
+            .order_by(ApprovalRequestStage.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    return request
+
+
+async def load_current_approval_evidence_for_update(
+    session: AsyncSession,
+    organization_id: UUID,
+    resource_type: str,
+    resource_id: UUID,
+    resource_revision: int,
+) -> ApprovalEvidence | None:
+    """Authoritative evidence after parent/channel locks, in caller transaction."""
+    request = await find_conflicting_or_resolved_request(
+        session,
+        organization_id,
+        resource_type,
+        resource_id,
+        resource_revision,
+        for_update=True,
+    )
+    if request is None:
+        return None
+    request = await get_request_for_update(session, organization_id, request.id)
+    assert request is not None
+    return ApprovalEvidence(
+        request_id=request.id,
+        workspace_id=organization_id,
+        resource_type=resource_type,
+        content_item_id=resource_id,
+        content_revision=request.resource_revision,
+        status=request.status,
+        invalidated=any(
+            decision.decision == ApprovalDecisionValue.invalidated
+            for decision in request.decisions
+        ),
+    )
+
+
+def _authority_order():
+    return (
+        ApprovalRequest.status.in_(ACTIVE_REQUEST_STATUSES).desc(),
+        ApprovalRequest.created_at.desc(),
+        ApprovalRequest.id.desc(),
+    )
+
+
+async def load_current_approval_evidence(
+    session: AsyncSession,
+    organization_id: UUID,
+    resource_type: str,
+    revisions: Sequence[tuple[UUID, int]],
+) -> dict[UUID, ApprovalEvidence]:
+    """Batch equivalent of find_conflicting_or_resolved_request, plus invalidation.
+
+    Request status is the approval engine's completion authority. Do not count
+    stages here or let a historical approved request override an active request.
+    This is a read projection, not the future activation locking protocol.
+    """
+    get_approval_resource_adapter(resource_type)
+    if not revisions:
+        return {}
+    ranked = (
+        select(
+            ApprovalRequest.id,
+            func.row_number()
+            .over(
+                partition_by=(
+                    ApprovalRequest.resource_id,
+                    ApprovalRequest.resource_revision,
+                ),
+                order_by=_authority_order(),
+            )
+            .label("authority_rank"),
+        )
+        .where(
+            ApprovalRequest.organization_id == organization_id,
+            ApprovalRequest.resource_type == resource_type,
+            tuple_(ApprovalRequest.resource_id, ApprovalRequest.resource_revision).in_(
+                revisions
+            ),
+            ApprovalRequest.status.in_(
+                ACTIVE_REQUEST_STATUSES | RESOLVED_REQUEST_STATUSES
+            ),
+        )
+        .subquery()
+    )
+    invalidated = (
+        select(ApprovalDecision.id)
+        .where(
+            ApprovalDecision.organization_id == organization_id,
+            ApprovalDecision.approval_request_id == ApprovalRequest.id,
+            ApprovalDecision.decision == ApprovalDecisionValue.invalidated,
+        )
+        .exists()
+    )
+    rows = await session.execute(
+        select(
+            ApprovalRequest.id,
+            ApprovalRequest.resource_id,
+            ApprovalRequest.resource_revision,
+            ApprovalRequest.status,
+            invalidated.label("invalidated"),
+        )
+        .join(ranked, ranked.c.id == ApprovalRequest.id)
+        .where(ranked.c.authority_rank == 1)
+    )
+    return {
+        row.resource_id: ApprovalEvidence(
+            request_id=row.id,
+            workspace_id=organization_id,
+            resource_type=resource_type,
+            content_item_id=row.resource_id,
+            content_revision=row.resource_revision,
+            status=row.status,
+            invalidated=row.invalidated,
+        )
+        for row in rows
+    }
 
 
 def _resource_revision_statement(

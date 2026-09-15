@@ -16,7 +16,7 @@ from sqlalchemy import select
 
 from labelos_api.auth import CurrentUserContext, SessionDep, get_current_user_context
 from labelos_api.scheduling.timezones import ScheduleValidationError, utc_instant
-from labelos_api.services import marketing_content_service
+from labelos_api.services import marketing_content_service, scheduling_eligibility
 from labelos_api.services.marketing_content_service import (
     MarketingContentAuthorizationError,
     MarketingContentChannelCreate,
@@ -31,7 +31,6 @@ from labelos_api.services.marketing_content_service import (
 from labelos_api.services.social_account_service import (
     DestinationUnavailableReason,
     ResolvedDestination,
-    resolved_destination_for_connection,
 )
 
 router = APIRouter(prefix="/workspaces", tags=["marketing-content"])
@@ -129,6 +128,7 @@ class MarketingContentChannelResponse(BaseModel):
     copy_text_override: str | None
     asset_refs: list[Any]
     metadata: dict[str, Any]
+    scheduling_eligibility: dict[str, object]
     destination_readiness: "MarketingContentDestinationReadinessResponse"
     created_at: datetime
     updated_at: datetime
@@ -317,6 +317,7 @@ def _stored_schedule_instant(value: datetime | None) -> datetime | None:
 
 def _channel_response(
     channel: MarketingContentItemChannel,
+    eligibility: scheduling_eligibility.SchedulingEligibility,
 ) -> MarketingContentChannelResponse:
     return MarketingContentChannelResponse(
         id=channel.id,
@@ -335,17 +336,18 @@ def _channel_response(
         copy_text_override=channel.copy_text_override,
         asset_refs=list(channel.asset_refs),
         metadata=dict(channel.metadata_json),
-        destination_readiness=_destination_readiness(channel),
+        scheduling_eligibility=eligibility.projection(),
+        destination_readiness=_destination_readiness(eligibility),
         created_at=channel.created_at,
         updated_at=channel.updated_at,
     )
 
 
 def _destination_readiness(
-    channel: MarketingContentItemChannel,
+    eligibility: scheduling_eligibility.SchedulingEligibility,
 ) -> MarketingContentDestinationReadinessResponse:
-    connection = channel.social_account_connection
-    if channel.social_account_connection_id is None or connection is None:
+    destination = eligibility.destination_resolution
+    if destination is None:
         return MarketingContentDestinationReadinessResponse(
             planning_valid=True,
             delivery_ready=False,
@@ -357,11 +359,6 @@ def _destination_readiness(
             ),
             account=None,
         )
-    destination = resolved_destination_for_connection(
-        connection,
-        workspace_id=connection.organization_id,
-        provider=channel.channel,
-    )
     return _destination_readiness_response(destination)
 
 
@@ -458,19 +455,11 @@ def _destination_unavailable_warning(status_value: str) -> str:
 
 def _approval_state(
     item: MarketingContentItem,
+    readiness: scheduling_eligibility.ContentSchedulingReadiness,
 ) -> MarketingContentApprovalStateResponse:
     approval_request = item.approval_request
-    approved_revision_is_current = (
-        item.approved_revision is not None
-        and item.approved_revision == item.content_revision
-        and approval_request is not None
-        and approval_request.status == ApprovalRequestStatus.approved
-    )
-    can_schedule = (
-        item.status == MarketingContentItemStatus.approved
-        and approved_revision_is_current
-        and _has_schedule_target(item)
-    )
+    approved_revision_is_current = readiness.approved_revision_is_current
+    can_schedule = readiness.planning_can_schedule
     if item.status in {
         MarketingContentItemStatus.published,
         MarketingContentItemStatus.cancelled,
@@ -513,14 +502,10 @@ def _approval_state(
     )
 
 
-def _has_schedule_target(item: MarketingContentItem) -> bool:
-    return bool(
-        item.scheduled_at is not None
-        or any(channel.scheduled_at is not None for channel in item.channels)
-    )
-
-
-def _content_response(item: MarketingContentItem) -> MarketingContentResponse:
+def _content_response(
+    item: MarketingContentItem,
+    readiness: scheduling_eligibility.ContentSchedulingReadiness,
+) -> MarketingContentResponse:
     return MarketingContentResponse(
         id=item.id,
         workspace_id=item.organization_id,
@@ -540,20 +525,30 @@ def _content_response(item: MarketingContentItem) -> MarketingContentResponse:
         published_at=item.published_at,
         approval_requested_at=item.approval_requested_at,
         approval_request_id=item.approval_request_id,
-        approval_state=_approval_state(item),
+        approval_state=_approval_state(item, readiness),
         content_revision=item.content_revision,
         approved_revision=item.approved_revision,
         approved_at=item.approved_at,
         approved_by_profile_id=item.approved_by_profile_id,
-        channels=[_channel_response(channel) for channel in item.channels],
+        channels=[
+            _channel_response(channel, readiness.channels[channel.id])
+            for channel in item.channels
+        ],
         created_at=item.created_at,
         updated_at=item.updated_at,
     )
 
 
-def _list_response(page) -> MarketingContentListResponse:
+async def _list_response(
+    session, workspace_id: UUID, page
+) -> MarketingContentListResponse:
+    readiness = await scheduling_eligibility.evaluate_content_batch(
+        session, workspace_id, page.items
+    )
     return MarketingContentListResponse(
-        marketing_content=[_content_response(item) for item in page.items],
+        marketing_content=[
+            _content_response(item, readiness[item.id]) for item in page.items
+        ],
         total=page.total,
         limit=page.limit,
         offset=page.offset,
@@ -644,7 +639,7 @@ async def list_workspace_marketing_content(
         ):
             raise _bad_request(str(exc)) from exc
         _service_error(exc)
-    return _list_response(page)
+    return await _list_response(session, workspace_id, page)
 
 
 @router.get(
@@ -675,7 +670,7 @@ async def list_campaign_marketing_content(
         MarketingContentAuthorizationError,
     ) as exc:
         _service_error(exc)
-    return _list_response(page)
+    return await _list_response(session, workspace_id, page)
 
 
 @router.post(
@@ -716,7 +711,10 @@ async def create_marketing_content(
         MarketingContentAuthorizationError,
     ) as exc:
         _service_error(exc)
-    return _content_response(item)
+    readiness = await scheduling_eligibility.evaluate_content_batch(
+        session, workspace_id, [item]
+    )
+    return _content_response(item, readiness[item.id])
 
 
 @router.get(
@@ -743,7 +741,10 @@ async def get_marketing_content(
         MarketingContentAuthorizationError,
     ) as exc:
         _service_error(exc)
-    return _content_response(item)
+    readiness = await scheduling_eligibility.evaluate_content_batch(
+        session, workspace_id, [item]
+    )
+    return _content_response(item, readiness[item.id])
 
 
 @router.patch(
@@ -791,7 +792,10 @@ async def update_marketing_content(
         MarketingContentAuthorizationError,
     ) as exc:
         _service_error(exc)
-    return _content_response(item)
+    readiness = await scheduling_eligibility.evaluate_content_batch(
+        session, workspace_id, [item]
+    )
+    return _content_response(item, readiness[item.id])
 
 
 @router.patch(
@@ -843,7 +847,10 @@ async def update_marketing_content_status(
         MarketingContentAuthorizationError,
     ) as exc:
         _service_error(exc)
-    return _content_response(item)
+    readiness = await scheduling_eligibility.evaluate_content_batch(
+        session, workspace_id, [item]
+    )
+    return _content_response(item, readiness[item.id])
 
 
 @router.post(
@@ -877,4 +884,7 @@ async def archive_marketing_content(
         MarketingContentAuthorizationError,
     ) as exc:
         _service_error(exc)
-    return _content_response(item)
+    readiness = await scheduling_eligibility.evaluate_content_batch(
+        session, workspace_id, [item]
+    )
+    return _content_response(item, readiness[item.id])

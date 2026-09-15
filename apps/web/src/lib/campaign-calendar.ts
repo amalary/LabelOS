@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useSyncExternalStore } from "react";
 
+import type { SchedulingEligibility } from "./marketing-content";
+
 export type CampaignCalendarApiErrorCode =
   "unauthorized" | "forbidden" | "not_found" | "validation" | "network_failure";
 
@@ -77,6 +79,7 @@ export type CampaignCalendarChannelContext = {
   channel: string;
   placement: string;
   destination_readiness?: CampaignCalendarDestinationReadinessContext | null;
+  scheduling_eligibility?: SchedulingEligibility | null;
 };
 
 export type CampaignCalendarApprovalContext = {

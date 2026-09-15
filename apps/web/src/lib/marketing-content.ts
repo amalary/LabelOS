@@ -38,6 +38,26 @@ export type MarketingContentDestinationReadiness = {
   account: MarketingContentDestinationAccount | null;
 };
 
+export type SchedulingEligibility = {
+  eligible: boolean;
+  content_revision: number;
+  approval_request_id: string | null;
+  scheduled_for: string | null;
+  schedule_timezone: string | null;
+  destination_resolution: {
+    id: string;
+    usable: boolean;
+    supports_automatic_publication: boolean;
+    requires_assisted_publication: boolean;
+    unavailable_reasons: string[];
+  } | null;
+  automatic_handoff_eligible: boolean;
+  manual_handoff_required: boolean;
+  execution_mode: "disabled" | "automatic" | "manual";
+  reason_codes: string[];
+  explanations: string[];
+};
+
 export type MarketingContentItemChannel = {
   id: string;
   marketing_content_item_id: string;
@@ -56,6 +76,7 @@ export type MarketingContentItemChannel = {
   asset_refs: unknown[];
   metadata: Record<string, unknown>;
   destination_readiness?: MarketingContentDestinationReadiness;
+  scheduling_eligibility?: SchedulingEligibility;
   created_at: string;
   updated_at: string;
 };

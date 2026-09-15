@@ -590,6 +590,11 @@ def test_marketing_content_campaign_crud_and_lifecycle(
     )
     assert approved_multi.status_code == 200
     assert approved_multi.json()["approval_state"]["can_schedule"] is True
+    for channel in approved_multi.json()["channels"]:
+        eligibility = channel["scheduling_eligibility"]
+        assert eligibility["eligible"] is False
+        assert eligibility["automatic_handoff_eligible"] is False
+        assert "execution_disabled" in eligibility["reason_codes"]
     _set_context(client, seeded)
     scheduled = client.patch(
         f"{base}/{multi_channel['id']}/status",

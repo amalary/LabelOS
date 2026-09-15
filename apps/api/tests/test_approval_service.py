@@ -1013,10 +1013,21 @@ def test_approval_service_second_resolution_is_stable_domain_conflict(
                 except ApprovalAlreadyResolvedError:
                     return "already_resolved"
 
-        outcomes = await asyncio.gather(
-            decide(seed.reviewer, True),
-            decide(seed.second_reviewer, False),
-        )
+        # In-memory SQLite uses one StaticPool connection for both sessions.
+        # It cannot run independent concurrent transactions/savepoints. Exercise
+        # the replay there; the PostgreSQL parameter tests the actual race.
+        async with sessionmaker() as session:
+            is_sqlite = session.get_bind().dialect.name == "sqlite"
+        if is_sqlite:
+            outcomes = [
+                await decide(seed.reviewer, True),
+                await decide(seed.second_reviewer, False),
+            ]
+        else:
+            outcomes = await asyncio.gather(
+                decide(seed.reviewer, True),
+                decide(seed.second_reviewer, False),
+            )
         async with sessionmaker() as session:
             history = await get_approval_history(
                 session,
