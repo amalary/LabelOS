@@ -13,6 +13,8 @@ from labelos_database.models import (
     ApprovalRequestStatus,
     Artist,
     Campaign,
+    MarketingContentItem,
+    MarketingContentItemChannel,
     MembershipRole,
     Organization,
     OrganizationMembership,
@@ -2328,3 +2330,61 @@ def test_channel_replacement_api_preserves_ids_and_rejects_duplicates(
     removed = client.patch(url, json={"channels": [channels[0]]})
     assert removed.status_code == 200
     assert [row["id"] for row in removed.json()["channels"]] == original_ids[:1]
+
+
+def test_channel_replacement_api_validates_explicit_ids_and_preserves_response_shape(
+    marketing_content_client,
+):
+    client, _sessionmaker, seeded = marketing_content_client
+    _set_context(client, seeded)
+    base = _base(seeded)
+    payload = {
+        **_draft_payload(seeded),
+        "channels": [{"channel": "instagram", "placement": "feed"}],
+    }
+    original = client.post(base, json=payload).json()
+    other = client.post(base, json=payload).json()
+
+    async def seed_foreign_channel():
+        async with _sessionmaker() as session:
+            foreign = MarketingContentItem(
+                organization_id=seeded.outside_workspace_id,
+                campaign_id=seeded.outside_campaign_id,
+                title="Foreign content",
+                content_type="image",
+                channels=[
+                    MarketingContentItemChannel(channel="instagram", placement="feed")
+                ],
+            )
+            session.add(foreign)
+            await session.commit()
+            return str(foreign.channels[0].id)
+
+    foreign_channel_id = asyncio.run(seed_foreign_channel())
+    url = f"{base}/{original['id']}"
+    channel = {**payload["channels"][0], "id": original["channels"][0]["id"]}
+    noop = client.patch(url, json={"channels": [channel]})
+    assert noop.status_code == 200
+    assert noop.json()["content_revision"] == original["content_revision"]
+    assert noop.json()["channels"][0]["id"] == channel["id"]
+    assert noop.json().keys() == original.keys()
+    assert noop.json()["channels"][0].keys() == original["channels"][0].keys()
+    for invalid_id in (str(uuid4()), other["channels"][0]["id"], foreign_channel_id):
+        rejected = client.patch(
+            url,
+            json={
+                "title": "Must not persist",
+                "channels": [{**channel, "id": invalid_id}],
+            },
+        )
+        assert rejected.status_code == 400
+    restored = client.get(url).json()
+    assert restored["title"] == original["title"]
+    assert restored["content_revision"] == original["content_revision"]
+    replaced = client.patch(url, json={"channels": [{**channel, "placement": "story"}]})
+    assert replaced.status_code == 200
+    assert replaced.json()["channels"][0]["id"] != channel["id"]
+    assert replaced.json()["content_revision"] == original["content_revision"] + 1
+    # A stale explicit ID cannot silently fall back to a matching logical key.
+    stale = client.patch(url, json={"channels": [{**channel, "placement": "story"}]})
+    assert stale.status_code == 400

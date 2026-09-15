@@ -1,6 +1,7 @@
 import asyncio
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta, timezone
+from uuid import uuid4
 
 import pytest
 from labelos_database.base import Base
@@ -221,5 +222,123 @@ def test_reconciliation_empty_replacement_explicitly_removes_all_channels(sessio
                 list((await session.scalars(select(MarketingContentItemChannel))).all())
                 == []
             )
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("identity_field", ["channel", "placement"])
+def test_explicit_identity_retains_edits_and_replaces_logical_changes(
+    sessionmaker, identity_field
+):
+    async def run():
+        async with sessionmaker() as session:
+            item = await seed_item(session)
+            item_id = item.id
+            instagram, threads = item.channels
+            original_ids = (instagram.id, threads.id)
+            values = [
+                {"id": threads.id, "channel": "threads"},
+                {
+                    "id": instagram.id,
+                    "channel": "instagram",
+                    "placement": "feed",
+                    "copy_text_override": "Edit",
+                },
+            ]
+            edited = await marketing_content.reconcile_channels(
+                session, item_id, values
+            )
+            assert edited.retained_channel_ids == original_ids
+            assert edited.updated_channel_ids == (instagram.id,)
+            assert edited.created_channel_ids == edited.removed_channel_ids == ()
+            values[1][identity_field] = (
+                "tiktok" if identity_field == "channel" else "story"
+            )
+            replaced = await marketing_content.reconcile_channels(
+                session, item_id, values
+            )
+            assert replaced.retained_channel_ids == (threads.id,)
+            assert replaced.removed_channel_ids == (instagram.id,)
+            assert len(replaced.created_channel_ids) == 1
+            assert replaced.created_channel_ids[0] not in original_ids
+            assert replaced.material_change
+
+    asyncio.run(run())
+
+
+def test_reconciliation_validates_ids_against_parent_and_rejects_double_claims(
+    sessionmaker,
+):
+    async def run():
+        async with sessionmaker() as session:
+            item = await seed_item(session)
+            instagram, threads = item.channels
+            other = MarketingContentItem(
+                organization_id=item.organization_id,
+                campaign_id=item.campaign_id,
+                title="Other parent",
+                content_type="image",
+                channels=[
+                    MarketingContentItemChannel(channel="instagram", placement="feed")
+                ],
+            )
+            session.add(other)
+            await session.commit()
+            for invalid_id in (uuid4(), other.channels[0].id):
+                with pytest.raises(ValueError, match="does not belong"):
+                    marketing_content.plan_channel_reconciliation(
+                        item,
+                        [
+                            {
+                                "id": invalid_id,
+                                "channel": "instagram",
+                                "placement": "feed",
+                            }
+                        ],
+                    )
+            for second in (
+                {"id": instagram.id, "channel": "tiktok"},
+                {"channel": "instagram", "placement": "feed"},
+            ):
+                with pytest.raises(ValueError, match="more than once"):
+                    marketing_content.plan_channel_reconciliation(
+                        item,
+                        [
+                            {
+                                "id": instagram.id,
+                                "channel": "instagram",
+                                "placement": "story",
+                            },
+                            second,
+                        ],
+                    )
+            assert [row.id for row in item.channels] == [instagram.id, threads.id]
+
+    asyncio.run(run())
+
+
+def test_explicit_id_swap_releases_unique_keys_and_rolls_back_without_commit(
+    sessionmaker,
+):
+    async def run():
+        async with sessionmaker() as session:
+            item = await seed_item(session)
+            item_id, workspace_id = item.id, item.organization_id
+            instagram, threads = item.channels
+            original_ids = (instagram.id, threads.id)
+            result = await marketing_content.reconcile_channels(
+                session,
+                item_id,
+                [
+                    {"id": instagram.id, "channel": "threads"},
+                    {"id": threads.id, "channel": "instagram", "placement": "feed"},
+                ],
+            )
+            assert result.removed_channel_ids == original_ids
+            assert len(result.created_channel_ids) == 2
+            assert result.retained_channel_ids == result.updated_channel_ids == ()
+            await session.rollback()
+            restored = await marketing_content.get_item(session, workspace_id, item_id)
+            assert tuple(row.id for row in restored.channels) == original_ids
 
     asyncio.run(run())

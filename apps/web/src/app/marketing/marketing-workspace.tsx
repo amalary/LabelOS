@@ -358,6 +358,7 @@ type ContentEditorSurface = "calendar" | "drafts";
 
 type ChannelFormRow = {
   id: string;
+  persistedId?: string;
   channel: string;
   placement: string;
   socialAccountConnectionId: string;
@@ -486,6 +487,7 @@ function initialFormState({
         channel: channel.channel,
         copyTextOverride: channel.copy_text_override ?? "",
         id: channel.id || `channel_${index}`,
+        persistedId: channel.id,
         placement: channel.placement ?? "",
         socialAccountConnectionId: channel.social_account_connection_id ?? "",
         scheduledAt: formatDateTimeInput(channel.scheduled_at),
@@ -519,6 +521,7 @@ function formToPayload(form: ContentFormState): MarketingContentItemCreate {
     artist_id: form.artistId || null,
     asset_refs: parseAssetRefs(form.assetRefsJson, "Asset references"),
     channels: form.channels.map<MarketingContentChannelCreate>((channel) => ({
+      ...(channel.persistedId ? { id: channel.persistedId } : {}),
       asset_refs: parseAssetRefs(channel.assetRefsJson, "Channel asset references"),
       channel: channel.channel,
       copy_text_override: channel.copyTextOverride || null,

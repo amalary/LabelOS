@@ -30,7 +30,7 @@ from labelos_api.repositories import approvals, marketing_content
 from labelos_api.repositories.approval_resources import (
     MARKETING_CONTENT_ITEM_RESOURCE_TYPE,
 )
-from labelos_api.services import approval_service
+from labelos_api.services import approval_service, content_invalidation
 from labelos_api.services.approval_service import (
     ApprovalDuplicateActiveRequestError,
     ApprovalMissingCapabilityError,
@@ -147,6 +147,11 @@ class MarketingContentChannelCreate:
     copy_text_override: str | None = None
     asset_refs: list | None = None
     metadata_json: dict | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class MarketingContentChannelReplacement(MarketingContentChannelCreate):
+    id: UUID | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -820,6 +825,7 @@ async def _apply_material_change(
     workspace_id: UUID,
     item: MarketingContentItem,
     actor: AuthorizationActorInput | None,
+    reconciliation: marketing_content.ChannelReconciliationPlan | None = None,
 ) -> bool:
     if item.status == MarketingContentItemStatus.published:
         raise MarketingContentLifecycleError(
@@ -838,6 +844,33 @@ async def _apply_material_change(
             actor=actor,
             reason="Material marketing content edit superseded this approval.",
         )
+    await content_invalidation.invalidate_content_channels(
+        session,
+        content_invalidation.ContentInvalidation(
+            workspace_id=workspace_id,
+            content_item_id=item.id,
+            previous_content_revision=item.content_revision,
+            previous_approval_request_id=previous_request_id,
+            previous_channel_ids=tuple(sorted(row.id for row in item.channels)),
+            materially_changed_channel_ids=(
+                tuple(
+                    sorted(
+                        row.id
+                        for row, changes in reconciliation.updated
+                        if changes.keys() & CHANNEL_MATERIAL_FIELDS
+                    )
+                )
+                if reconciliation is not None
+                else ()
+            ),
+            removed_channel_ids=(
+                tuple(sorted(row.id for row in reconciliation.removed))
+                if reconciliation is not None
+                else ()
+            ),
+        ),
+        actor=actor,
+    )
     item.content_revision += 1
     item.approved_at = None
     item.approved_by_profile_id = None
@@ -1296,21 +1329,35 @@ async def update_content_item_with_channels(
     if "release_id" not in relationship_values and item.release_id is not None:
         relationship_values["release_id"] = item.release_id
     await _validate_item_relationships(session, workspace_id, relationship_values)
-    channel_values = [_channel_create_values(channel) for channel in channels]
+    channel_values = [
+        {
+            **_channel_create_values(channel),
+            **(
+                {"id": channel.id}
+                if isinstance(channel, MarketingContentChannelReplacement)
+                else {}
+            ),
+        }
+        for channel in channels
+    ]
     _assert_unique_channel_targets(channel_values)
+    effective_artist_id = relationship_values.get("artist_id")
     await _validate_channel_destinations(
         session,
         workspace_id,
         campaign_id=item.campaign_id,
         artist_id=(
-            relationship_values.get("artist_id")
-            if isinstance(relationship_values.get("artist_id"), UUID)
-            else None
+            effective_artist_id if isinstance(effective_artist_id, UUID) else None
         ),
         channel_values=channel_values,
     )
     changed_fields = _changed_fields(item, values) if values else set()
-    reconciliation = marketing_content.plan_channel_reconciliation(item, channel_values)
+    try:
+        reconciliation = marketing_content.plan_channel_reconciliation(
+            item, channel_values
+        )
+    except ValueError as exc:
+        raise MarketingContentRelationshipError(str(exc)) from exc
     item_material_change = bool(
         payload.material_change and changed_fields & MATERIAL_FIELDS
     )
@@ -1324,6 +1371,7 @@ async def update_content_item_with_channels(
                 workspace_id=workspace_id,
                 item=item,
                 actor=actor,
+                reconciliation=reconciliation,
             )
         if changed_fields:
             updated = await marketing_content.update_item(
@@ -1422,29 +1470,41 @@ async def update_channel(
         artist_id=item.artist_id,
         channel_values=prospective,
     )
-    updated = await marketing_content.update_channel(
-        session,
-        channel_id,
-        {key: values[key] for key in changed_fields},
-    )
-    if updated is None:
-        raise MarketingContentNotFoundError("Marketing content channel not found")
-    if changed_fields & CHANNEL_MATERIAL_FIELDS:
-        await _apply_material_change(
+    replacements = [
+        {
+            "id": row.id,
+            **{
+                field: getattr(row, field)
+                for field in marketing_content.CHANNEL_VALUE_FIELDS
+            },
+            **(values if row.id == channel_id else {}),
+        }
+        for row in item.channels
+    ]
+    reconciliation = marketing_content.plan_channel_reconciliation(item, replacements)
+    try:
+        if reconciliation.material_change:
+            await _apply_material_change(
+                session,
+                workspace_id=workspace_id,
+                item=item,
+                actor=actor,
+                reconciliation=reconciliation,
+            )
+        await marketing_content.apply_channel_reconciliation(session, reconciliation)
+        updated = reconciliation.created[0] if reconciliation.created else channel
+        await _publish_content_event(
             session,
             workspace_id=workspace_id,
-            item=item,
+            event_type=RealtimeEventType.marketing_content_updated,
             actor=actor,
+            item=item,
+            status=item.status,
         )
-    await _publish_content_event(
-        session,
-        workspace_id=workspace_id,
-        event_type=RealtimeEventType.marketing_content_updated,
-        actor=actor,
-        item=item,
-        status=item.status,
-    )
-    await session.commit()
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        raise
     return updated
 
 

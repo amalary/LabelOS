@@ -154,8 +154,12 @@ export type MarketingContentItemCreate = {
   channels?: MarketingContentChannelCreate[];
 };
 
-export type MarketingContentItemUpdate = Partial<MarketingContentItemCreate> & {
-  channels?: MarketingContentChannelCreate[] | null;
+export type MarketingContentChannelReplacement = MarketingContentChannelCreate & {
+  id?: string | null;
+};
+
+export type MarketingContentItemUpdate = Partial<Omit<MarketingContentItemCreate, "channels">> & {
+  channels?: MarketingContentChannelReplacement[] | null;
 };
 
 export type MarketingContentStatusTransition = {

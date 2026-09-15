@@ -2003,6 +2003,7 @@ describe("MarketingWorkspace", () => {
         channels: [
           expect.objectContaining({
             asset_refs: [{ id: "channel_asset_existing" }],
+            id: draft.channels[0]!.id,
             channel: "instagram",
             copy_text_override: "Updated IG copy",
             placement: "reels",

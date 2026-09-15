@@ -117,10 +117,19 @@ def plan_channel_reconciliation(
     item: MarketingContentItem, values: Sequence[Mapping[str, object]]
 ) -> ChannelReconciliationPlan:
     existing = {(row.channel, row.placement): row for row in item.channels}
+    if len(existing) != len(item.channels):
+        raise ValueError("Ambiguous channel identity; explicit identity is required")
+    existing_by_id = {row.id: row for row in item.channels}
+    claimed_ids: set[UUID] = set()
     proposed = {}
     for value in values:
-        if value.keys() - CHANNEL_VALUE_FIELDS:
+        if value.keys() - (CHANNEL_VALUE_FIELDS | {"id"}):
             raise ValueError("Unsupported channel fields")
+        channel_id = value.get("id")
+        if channel_id is not None and not isinstance(channel_id, UUID):
+            raise ValueError("Channel ID must be a UUID")
+        if channel_id is not None and channel_id not in existing_by_id:
+            raise ValueError("Channel ID does not belong to this content item")
         # Construct detached candidates to apply model validation and replacement
         # defaults, including clearing omitted optional values on retained rows.
         candidate = MarketingContentItemChannel(
@@ -129,22 +138,27 @@ def plan_channel_reconciliation(
                 "placement": "default",
                 "asset_refs": [],
                 "metadata_json": {},
-                **dict(value),
+                **{field: data for field, data in value.items() if field != "id"},
             },
         )
         key = (candidate.channel, candidate.placement)
         if key in proposed:
             raise ValueError("Duplicate channel and placement target")
-        proposed[key] = candidate
+        source = (
+            existing_by_id[channel_id] if channel_id is not None else existing.get(key)
+        )
+        if source is not None:
+            if source.id in claimed_ids:
+                raise ValueError("Channel ID is used more than once")
+            claimed_ids.add(source.id)
+        proposed[key] = (candidate, source)
 
     retained = []
     created = []
     updated = []
-    removed = tuple(existing[key] for key in sorted(existing.keys() - proposed.keys()))
-    material_change = bool(removed)
-    for key, candidate in sorted(proposed.items()):
-        row = existing.get(key)
-        if row is None:
+    material_change = False
+    for key, (candidate, row) in sorted(proposed.items()):
+        if row is None or (row.channel, row.placement) != key:
             created.append(candidate)
             material_change = True
             continue
@@ -156,6 +170,11 @@ def plan_channel_reconciliation(
         if changed:
             updated.append((row, {field: replacement[field] for field in changed}))
             material_change |= bool(changed & CHANNEL_MATERIAL_FIELDS)
+    retained_ids = {row.id for row in retained}
+    removed = tuple(
+        row for _, row in sorted(existing.items()) if row.id not in retained_ids
+    )
+    material_change |= bool(removed)
     return ChannelReconciliationPlan(
         item=item,
         retained=tuple(retained),
@@ -174,9 +193,13 @@ async def apply_channel_reconciliation(
             setattr(row, field, value)
         if "social_account_connection_id" in values:
             session.expire(row, ["social_account_connection"])
-    session.add_all(plan.created)
     for row in plan.removed:
         await session.delete(row)
+    # Release logical keys before inserting replacements (including explicit-ID
+    # swaps). Both flushes remain inside the caller's transaction.
+    if plan.removed:
+        await session.flush()
+    session.add_all(plan.created)
     await session.flush()
     if plan.changed:
         session.expire(plan.item, ["channels"])
@@ -499,6 +522,20 @@ async def update_channel(
     channel = await _get_channel_for_update(session, channel_id)
     if channel is None:
         return None
+    if changed_channel_fields(channel, values) & {"channel", "placement"}:
+        item = await get_item_for_update(session, channel.marketing_content_item_id)
+        assert item is not None
+        replacements = [
+            {
+                "id": row.id,
+                **{field: getattr(row, field) for field in CHANNEL_VALUE_FIELDS},
+                **(dict(values) if row.id == channel_id else {}),
+            }
+            for row in item.channels
+        ]
+        plan = plan_channel_reconciliation(item, replacements)
+        await apply_channel_reconciliation(session, plan)
+        return plan.created[0]
     for key, value in values.items():
         setattr(channel, key, value)
     if "social_account_connection_id" in values:

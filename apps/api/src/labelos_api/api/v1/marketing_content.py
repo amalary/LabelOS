@@ -18,6 +18,7 @@ from labelos_api.services import marketing_content_service
 from labelos_api.services.marketing_content_service import (
     MarketingContentAuthorizationError,
     MarketingContentChannelCreate,
+    MarketingContentChannelReplacement,
     MarketingContentItemCreate,
     MarketingContentItemQuery,
     MarketingContentItemUpdate,
@@ -69,6 +70,10 @@ class MarketingContentCreateRequest(BaseModel):
         return _require_timezone(value)
 
 
+class MarketingContentChannelReplacementRequest(MarketingContentChannelCreateRequest):
+    id: UUID | None = None
+
+
 class MarketingContentUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -80,7 +85,7 @@ class MarketingContentUpdateRequest(BaseModel):
     release_id: UUID | None = None
     owner_profile_id: UUID | None = None
     scheduled_at: datetime | None = None
-    channels: list[MarketingContentChannelCreateRequest] | None = None
+    channels: list[MarketingContentChannelReplacementRequest] | None = None
 
     @field_validator("scheduled_at")
     @classmethod
@@ -248,6 +253,8 @@ async def _current_workspace_membership(
 def _channel_create(
     channel: MarketingContentChannelCreateRequest,
 ) -> MarketingContentChannelCreate:
+    if isinstance(channel, MarketingContentChannelReplacementRequest):
+        return MarketingContentChannelReplacement(**channel.model_dump())
     return MarketingContentChannelCreate(**channel.model_dump())
 
 

@@ -13,6 +13,7 @@ from labelos_database.models import (
     ArtistProfile,
     Campaign,
     MarketingContentItem,
+    MarketingContentItemChannel,
     MarketingContentItemStatus,
     MembershipRole,
     Organization,
@@ -2182,7 +2183,7 @@ def test_channel_material_edits_preserve_identity_and_invalidate_approval(
             ]
             changed, unchanged = reloaded.channels
             assert unchanged.id == original_ids["threads"]
-            if field == "placement" and entrypoint != "single":
+            if field == "placement":
                 assert changed.id != original_ids["instagram"]
             else:
                 assert changed.id == original_ids["instagram"]
@@ -2204,11 +2205,12 @@ def test_channel_material_edits_preserve_identity_and_invalidate_approval(
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("entrypoint", ["replace", "combined"])
+@pytest.mark.parametrize("entrypoint", ["replace", "combined", "single"])
+@pytest.mark.parametrize("failure_point", ["event", "invalidation"])
 def test_failed_channel_reconciliation_rolls_back_channels_parent_and_approval(
-    sessionmaker, monkeypatch, entrypoint
+    sessionmaker, monkeypatch, entrypoint, failure_point
 ):
-    from labelos_api.services import marketing_content_service
+    from labelos_api.services import content_invalidation, marketing_content_service
 
     async def run():
         async with sessionmaker() as session:
@@ -2238,8 +2240,16 @@ def test_failed_channel_reconciliation_rolls_back_channels_parent_and_approval(
                 raise RuntimeError("Injected failure after channel flush")
 
             monkeypatch.setattr(
-                marketing_content_service,
-                "_publish_content_event",
+                (
+                    marketing_content_service
+                    if failure_point == "event"
+                    else content_invalidation
+                ),
+                (
+                    "_publish_content_event"
+                    if failure_point == "event"
+                    else "invalidate_content_channels"
+                ),
                 fail_after_channel_flush,
             )
             channels = [
@@ -2251,6 +2261,14 @@ def test_failed_channel_reconciliation_rolls_back_channels_parent_and_approval(
             with pytest.raises(RuntimeError, match="after channel flush"):
                 if entrypoint == "replace":
                     await replace_channels(session, workspace_id, item_id, channels)
+                elif entrypoint == "single":
+                    await update_channel(
+                        session,
+                        workspace_id,
+                        item_id,
+                        original_ids[0],
+                        MarketingContentChannelUpdate(placement="story"),
+                    )
                 else:
                     await update_content_item_with_channels(
                         session,
@@ -2280,6 +2298,92 @@ def test_failed_channel_reconciliation_rolls_back_channels_parent_and_approval(
             assert (
                 await session.scalar(select(func.count(RealtimeEvent.id)))
                 == event_count
+            )
+
+    asyncio.run(run())
+
+
+def test_material_invalidation_hook_captures_old_authority_and_removals_before_delete(
+    sessionmaker, monkeypatch
+):
+    from labelos_api.services import content_invalidation
+
+    async def run():
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace_id = data["workspace"].id
+            item = await create_content_item(
+                session,
+                workspace_id,
+                MarketingContentItemCreate(
+                    campaign_id=data["campaign"].id,
+                    title="Hook",
+                    content_type="image",
+                    channels=[
+                        MarketingContentChannelCreate(channel=name)
+                        for name in ("instagram", "threads", "tiktok")
+                    ],
+                ),
+            )
+            item_id = item.id
+            ids = {row.channel: row.id for row in item.channels}
+            approved = await _submit_and_approve_content(session, workspace_id, item_id)
+            old_revision, approval_id = (
+                approved.content_revision,
+                approved.approval_request_id,
+            )
+            calls = []
+
+            async def capture(active_session, invalidation, *, actor):
+                assert active_session is session
+                assert (
+                    await session.get(MarketingContentItemChannel, ids["threads"])
+                    is not None
+                )
+                assert item.content_revision == old_revision
+                calls.append(invalidation)
+
+            monkeypatch.setattr(
+                content_invalidation, "invalidate_content_channels", capture
+            )
+            channels = [
+                MarketingContentChannelCreate(channel=name)
+                for name in ("tiktok", "threads", "instagram")
+            ]
+            await replace_channels(session, workspace_id, item_id, channels)
+            await update_channel(
+                session,
+                workspace_id,
+                item_id,
+                ids["tiktok"],
+                MarketingContentChannelUpdate(external_post_id="result-only"),
+            )
+            assert calls == []
+            await replace_channels(
+                session,
+                workspace_id,
+                item_id,
+                [
+                    MarketingContentChannelCreate(
+                        channel="instagram", copy_text_override="Edit"
+                    ),
+                    MarketingContentChannelCreate(
+                        channel="tiktok", external_post_id="result-only"
+                    ),
+                    MarketingContentChannelCreate(channel="youtube"),
+                ],
+            )
+            assert len(calls) == 1
+            invalidation = calls[0]
+            assert invalidation.workspace_id == workspace_id
+            assert invalidation.content_item_id == item_id
+            assert invalidation.previous_content_revision == old_revision
+            assert invalidation.previous_approval_request_id == approval_id
+            assert invalidation.previous_channel_ids == tuple(sorted(ids.values()))
+            assert invalidation.materially_changed_channel_ids == (ids["instagram"],)
+            assert invalidation.removed_channel_ids == (ids["threads"],)
+            assert (
+                await session.get(MarketingContentItemChannel, ids["threads"]) is None
             )
 
     asyncio.run(run())
