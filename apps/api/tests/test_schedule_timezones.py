@@ -181,7 +181,7 @@ def test_migration_preserves_legacy_data_on_upgrade_downgrade_reupgrade(
     config = Config(
         str(Path(__file__).resolve().parents[3] / "packages/database/alembic.ini")
     )
-    assert ScriptDirectory.from_config(config).get_heads() == ["202609151000"]
+    assert ScriptDirectory.from_config(config).get_heads() == ["202609151800"]
     engine = create_engine(f"sqlite:///{path}")
     with engine.begin() as connection:
         connection.exec_driver_sql(
@@ -194,9 +194,9 @@ def test_migration_preserves_legacy_data_on_upgrade_downgrade_reupgrade(
         )
     command.stamp(config, "202609061800")
     for direction, revision in [
-        (command.upgrade, "head"),
+        (command.upgrade, "202609151000"),
         (command.downgrade, "202609061800"),
-        (command.upgrade, "head"),
+        (command.upgrade, "202609151000"),
     ]:
         direction(config, revision)
         with engine.connect() as connection:
@@ -212,7 +212,7 @@ def test_migration_preserves_legacy_data_on_upgrade_downgrade_reupgrade(
                     "marketing_content_item_channels"
                 )
             }
-            if revision == "head":
+            if revision == "202609151000":
                 assert connection.exec_driver_sql(
                     "SELECT schedule_timezone, schedule_local_time, "
                     "schedule_offset_seconds FROM marketing_content_item_channels"

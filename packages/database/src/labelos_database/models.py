@@ -8,12 +8,14 @@ from uuid import UUID
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     CheckConstraint,
     Date,
     DateTime,
     Enum,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     Numeric,
@@ -28,6 +30,15 @@ from sqlalchemy.orm import Mapped, declared_attr, mapped_column, relationship, v
 
 from labelos_database.base import Base, TimestampMixin, UUIDPrimaryKey
 from labelos_database.departments import DEFAULT_ROLE_DEPARTMENT_ACCESS
+from labelos_database.scheduling import (
+    SchedulingBlockedReason,
+    SchedulingJobStatus,
+    SchedulingMetadata,
+    SchedulingUTCDateTime,
+    safe_scheduling_metadata,
+    scheduling_timezone,
+)
+from labelos_database.scheduling_guards import register_scheduling_guards
 
 _LOCALE_PATTERN = re.compile(r"^[A-Za-z]{2,3}(?:[-_][A-Za-z0-9]{2,8})*$")
 PROFILE_MODULE_RELATIONSHIPS = ("artist_profiles",)
@@ -2868,6 +2879,356 @@ class MarketingContentItemChannel(Base, TimestampMixin):
             "scheduled_at",
         ),
     )
+
+
+# Candidate keys for workspace-scoped scheduling references. These never bind a
+# historical job to the parent's mutable current revision or schedule intent.
+Index(
+    "uq_marketing_content_items_schedule_scope",
+    MarketingContentItem.id,
+    MarketingContentItem.organization_id,
+    unique=True,
+)
+Index(
+    "uq_marketing_channels_schedule_scope",
+    MarketingContentItemChannel.id,
+    MarketingContentItemChannel.marketing_content_item_id,
+    unique=True,
+)
+Index(
+    "uq_social_accounts_schedule_scope",
+    SocialAccountConnection.id,
+    SocialAccountConnection.organization_id,
+    unique=True,
+)
+Index(
+    "uq_approval_requests_schedule_scope",
+    ApprovalRequest.id,
+    ApprovalRequest.organization_id,
+    ApprovalRequest.resource_type,
+    ApprovalRequest.resource_id,
+    ApprovalRequest.resource_revision,
+    unique=True,
+)
+
+
+class SchedulingJob(Base, TimestampMixin):
+    """Immutable authorization snapshot with mutable, fenced coordination state."""
+
+    __tablename__ = "scheduling_jobs"
+
+    id: Mapped[UUIDPrimaryKey]
+    workspace_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="RESTRICT"), nullable=False
+    )
+    marketing_content_item_id: Mapped[UUID] = mapped_column(nullable=False)
+    marketing_content_item_channel_id: Mapped[UUID] = mapped_column(nullable=False)
+    social_account_connection_id: Mapped[UUID | None]
+    approval_request_id: Mapped[UUID] = mapped_column(nullable=False)
+    approval_resource_type: Mapped[str] = mapped_column(
+        String(120),
+        default="marketing_content_item",
+        server_default="marketing_content_item",
+        nullable=False,
+    )
+    authorized_content_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    schedule_generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    scheduled_for: Mapped[datetime] = mapped_column(
+        SchedulingUTCDateTime(), nullable=False
+    )
+    schedule_timezone: Mapped[str] = mapped_column(String(255), nullable=False)
+    effective_artist_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("artists.id", ondelete="RESTRICT")
+    )
+    status: Mapped[SchedulingJobStatus] = mapped_column(
+        Enum(SchedulingJobStatus, name="scheduling_job_status", create_constraint=True),
+        default=SchedulingJobStatus.pending,
+        server_default="pending",
+        nullable=False,
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    activation_operation_id: Mapped[UUID] = mapped_column(nullable=False)
+    claimed_at: Mapped[datetime | None] = mapped_column(SchedulingUTCDateTime())
+    claim_expires_at: Mapped[datetime | None] = mapped_column(SchedulingUTCDateTime())
+    claimed_by: Mapped[str | None] = mapped_column(String(255))
+    fencing_token: Mapped[int] = mapped_column(
+        BigInteger, default=0, server_default="0", nullable=False
+    )
+    transition_version: Mapped[int] = mapped_column(
+        Integer, default=1, server_default="1", nullable=False
+    )
+    handed_off_at: Mapped[datetime | None] = mapped_column(SchedulingUTCDateTime())
+    # Opaque Delivery receipt reference; no Delivery-owned storage is introduced.
+    handoff_receipt_id: Mapped[UUID | None]
+    blocked_at: Mapped[datetime | None] = mapped_column(SchedulingUTCDateTime())
+    blocked_reason_code: Mapped[SchedulingBlockedReason | None] = mapped_column(
+        Enum(
+            SchedulingBlockedReason,
+            name="scheduling_blocked_reason",
+            create_constraint=True,
+        )
+    )
+    blocked_metadata: Mapped[dict] = mapped_column(
+        SchedulingMetadata(), default=dict, server_default="{}", nullable=False
+    )
+    cancelled_at: Mapped[datetime | None] = mapped_column(SchedulingUTCDateTime())
+    cancellation_reason: Mapped[str | None] = mapped_column(String(120))
+    supersedes_job_id: Mapped[UUID | None]
+    lineage_root_job_id: Mapped[UUID | None]
+    created_by_user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
+    )
+
+    @validates("schedule_timezone")
+    def _validate_timezone(self, _key: str, value: str) -> str:
+        return scheduling_timezone(value)
+
+    @validates("blocked_metadata")
+    def _validate_blocked_metadata(self, _key: str, value: dict) -> dict:
+        return safe_scheduling_metadata(value)
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["marketing_content_item_id", "workspace_id"],
+            ["marketing_content_items.id", "marketing_content_items.organization_id"],
+            name="fk_scheduling_jobs_content_scope",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["marketing_content_item_channel_id", "marketing_content_item_id"],
+            [
+                "marketing_content_item_channels.id",
+                "marketing_content_item_channels.marketing_content_item_id",
+            ],
+            name="fk_scheduling_jobs_channel_scope",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["social_account_connection_id", "workspace_id"],
+            [
+                "social_account_connections.id",
+                "social_account_connections.organization_id",
+            ],
+            name="fk_scheduling_jobs_destination_scope",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            [
+                "approval_request_id",
+                "workspace_id",
+                "approval_resource_type",
+                "marketing_content_item_id",
+                "authorized_content_revision",
+            ],
+            [
+                "approval_requests.id",
+                "approval_requests.organization_id",
+                "approval_requests.resource_type",
+                "approval_requests.resource_id",
+                "approval_requests.resource_revision",
+            ],
+            name="fk_scheduling_jobs_approval_snapshot",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "id",
+            "workspace_id",
+            "marketing_content_item_id",
+            name="uq_scheduling_jobs_lineage_scope",
+        ),
+        ForeignKeyConstraint(
+            ["supersedes_job_id", "workspace_id", "marketing_content_item_id"],
+            [
+                "scheduling_jobs.id",
+                "scheduling_jobs.workspace_id",
+                "scheduling_jobs.marketing_content_item_id",
+            ],
+            name="fk_scheduling_jobs_predecessor",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["lineage_root_job_id", "workspace_id", "marketing_content_item_id"],
+            [
+                "scheduling_jobs.id",
+                "scheduling_jobs.workspace_id",
+                "scheduling_jobs.marketing_content_item_id",
+            ],
+            name="fk_scheduling_jobs_lineage_root",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint("idempotency_key", name="uq_scheduling_jobs_idempotency_key"),
+        UniqueConstraint(
+            "workspace_id",
+            "activation_operation_id",
+            name="uq_scheduling_jobs_activation_operation",
+        ),
+        UniqueConstraint(
+            "handoff_receipt_id", name="uq_scheduling_jobs_handoff_receipt"
+        ),
+        CheckConstraint(
+            "authorized_content_revision >= 1 AND schedule_generation >= 1 "
+            "AND fencing_token >= 0 AND transition_version >= 1",
+            name="counters",
+        ),
+        CheckConstraint(
+            "approval_resource_type = 'marketing_content_item'", name="approval_type"
+        ),
+        CheckConstraint(
+            "length(trim(schedule_timezone)) > 0 AND length(trim(idempotency_key)) > 0",
+            name="snapshot_text",
+        ),
+        CheckConstraint(
+            "(claimed_at IS NULL AND claim_expires_at IS NULL AND claimed_by IS NULL) "
+            "OR (claimed_at IS NOT NULL AND claim_expires_at IS NOT NULL "
+            "AND claimed_by IS NOT NULL AND length(trim(claimed_by)) > 0 "
+            "AND claim_expires_at > claimed_at AND fencing_token > 0)",
+            name="lease",
+        ),
+        CheckConstraint(
+            "status != 'claimed' OR claimed_at IS NOT NULL", name="claimed_lease"
+        ),
+        CheckConstraint(
+            "(handed_off_at IS NULL AND handoff_receipt_id IS NULL AND status != 'handed_off') "
+            "OR (handed_off_at IS NOT NULL AND handoff_receipt_id IS NOT NULL "
+            "AND social_account_connection_id IS NOT NULL AND status = 'handed_off')",
+            name="handoff_receipt",
+        ),
+        CheckConstraint(
+            "(blocked_at IS NULL AND blocked_reason_code IS NULL) OR "
+            "(blocked_at IS NOT NULL AND blocked_reason_code IS NOT NULL)",
+            name="blocked_reason",
+        ),
+        CheckConstraint(
+            "status != 'blocked' OR blocked_at IS NOT NULL", name="blocked_details"
+        ),
+        CheckConstraint(
+            "(cancelled_at IS NULL AND cancellation_reason IS NULL AND status != 'cancelled') "
+            "OR (cancelled_at IS NOT NULL AND cancellation_reason IS NOT NULL "
+            "AND length(trim(cancellation_reason)) > 0 AND status = 'cancelled')",
+            name="cancellation",
+        ),
+        CheckConstraint(
+            "supersedes_job_id IS NULL OR supersedes_job_id != id",
+            name="predecessor_not_self",
+        ),
+        CheckConstraint(
+            "(supersedes_job_id IS NULL AND lineage_root_job_id IS NULL) OR "
+            "(supersedes_job_id IS NOT NULL AND lineage_root_job_id IS NOT NULL "
+            "AND lineage_root_job_id != id)",
+            name="lineage",
+        ),
+        Index(
+            "uq_scheduling_jobs_active_channel",
+            "marketing_content_item_channel_id",
+            unique=True,
+            postgresql_where=status.in_(("pending", "claimed", "blocked")),
+            sqlite_where=status.in_(("pending", "claimed", "blocked")),
+        ),
+        Index(
+            "uq_scheduling_jobs_handed_off_intent",
+            "marketing_content_item_channel_id",
+            "authorized_content_revision",
+            "schedule_generation",
+            unique=True,
+            postgresql_where=status.in_(
+                ("pending", "claimed", "blocked", "handed_off")
+            ),
+            sqlite_where=status.in_(("pending", "claimed", "blocked", "handed_off")),
+        ),
+        Index(
+            "ix_scheduling_jobs_due",
+            "scheduled_for",
+            "id",
+            postgresql_where=status == "pending",
+            sqlite_where=status == "pending",
+        ),
+        Index(
+            "ix_scheduling_jobs_expired_claim",
+            "claim_expires_at",
+            "id",
+            postgresql_where=status == "claimed",
+            sqlite_where=status == "claimed",
+        ),
+        Index("ix_scheduling_jobs_workspace_list", "workspace_id", "created_at", "id"),
+        Index(
+            "ix_scheduling_jobs_workspace_status_due",
+            "workspace_id",
+            "status",
+            "scheduled_for",
+            "id",
+        ),
+        Index(
+            "ix_scheduling_jobs_channel_history",
+            "marketing_content_item_channel_id",
+            "created_at",
+            "id",
+        ),
+        Index(
+            "ix_scheduling_jobs_content", "workspace_id", "marketing_content_item_id"
+        ),
+        Index("ix_scheduling_jobs_approval", "approval_request_id"),
+        Index("ix_scheduling_jobs_destination", "social_account_connection_id"),
+    )
+
+
+class SchedulingJobTransition(Base):
+    """Append-only audit records, written with the job by the future command layer."""
+
+    __tablename__ = "scheduling_job_transitions"
+    id: Mapped[UUIDPrimaryKey]
+    job_id: Mapped[UUID] = mapped_column(nullable=False)
+    workspace_id: Mapped[UUID] = mapped_column(nullable=False)
+    marketing_content_item_id: Mapped[UUID] = mapped_column(nullable=False)
+    transition_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    operation_id: Mapped[UUID] = mapped_column(nullable=False)
+    operation: Mapped[str] = mapped_column(String(60), nullable=False)
+    from_status: Mapped[SchedulingJobStatus | None] = mapped_column(
+        Enum(SchedulingJobStatus, name="scheduling_job_status", create_constraint=True)
+    )
+    to_status: Mapped[SchedulingJobStatus] = mapped_column(
+        Enum(SchedulingJobStatus, name="scheduling_job_status", create_constraint=True),
+        nullable=False,
+    )
+    actor_kind: Mapped[str] = mapped_column(String(60), nullable=False)
+    actor_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    reason_code: Mapped[str | None] = mapped_column(String(120))
+    created_at: Mapped[datetime] = mapped_column(
+        SchedulingUTCDateTime(),
+        default=lambda: datetime.now(UTC),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["job_id", "workspace_id", "marketing_content_item_id"],
+            [
+                "scheduling_jobs.id",
+                "scheduling_jobs.workspace_id",
+                "scheduling_jobs.marketing_content_item_id",
+            ],
+            name="fk_scheduling_job_transitions_job_scope",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "job_id", "transition_version", name="uq_scheduling_job_transitions_version"
+        ),
+        CheckConstraint("transition_version >= 1", name="version_positive"),
+        CheckConstraint(
+            "length(trim(operation)) > 0 AND length(trim(actor_kind)) > 0 "
+            "AND length(trim(actor_key)) > 0",
+            name="audit_identity",
+        ),
+        Index(
+            "ix_scheduling_job_transitions_workspace",
+            "workspace_id",
+            "created_at",
+            "id",
+        ),
+    )
+
+
+register_scheduling_guards(SchedulingJob.__table__, SchedulingJobTransition.__table__)
 
 
 class OAuthAuthorizationState(Base, TimestampMixin, OrganizationOwnedMixin):

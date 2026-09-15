@@ -5,6 +5,10 @@ Implemented against the accepted [Scheduling Engine contract](scheduling-engine-
 [timezone authoring](timezone-safe-scheduling.md), and
 [shared eligibility](scheduling-eligibility.md) foundations.
 
+The subsequent [persistence implementation](scheduling-persistence.md) adds job and
+history storage with restricted deletion; application-service integration remains
+a separate gate.
+
 ## Boundaries and audit
 
 | Area                        | Audit finding and resulting boundary                                                                                                                                                                                                          |
