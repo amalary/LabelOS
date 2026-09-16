@@ -107,10 +107,12 @@ decision without changing the request's `approved` status. The existing
 entire future eligibility check. The pure contract accepts repository-derived
 `ApprovalEvidence`; it must never accept that evidence from an API caller.
 
-Activation may create `pending` jobs while execution is disabled or while the
-destination is unhealthy/manual. A missing destination may remain null in the job
-snapshot for planning, but acceptance requires an exact resolved destination ID.
-Activation does not promise execution readiness. New
+The [executable activation service](scheduling-activation.md) requires shared
+automatic eligibility, including enabled execution, a configured durable receiver
+and an available automatic destination. It rejects missing and manual-only
+destinations. The earlier optional planning-only activation mode is not implemented;
+parent/channel authoring intent remains the planning representation. Activation
+does not dispatch, and acceptance must independently revalidate eligibility. New
 activation rejects instants already older than the configured lateness window
 with `missed_schedule_window`; no executable job is created. A future-dated
 activation stays pending until due. Legacy rows require explicit selection,

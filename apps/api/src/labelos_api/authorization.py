@@ -147,6 +147,7 @@ INITIAL_ROLE_CAPABILITIES: dict[MembershipRole, frozenset[Capability]] = {
             Capability.marketing_content_view,
             Capability.marketing_content_create,
             Capability.marketing_content_edit,
+            Capability.marketing_content_schedule,
             Capability.marketing_content_archive,
             Capability.marketing_content_submit_for_review,
             Capability.marketing_content_approve,
@@ -216,6 +217,7 @@ CAPABILITY_DEPARTMENTS: dict[Capability, frozenset[str]] = {
     Capability.marketing_content_view: frozenset({"marketing", "management"}),
     Capability.marketing_content_create: frozenset({"marketing", "management"}),
     Capability.marketing_content_edit: frozenset({"marketing", "management"}),
+    Capability.marketing_content_schedule: frozenset({"marketing", "management"}),
     Capability.marketing_content_archive: frozenset({"marketing", "management"}),
     Capability.marketing_content_submit_for_review: frozenset(
         {"marketing", "management"}

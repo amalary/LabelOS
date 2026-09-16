@@ -33,6 +33,7 @@ from sqlalchemy.orm import lazyload
 
 from labelos_api.repositories import approvals
 from labelos_api.scheduling.contracts import (
+    ApprovalEvidence,
     DeliveryAcceptanceReceipt,
     DeliveryAcceptanceRequest,
     DueDisposition,
@@ -94,6 +95,16 @@ class JobActivation:
 class JobCursor:
     created_at: datetime
     id: UUID
+
+
+@dataclass(frozen=True)
+class ActivationSource:
+    """Authoritative source records, valid only while transaction locks are held."""
+
+    item: MarketingContentItem
+    channel: MarketingContentItemChannel | None
+    campaign: Campaign | None
+    approval: ApprovalEvidence | None
 
 
 @dataclass(frozen=True)
@@ -178,6 +189,39 @@ class SchedulingRepository:
         ):
             raise SchedulingConflict("Activation operation was reused with new inputs")
         return job
+
+    async def get_activation_result(self, operation_id: UUID) -> SchedulingJob | None:
+        """Read durable command history, including terminal jobs, within workspace."""
+        return await self.session.scalar(
+            self._jobs()
+            .where(SchedulingJob.activation_operation_id == operation_id)
+            .execution_options(populate_existing=True)
+        )
+
+    async def lock_activation_source(
+        self, content_item_id: UUID, channel_id: UUID
+    ) -> ActivationSource:
+        parents = await self._parents(MarketingContentItem.id == content_item_id)
+        if not parents:
+            raise SchedulingConflict("Content not found in workspace")
+        channels, evidence, campaigns = await self._lock_sources(parents)
+        parent = parents[0]
+        # Reserve existing job rows before taking destination locks.
+        await self.session.execute(
+            select(SchedulingJob.id)
+            .where(
+                SchedulingJob.workspace_id == self.workspace_id,
+                SchedulingJob.marketing_content_item_id == parent.id,
+            )
+            .order_by(SchedulingJob.id)
+            .with_for_update()
+        )
+        return ActivationSource(
+            parent,
+            channels.get(channel_id),
+            campaigns.get(parent.campaign_id),
+            evidence.get(parent.id),
+        )
 
     async def list_jobs(
         self,
