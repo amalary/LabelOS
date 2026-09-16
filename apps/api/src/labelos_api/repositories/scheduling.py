@@ -7,6 +7,7 @@ or dispatches events. A claim is coordination, not execution authorization.
 """
 
 from collections.abc import Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
@@ -58,6 +59,7 @@ class RetryableInternalFailure(StrEnum):
 
     database_contention = "database_contention"
     local_preparation_interrupted = "local_preparation_interrupted"
+    delivery_unavailable = "delivery_unavailable"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -151,6 +153,33 @@ class SchedulingRepository:
         self.workspace_id = workspace_id
         self.lateness_window_seconds = lateness_window_seconds
         self.window = timedelta(seconds=lateness_window_seconds)
+        self._context = None
+
+    @asynccontextmanager
+    async def job_context(self, job_id: UUID):
+        """Reuse freshly locked source rows within one job transaction only.
+
+        Savepoint rollback callers must leave this scope before using ORM rows.
+        Never retain this cache across transactions or unrelated jobs.
+        """
+        if self._context is not None:
+            raise RuntimeError("Job contexts cannot be nested")
+        job = await self.get_job(job_id)
+        if job is None:
+            raise SchedulingConflict("Job not found in workspace")
+        source = await self.lock_activation_source(
+            job.marketing_content_item_id, job.marketing_content_item_channel_id
+        )
+        job = await self.get_job(job_id)
+        assert job is not None
+        reason = self._stale_reason(
+            job, source.item, source.channel, source.approval, source.campaign
+        )
+        self._context = (job, source, reason)
+        try:
+            yield job, source, reason
+        finally:
+            self._context = None
 
     def _jobs(self):
         return select(SchedulingJob).where(
@@ -201,6 +230,13 @@ class SchedulingRepository:
     async def lock_activation_source(
         self, content_item_id: UUID, channel_id: UUID
     ) -> ActivationSource:
+        if self._context is not None:
+            job, source, _ = self._context
+            if (content_item_id, channel_id) == (
+                job.marketing_content_item_id,
+                job.marketing_content_item_channel_id,
+            ):
+                return source
         parents = await self._parents(MarketingContentItem.id == content_item_id)
         if not parents:
             raise SchedulingConflict("Content not found in workspace")
@@ -376,6 +412,8 @@ class SchedulingRepository:
         return None
 
     async def _locked_job(self, job_id):
+        if self._context is not None and self._context[0].id == job_id:
+            return self._context[0], self._context[2]
         parent_id = await self.session.scalar(
             select(SchedulingJob.marketing_content_item_id).where(
                 SchedulingJob.workspace_id == self.workspace_id,
@@ -553,7 +591,9 @@ class SchedulingRepository:
             },
         )
 
-    async def _batch(self, *, worker_id, limit, lease_duration=None):
+    async def _batch(
+        self, *, worker_id, limit, lease_duration=None, include_blocked=False
+    ):
         _bounded(limit)
         _identity(worker_id)
         now = await self._now()
@@ -644,18 +684,26 @@ class SchedulingRepository:
                 now,
                 reason=reason.value if reason else None,
             )
-            if recovering or job.status == Status.claimed:
+            if recovering or include_blocked or job.status == Status.claimed:
                 result.append(job)
         await self.session.flush()
         return tuple(sorted(result, key=lambda j: (j.scheduled_for, j.id)))
 
     async def claim_batch(
-        self, *, worker_id: str, limit: int, lease_duration: timedelta
+        self,
+        *,
+        worker_id: str,
+        limit: int,
+        lease_duration: timedelta,
+        include_blocked: bool = False,
     ):
         if lease_duration <= timedelta(0):
             raise ValueError("lease_duration must be positive")
         return await self._batch(
-            worker_id=worker_id, limit=limit, lease_duration=lease_duration
+            worker_id=worker_id,
+            limit=limit,
+            lease_duration=lease_duration,
+            include_blocked=include_blocked,
         )
 
     async def recover_expired_leases(self, *, worker_id: str, limit: int):

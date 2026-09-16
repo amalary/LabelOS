@@ -2912,6 +2912,19 @@ Index(
 )
 
 
+class SchedulingExecutionControl(Base):
+    """Fail-closed workspace execution switch, locked before scheduling sources."""
+
+    __tablename__ = "scheduling_execution_controls"
+
+    workspace_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), primary_key=True
+    )
+    execution_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false(), nullable=False
+    )
+
+
 class SchedulingJob(Base, TimestampMixin):
     """Immutable authorization snapshot with mutable, fenced coordination state."""
 

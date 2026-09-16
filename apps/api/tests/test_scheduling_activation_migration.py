@@ -16,7 +16,7 @@ def test_schedule_permission_migration_round_trip(database_test_engine):
         Config(str(root / "packages/database/alembic.ini"))
     )
     revision = scripts.get_revision("202609152000")
-    assert scripts.get_heads() == [revision.revision]
+    assert scripts.get_revision("202609152100").down_revision == revision.revision
     assert revision.down_revision == "202609151800"
 
     def check(connection):

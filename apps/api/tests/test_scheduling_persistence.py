@@ -452,7 +452,7 @@ def test_full_migration_upgrade_downgrade_reupgrade(database_test_engine):
     scripts = ScriptDirectory.from_config(
         Config(str(ROOT / "packages/database/alembic.ini"))
     )
-    assert scripts.get_heads() == ["202609152000"]
+    assert scripts.get_heads() == ["202609152100"]
     head = scripts.get_revision("202609151800")
     assert head.down_revision == "202609151000"
 

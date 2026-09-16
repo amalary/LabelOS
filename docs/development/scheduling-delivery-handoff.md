@@ -87,11 +87,12 @@ this boundary without inventing an unverified external storage guarantee.
 
 ## Transaction and deployment integration
 
-The caller owns one PostgreSQL transaction. The future trusted worker boundary must
-authenticate and scope its workload principal, and lock execution control rows
-before calling the composer. Those worker/control prerequisites remain unimplemented;
-the composer must not be exposed to user JSON or wired directly to an unauthenticated
-worker. Controls are trusted transaction-local inputs, not environment-only promises.
+The caller owns one PostgreSQL transaction. The internal
+[bounded processor](scheduling-processor.md) scopes its server-constructed workload
+principal and locks durable execution controls before calling the composer. Its
+host must authenticate that principal; the composer must not be exposed to user
+JSON or wired directly to an unauthenticated worker. Controls are trusted
+transaction-local inputs, not environment-only promises.
 
 The composer locks source/approval/job rows in the existing order, checks current
 approval, revision, generation, schedule, destination and effective artist, and
@@ -114,7 +115,7 @@ Both startup validation and the receiver factory reject fake, memory, successful
 no-op and unknown backends in every environment, including production. A test can
 inject a fake directly; no production fake implementation is shipped. Receiver
 readiness must remain false. Successful execution requires a certified transactional
-Delivery adapter plus the workload/control prerequisites; this change enables neither.
+Delivery adapter and an authenticated worker host. Neither is enabled by the processor.
 
 `prepare_assisted_publish_handoff` remains unchanged and read-only. Its current
 mutable asset references and manual completion fields do not meet this acceptance
