@@ -20,6 +20,7 @@ from labelos_database.models import (
     MarketingContentItemChannel,
     SchedulingJob,
     SchedulingJobTransition,
+    SocialAccountConnection,
 )
 from labelos_database.scheduling import (
     SchedulingBlockedReason as Reason,
@@ -265,6 +266,9 @@ class SchedulingRepository:
         statuses: Sequence[Status] | None = None,
         content_item_id: UUID | None = None,
         channel_id: UUID | None = None,
+        connection_id: UUID | None = None,
+        blocked_reason: Reason | None = None,
+        provider: str | None = None,
         scheduled_from: datetime | None = None,
         scheduled_through: datetime | None = None,
         cursor: JobCursor | None = None,
@@ -277,9 +281,22 @@ class SchedulingRepository:
         for column, value in (
             (SchedulingJob.marketing_content_item_id, content_item_id),
             (SchedulingJob.marketing_content_item_channel_id, channel_id),
+            (SchedulingJob.social_account_connection_id, connection_id),
+            (SchedulingJob.blocked_reason_code, blocked_reason),
         ):
             if value is not None:
                 query = query.where(column == value)
+        if provider is not None:
+            query = query.where(
+                select(SocialAccountConnection.id)
+                .where(
+                    SocialAccountConnection.id
+                    == SchedulingJob.social_account_connection_id,
+                    SocialAccountConnection.organization_id == self.workspace_id,
+                    SocialAccountConnection.provider == provider,
+                )
+                .exists()
+            )
         if scheduled_from is not None:
             query = query.where(SchedulingJob.scheduled_for >= scheduled_from)
         if scheduled_through is not None:
@@ -513,7 +530,9 @@ class SchedulingRepository:
             )
             if (
                 predecessor is None
-                or predecessor.status != Status.superseded
+                or predecessor.status not in (Status.superseded, Status.cancelled)
+                or predecessor.marketing_content_item_channel_id
+                != activation.snapshot.channel_id
                 or activation.lineage_root_job_id
                 != (predecessor.lineage_root_job_id or predecessor.id)
             ):
@@ -721,6 +740,8 @@ class SchedulingRepository:
         expected_worker=None,
         expected_fencing_token=None,
         reason=None,
+        operation_id=None,
+        user_command=False,
     ):
         _identity(actor_key)
         previous = job.status
@@ -731,7 +752,9 @@ class SchedulingRepository:
             SchedulingJob.transition_version == job.transition_version,
             SchedulingJob.fencing_token == job.fencing_token,
         ]
-        if previous == Status.claimed:
+        if previous == Status.claimed and not (
+            user_command and operation in ("cancel", "supersede")
+        ):
             if expected_worker is None or expected_fencing_token is None:
                 raise SchedulingConflict(
                     "Expected worker and fencing token are required"
@@ -776,9 +799,56 @@ class SchedulingRepository:
             actor_key,
             now,
             reason=reason,
+            operation_id=operation_id,
         )
         await self.session.flush()
         return changed
+
+    async def apply_user_transition(
+        self, job_id: UUID, *, operation: str, operation_id: UUID, actor_key: str
+    ) -> SchedulingJob:
+        """User coordination under source/job locks, including expired claims.
+
+        Unlike worker transitions cancellation does not require a live lease.
+        Acceptance and this transaction serialize on the same rows; once handed
+        off, the terminal-state check always refuses the command.
+        Revalidation's destination/control checks belong to the command service.
+        """
+        job, stale = await self._locked_job(job_id)
+        now = await self._now()
+        if operation in ("cancel", "supersede"):
+            if job.status not in ACTIVE:
+                raise SchedulingConflict("invalid_state_transition")
+            values: dict = dict(
+                status=Status.cancelled if operation == "cancel" else Status.superseded
+            )
+            if operation == "cancel":
+                values.update(cancelled_at=now, cancellation_reason="user_cancelled")
+        elif operation == "revalidate":
+            if job.status != Status.blocked:
+                raise SchedulingConflict("invalid_state_transition")
+            if stale:
+                raise SchedulingConflict(stale.value)
+            if self._disposition(job, now) == DueDisposition.missed:
+                raise SchedulingConflict("missed_schedule_window")
+            values = dict(
+                status=Status.pending,
+                blocked_at=None,
+                blocked_reason_code=None,
+                blocked_metadata={},
+            )
+        else:
+            raise ValueError("Unsupported user transition")
+        return await self._change(
+            job,
+            values,
+            operation=operation,
+            operation_id=operation_id,
+            actor_key=actor_key,
+            now=now,
+            user_command=True,
+            reason="user_cancelled" if operation == "cancel" else None,
+        )
 
     async def cancel_pending_job(self, job_id: UUID, *, actor_key: str):
         job, _ = await self._locked_job(job_id)

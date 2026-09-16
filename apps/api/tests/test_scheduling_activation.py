@@ -3,7 +3,7 @@
 import asyncio
 from dataclasses import replace
 from datetime import timedelta
-from uuid import uuid4
+from uuid import uuid4, uuid5
 
 import pytest
 from labelos_database.capabilities import Capability
@@ -181,7 +181,9 @@ def test_success_replay_immutable_intent_and_no_credentials(sessions):
                     actor.id
                 )
                 outbox = await session.scalar(select(RealtimeEvent))
-                assert outbox.operation_id == str(command.operation_id)
+                assert outbox.operation_id == str(
+                    uuid5(workspace.id, f"scheduling:{command.operation_id}")
+                )
                 assert outbox.payload["schedulingJobId"] == str(job.id)
                 await session.commit()
             # Completed history must replay even after source approval is revoked.

@@ -669,6 +669,22 @@ function mockDraftsError(
 describe("MarketingWorkspace", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (path: string) =>
+        Response.json(
+          path.endsWith("eligibility")
+            ? {
+                eligible: false,
+                reason_codes: ["stale_approval"],
+                authoring_enabled: true,
+                execution_enabled: false,
+                delivery_receiver_configured: false,
+              }
+            : { jobs: [], limit: 100, next_cursor: null },
+        ),
+      ),
+    );
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-15T12:00:00Z"));
     searchParamString = "";
@@ -744,6 +760,7 @@ describe("MarketingWorkspace", () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
   });
 
   it("renders month content with one multi-channel item instead of duplicate cards", () => {
@@ -1187,59 +1204,373 @@ describe("MarketingWorkspace", () => {
     expect(screen.getByRole("region", { name: "Approval review detail" })).toBeInTheDocument();
   });
 
-  it("schedules only approved current revisions and blocks stale approved revisions", async () => {
+  it("completes channel authoring, approval, activation, cancellation, material rescheduling, reapproval, and replacement", async () => {
     vi.useRealTimers();
-    mockWorkspaceProfile(["marketing.content.view", "marketing.content.edit"]);
-    mockCalendar([
-      item({
-        approval_request_id: "approval_01",
-        approval_state: {
-          approval_request_id: "approval_01",
-          approved_revision: 2,
-          approved_revision_is_current: true,
-          can_schedule: true,
-          current_revision: 2,
-          label: "Approved",
-          state: "approved",
-        },
-        approved_revision: 2,
-        content_revision: 2,
-        status: "approved",
-      }),
+    mockWorkspaceProfile([
+      "marketing.content.view",
+      "marketing.content.edit",
+      "marketing.content.submit_for_review",
+      "marketing.content.schedule",
+      "marketing.content.approve",
     ]);
-    mutationMocks.status.mockResolvedValueOnce(item({ status: "scheduled" }));
-
-    const { rerender } = render(<MarketingWorkspace />);
-    fireEvent.click(screen.getByRole("button", { name: /Single Teaser/ }));
-    fireEvent.click(screen.getByRole("button", { name: "Schedule" }));
-
-    await waitFor(() => expect(mutationMocks.status).toHaveBeenCalledWith({ status: "scheduled" }));
-
-    mockCalendar([
-      item({
-        approval_state: {
+    mockSocialAccounts([socialConnection({ connection_method: "direct_api" })]);
+    let current = item({
+      status: "draft",
+      channels: [channel({ schedule_timezone: "America/New_York", schedule_generation: 1 })],
+    });
+    let jobs: Array<Record<string, unknown>> = [];
+    const commit = (next: MarketingContentItem) => {
+      current = next;
+      contentHookState.detailData = next;
+      mockCalendar([next]);
+      mockDrafts(next.status === "draft" ? [next] : []);
+    };
+    commit(current);
+    mutationMocks.update.mockImplementation(async (payload) => {
+      commit(
+        item({
+          ...current,
+          ...payload,
+          status: "draft",
+          approved_revision: null,
           approval_request_id: null,
-          approved_revision: 1,
-          approved_revision_is_current: false,
-          can_schedule: false,
-          current_revision: 2,
-          label: "Reapproval required",
-          state: "reapproval_required",
-        },
-        approved_revision: 1,
-        content_revision: 2,
+          approval_state: undefined,
+          content_revision: current.content_revision + 1,
+          updated_at: `2026-09-15T12:0${current.content_revision}:00Z`,
+          channels: payload.channels.map((entry: object) => ({
+            ...current.channels[0],
+            ...entry,
+            schedule_generation: current.channels[0]!.schedule_generation! + 1,
+          })),
+        }),
+      );
+      return current;
+    });
+    mutationMocks.approvalSubmit.mockImplementation(async () => {
+      const requestId = `approval_${current.content_revision}`;
+      commit(
+        item({
+          ...current,
+          status: "in_review",
+          approval_request_id: requestId,
+          approval_state: undefined,
+        }),
+      );
+      const detail = approvalDetail({
+        id: requestId,
+        submitted_revision: current.content_revision,
+        current_resource_revision: current.content_revision,
+      });
+      mockApprovalQueue([detail]);
+      approvalHookState.detail = detail;
+      return detail;
+    });
+    mutationMocks.approvalDecision.mockImplementation(async () => {
+      commit(
+        item({
+          ...current,
+          status: "approved",
+          approved_revision: current.content_revision,
+          approval_state: undefined,
+        }),
+      );
+      const detail = approvalDetail({
+        id: current.approval_request_id!,
         status: "approved",
-        updated_at: "2026-09-02T12:00:00Z",
-      }),
+        available_actions: [],
+        submitted_revision: current.content_revision,
+        current_resource_revision: current.content_revision,
+      });
+      approvalHookState.detail = detail;
+      mockApprovalQueue([detail]);
+      return detail;
+    });
+    const requests = vi.fn(async (path: string, init: RequestInit) => {
+      if (init.method === "POST") {
+        if (path.endsWith("/cancel")) {
+          jobs[0] = { ...jobs[0], status: "cancelled" };
+          return Response.json(jobs[0]);
+        }
+        const next = {
+          id: `job_${current.content_revision}`,
+          status: "pending",
+          content_revision: current.content_revision,
+          schedule_generation: current.channels[0]!.schedule_generation,
+          approval_request_id: current.approval_request_id,
+          scheduled_for: current.channels[0]!.scheduled_at,
+          schedule_timezone: current.channels[0]!.schedule_timezone,
+          supersedes_job_id: jobs[0]?.id ?? null,
+        };
+        jobs = [next, ...jobs];
+        return Response.json(next);
+      }
+      const reasons =
+        current.status !== "approved"
+          ? ["stale_approval"]
+          : jobs[0]?.status === "pending"
+            ? ["active_job_conflict"]
+            : jobs.length
+              ? ["replacement_required"]
+              : [];
+      return Response.json(
+        path.endsWith("eligibility")
+          ? {
+              eligible: reasons.length === 0,
+              content_revision: current.content_revision,
+              schedule_generation: current.channels[0]!.schedule_generation,
+              approval_request_id: current.approval_request_id,
+              authoring_enabled: true,
+              execution_enabled: true,
+              delivery_receiver_configured: true,
+              reason_codes: reasons,
+            }
+          : { jobs, next_cursor: null },
+      );
+    });
+    vi.stubGlobal("fetch", requests);
+    render(<MarketingWorkspace />);
+    const openDraft = () => {
+      fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+      fireEvent.click(screen.getByRole("button", { name: "Open draft Single Teaser" }));
+    };
+    const submitAndApprove = async () => {
+      openDraft();
+      fireEvent.click(screen.getByRole("button", { name: "Submit for approval" }));
+      await waitFor(() =>
+        expect(
+          screen.queryByRole("region", { name: "Marketing content editor" }),
+        ).not.toBeInTheDocument(),
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Approvals" }));
+      fireEvent.click(screen.getByRole("button", { name: /Single Teaser/ }));
+      fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+      await waitFor(() => expect(current.status).toBe("approved"));
+      fireEvent.click(screen.getByRole("button", { name: "Open calendar item" }));
+    };
+    openDraft();
+    fireEvent.change(screen.getByLabelText("Channel copy override"), {
+      target: { value: "Launch caption" },
+    });
+    fireEvent.change(screen.getByLabelText("Destination account"), {
+      target: { value: "connection_01" },
+    });
+    fireEvent.change(screen.getByLabelText("Channel planned publish time"), {
+      target: { value: "2026-09-20T09:00" },
+    });
+    expect(screen.getByRole("button", { name: "Submit for approval" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(mutationMocks.update).toHaveBeenCalledTimes(1));
+    expect(current.channels[0]).toMatchObject({
+      id: "channel_01",
+      social_account_connection_id: "connection_01",
+      scheduled_at: "2026-09-20T13:00:00Z",
+      schedule_timezone: "America/New_York",
+    });
+    await submitAndApprove();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Activate Schedule" })).toBeEnabled(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Activate Schedule" }));
+    await screen.findByText("Pending");
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Cancel schedule" })).toBeEnabled(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Cancel schedule" }));
+    await screen.findByText("Cancelled");
+    await waitFor(() =>
+      expect(screen.getByLabelText("Channel planned publish time")).toBeEnabled(),
+    );
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    fireEvent.change(screen.getByLabelText("Channel planned publish time"), {
+      target: { value: "2026-09-21T10:00" },
+    });
+    expect(screen.getByRole("button", { name: "Activate Replacement Schedule" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(mutationMocks.update).toHaveBeenCalledTimes(2));
+    await submitAndApprove();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Activate Replacement Schedule" })).toBeEnabled(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Activate Replacement Schedule" }));
+    await screen.findByText("Pending");
+    const posts = requests.mock.calls.filter(([, init]) => init.method === "POST");
+    expect(posts.map(([path]) => path.split("/").at(-1))).toEqual([
+      "activate",
+      "cancel",
+      "replace",
     ]);
-    rerender(<MarketingWorkspace />);
-    fireEvent.click(screen.getByRole("button", { name: /Single Teaser/ }));
-
-    expect(screen.getByRole("button", { name: "Schedule" })).toBeDisabled();
-    expect(screen.getByText(/Scheduling is blocked/)).toBeInTheDocument();
+    expect(JSON.parse(posts[2]![1].body as string)).toEqual({
+      expected_content_revision: 3,
+      expected_schedule_generation: 3,
+    });
+    expect(mutationMocks.approvalSubmit).toHaveBeenCalledTimes(2);
+    expect(mutationMocks.approvalDecision).toHaveBeenCalledTimes(2);
+    expect(mutationMocks.status).not.toHaveBeenCalled();
+    expect(screen.getByText("Published: not confirmed.")).toBeInTheDocument();
   });
 
-  it("hides approved scheduling actions without the edit capability", () => {
+  it.each([
+    ["America/New_York", "2026-03-08T02:30", "This local time does not exist"],
+    ["EST", "2026-09-20T09:00", "Use an IANA timezone"],
+    ["Mars/Olympus", "2026-09-20T09:00", "Unknown IANA timezone"],
+  ])(
+    "rejects invalid scheduling input %s / %s without saving",
+    async (zone, localTime, message) => {
+      vi.useRealTimers();
+      mockWorkspaceProfile(["marketing.content.view", "marketing.content.create"]);
+      render(<MarketingWorkspace />);
+      fireEvent.click(screen.getByRole("button", { name: "Create Content" }));
+      fireEvent.change(screen.getByLabelText("Title"), { target: { value: "Invalid schedule" } });
+      fireEvent.change(screen.getByLabelText("Channel authoring timezone"), {
+        target: { value: zone },
+      });
+      fireEvent.change(screen.getByLabelText("Channel planned publish time"), {
+        target: { value: localTime },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Save draft" }));
+      expect(screen.getAllByText(new RegExp(message)).length).toBeGreaterThan(0);
+      expect(mutationMocks.create).not.toHaveBeenCalled();
+    },
+  );
+
+  it("offers only compatible workspace, channel, and artist account destinations", () => {
+    mockWorkspaceProfile(["marketing.content.view", "marketing.content.create"]);
+    mockSocialAccounts([
+      socialConnection({ id: "compatible", handle: "@compatible" }),
+      socialConnection({ id: "shared", handle: "@shared", artist_association: null }),
+      socialConnection({ id: "foreign", handle: "@foreign", workspace_id: "foreign" }),
+      socialConnection({ id: "wrong-provider", handle: "@wrong-provider", provider: "tiktok" }),
+      socialConnection({
+        id: "wrong-artist",
+        handle: "@wrong-artist",
+        artist_association: {
+          ...socialConnection().artist_association!,
+          artist_id: "another-artist",
+        },
+      }),
+    ]);
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Create Content" }));
+    const selector = within(screen.getByLabelText("Destination account"));
+    expect(selector.getByRole("option", { name: /@compatible/ })).toBeInTheDocument();
+    expect(selector.getByRole("option", { name: /@shared/ })).toBeInTheDocument();
+    expect(
+      selector.queryByRole("option", { name: /@foreign|@wrong-provider|@wrong-artist/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it.each(["loading", "empty", "forbidden", "network"])(
+    "shows the %s destination state",
+    (state) => {
+      mockWorkspaceProfile(["marketing.content.view", "marketing.content.create"]);
+      if (state === "loading") mockSocialAccountsLoading();
+      if (state === "forbidden")
+        mockSocialAccountsError(new Error("You do not have access to account destinations."));
+      if (state === "network")
+        mockSocialAccountsError(new Error("Account destinations could not be loaded."));
+      render(<MarketingWorkspace />);
+      fireEvent.click(screen.getByRole("button", { name: "Create Content" }));
+      if (state === "empty") expect(screen.getByText(/No compatible accounts/)).toBeInTheDocument();
+      else expect(screen.getByLabelText("Destination account")).toBeDisabled();
+      if (state === "loading")
+        expect(screen.getByText("Loading destination accounts...")).toBeInTheDocument();
+      if (state === "forbidden" || state === "network")
+        expect(screen.getByRole("button", { name: "Retry accounts" })).toBeInTheDocument();
+    },
+  );
+
+  it("Publish Now prepares a material edit and cannot bypass saving, approval, or activation", async () => {
+    vi.useRealTimers();
+    mockWorkspaceProfile([
+      "marketing.content.view",
+      "marketing.content.edit",
+      "marketing.content.submit_for_review",
+      "marketing.content.schedule",
+    ]);
+    mockDrafts([item({ status: "draft" })]);
+    contentHookState.detailData = item({ status: "draft" });
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open draft Single Teaser" }));
+    fireEvent.click(screen.getByRole("button", { name: "Publish Now" }));
+    expect(screen.getByText(/Publish Now prepared a channel time edit/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Submit for approval" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Activate Schedule" })).toBeDisabled();
+    expect(mutationMocks.approvalSubmit).not.toHaveBeenCalled();
+    expect(mutationMocks.update).not.toHaveBeenCalled();
+    expect(mutationMocks.status).not.toHaveBeenCalled();
+    expect(vi.mocked(fetch).mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+    await waitFor(() =>
+      expect(screen.queryByText("Loading scheduling state")).not.toBeInTheDocument(),
+    );
+  });
+
+  it("uses the scheduling capability and approved revision guards instead of parent status changes", async () => {
+    vi.useRealTimers();
+    mockWorkspaceProfile(["marketing.content.view", "marketing.content.schedule"]);
+    const approved = item({
+      approval_request_id: "approval_01",
+      approved_revision: 2,
+      content_revision: 2,
+      status: "approved",
+      channels: [channel({ schedule_generation: 1, schedule_timezone: "UTC" })],
+    });
+    let jobs: unknown[] = [];
+    const fetchScheduling = vi.fn(async (path: string, init: RequestInit) => {
+      if (init.method === "POST") {
+        jobs = [
+          {
+            id: "job_01",
+            status: "pending",
+            content_revision: 2,
+            schedule_generation: 1,
+            scheduled_for: "2026-09-10T12:00:00Z",
+            schedule_timezone: "UTC",
+          },
+        ];
+        return Response.json(jobs[0]);
+      }
+      return Response.json(
+        path.endsWith("eligibility")
+          ? {
+              eligible: jobs.length === 0,
+              content_revision: 2,
+              schedule_generation: 1,
+              approval_request_id: "approval_01",
+              authoring_enabled: true,
+              execution_enabled: true,
+              delivery_receiver_configured: true,
+              reason_codes: [],
+            }
+          : { jobs, next_cursor: null },
+      );
+    });
+    vi.stubGlobal("fetch", fetchScheduling);
+    mockCalendar([approved]);
+    const { rerender } = render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: /Single Teaser/ }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Activate Schedule" })).toBeEnabled(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Activate Schedule" }));
+    await screen.findByText("Pending");
+    expect(mutationMocks.status).not.toHaveBeenCalled();
+    expect(
+      JSON.parse(
+        fetchScheduling.mock.calls.find(([, init]) => init.method === "POST")![1].body as string,
+      ),
+    ).toEqual({ expected_content_revision: 2, expected_schedule_generation: 1 });
+    mockCalendar([{ ...approved, approved_revision: 1, updated_at: "2026-09-02T12:00:00Z" }]);
+    rerender(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: /Single Teaser/ }));
+    await waitFor(() =>
+      expect(screen.queryByText("Loading scheduling state")).not.toBeInTheDocument(),
+    );
+    expect(screen.getByRole("button", { name: "Activate Schedule" })).toBeDisabled();
+    expect(screen.getByText(/Revision 2 requires completed approval/)).toBeInTheDocument();
+  });
+
+  it("hides activation without the scheduling capability", () => {
     mockWorkspaceProfile(["marketing.content.view"]);
     mockCalendar([
       item({
@@ -1263,7 +1594,9 @@ describe("MarketingWorkspace", () => {
     fireEvent.click(screen.getByRole("button", { name: /Single Teaser/ }));
     const editor = screen.getByRole("region", { name: "Marketing content editor" });
 
-    expect(within(editor).queryByRole("button", { name: "Schedule" })).not.toBeInTheDocument();
+    expect(
+      within(editor).queryByRole("button", { name: "Activate Schedule" }),
+    ).not.toBeInTheDocument();
     expect(within(editor).queryByText(/Scheduling is blocked/)).not.toBeInTheDocument();
     expect(
       within(editor).getByText("You need edit access to change this content."),

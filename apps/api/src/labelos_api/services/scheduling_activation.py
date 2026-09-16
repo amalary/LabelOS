@@ -7,7 +7,7 @@ Controls are trusted deployment inputs, never fields supplied by an API client.
 
 from dataclasses import dataclass
 from datetime import datetime
-from uuid import UUID
+from uuid import UUID, uuid5
 
 from labelos_database.capabilities import Capability
 from labelos_database.models import (
@@ -45,6 +45,7 @@ class ActivateChannelSchedule:
     operation_id: UUID
     expected_content_revision: int
     expected_schedule_generation: int
+    predecessor_job_id: UUID | None = None
 
 
 class SchedulingActivationRejected(SchedulingConflict):
@@ -122,6 +123,7 @@ class SchedulingActivationService:
                 != command.expected_content_revision
                 or existing.schedule_generation != command.expected_schedule_generation
                 or existing.created_by_user_id != self.user.id
+                or existing.supersedes_job_id != command.predecessor_job_id
             ):
                 raise SchedulingConflict(
                     "Activation operation was reused with new inputs"
@@ -129,6 +131,22 @@ class SchedulingActivationService:
             return existing
         if not self.controls.authoring_enabled:
             raise SchedulingActivationRejected("authoring_disabled")
+        predecessor = None
+        if command.predecessor_job_id is not None:
+            predecessor = await self.repository.get_job(command.predecessor_job_id)
+            if (
+                predecessor is None
+                or predecessor.marketing_content_item_id != command.content_item_id
+                or predecessor.marketing_content_item_channel_id != command.channel_id
+                or predecessor.status not in ("superseded", "cancelled")
+            ):
+                raise SchedulingActivationRejected("invalid_replacement")
+            if predecessor.status == "superseded" and (
+                source.item.content_revision <= predecessor.authorized_content_revision
+                or source.approval is None
+                or source.approval.request_id == predecessor.approval_request_id
+            ):
+                raise SchedulingActivationRejected("replacement_requires_reapproval")
         item, channel, campaign = source.item, source.channel, source.campaign
         if channel is None:
             raise SchedulingActivationRejected("channel_mismatch")
@@ -190,6 +208,12 @@ class SchedulingActivationService:
                 schedule_timezone=eligibility.schedule_timezone,
                 destination_id=channel.social_account_connection_id,
                 effective_artist_id=effective_artist_id,
+                supersedes_job_id=predecessor.id if predecessor else None,
+                lineage_root_job_id=(
+                    predecessor.lineage_root_job_id or predecessor.id
+                    if predecessor
+                    else None
+                ),
             )
         )
         # Repository inserts the immutable activation transition in this session.
@@ -199,7 +223,9 @@ class SchedulingActivationService:
             actor=self.user,
             entity_type="marketing_content_item",
             entity_id=item.id,
-            operation_id=str(command.operation_id),
+            operation_id=str(
+                uuid5(self.workspace_id, f"scheduling:{command.operation_id}")
+            ),
             payload={
                 "contentItemId": str(item.id),
                 "campaignId": str(item.campaign_id),

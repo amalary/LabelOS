@@ -39,6 +39,7 @@ export const capabilities = {
   marketingContentView: "marketing.content.view",
   marketingContentCreate: "marketing.content.create",
   marketingContentEdit: "marketing.content.edit",
+  marketingContentSchedule: "marketing.content.schedule",
   marketingContentArchive: "marketing.content.archive",
   marketingContentSubmitForReview: "marketing.content.submit_for_review",
   marketingContentApprove: "marketing.content.approve",
@@ -280,6 +281,12 @@ export const capabilityRegistry: readonly CapabilityDefinition[] = [
     key: capabilities.marketingContentEdit,
     displayName: "Edit marketing content",
     description: "Edit marketing content item details and channels.",
+    systemCapability: true,
+  },
+  {
+    key: capabilities.marketingContentSchedule,
+    displayName: "Activate marketing schedules",
+    description: "Activate approved channel schedules without editing their intent.",
     systemCapability: true,
   },
   {

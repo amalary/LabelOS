@@ -33,6 +33,7 @@ class Settings(DatabaseSettings):
     youtube_oauth_client_secret: str | None = None
     delivery_receiver_backend: str = "unavailable"
     scheduling_execution_enabled: bool = False
+    scheduling_authoring_enabled: bool = True
     scheduling_worker_auth_mode: Literal["google-oidc", "local-cli"] = "google-oidc"
     scheduling_worker_service_account_email: str | None = None
     scheduling_worker_service_account_subject: str | None = None

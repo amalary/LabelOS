@@ -181,7 +181,10 @@ def test_migration_preserves_legacy_data_on_upgrade_downgrade_reupgrade(
     config = Config(
         str(Path(__file__).resolve().parents[3] / "packages/database/alembic.ini")
     )
-    assert ScriptDirectory.from_config(config).get_heads() == ["202609151800"]
+    scripts = ScriptDirectory.from_config(config)
+    revision = scripts.get_revision("202609151000")
+    assert revision is not None
+    assert revision.down_revision == "202609061800"
     engine = create_engine(f"sqlite:///{path}")
     with engine.begin() as connection:
         connection.exec_driver_sql(
