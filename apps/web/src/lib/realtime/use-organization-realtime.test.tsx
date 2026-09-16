@@ -482,7 +482,18 @@ describe("useOrganizationRealtime", () => {
     expect(screen.getByText("marketing.social_account.connected")).toBeInTheDocument();
   });
 
-  it("invalidates marketing content cache for workspace scoped content events", async () => {
+  it.each([
+    "marketing.content.approval_requested",
+    "marketing.scheduling_job.activated",
+    "marketing.scheduling_job.claimed",
+    "marketing.scheduling_job.handed_off",
+    "marketing.scheduling_job.blocked",
+    "marketing.scheduling_job.cancelled",
+    "marketing.scheduling_job.superseded",
+    "marketing.scheduling_job.lease_expired",
+    "marketing.scheduling_job.handoff_unavailable",
+    "marketing.scheduling_job.requeued",
+  ])("invalidates marketing content cache for %s", async (eventType) => {
     routeState.pathname = "/marketing";
     vi.mocked(fetch).mockResolvedValue(
       Response.json({
@@ -499,7 +510,7 @@ describe("useOrganizationRealtime", () => {
     act(() => {
       source.emit("message", {
         id: "marketing_content_event_01",
-        type: "marketing.content.approval_requested",
+        type: eventType,
         version: 1,
         channel: "organization:org_01",
         organization_id: "org_01",
@@ -521,8 +532,25 @@ describe("useOrganizationRealtime", () => {
       "/api/workspaces/org_01/marketing-content?start=2026-09-01T00%3A00%3A00Z&end=2026-09-30T23%3A59%3A59Z",
       expect.any(Object),
     );
+    act(() => {
+      source.emit("message", {
+        id: "marketing_content_event_01",
+        type: eventType,
+        version: 1,
+        organization_id: "org_01",
+        payload: {},
+      });
+      source.emit("message", {
+        id: "other_workspace_event",
+        type: eventType,
+        version: 1,
+        organization_id: "org_02",
+        payload: {},
+      });
+    });
+    expect(fetch).toHaveBeenCalledTimes(2);
     expect(navigation.refresh).not.toHaveBeenCalled();
-    expect(screen.getByText("marketing.content.approval_requested")).toBeInTheDocument();
+    expect(screen.getByText(eventType)).toBeInTheDocument();
   });
 
   it.each([
@@ -711,6 +739,15 @@ describe("useOrganizationRealtime", () => {
   });
 
   it.each([
+    ["scheduling activated", "marketing.scheduling_job.activated"],
+    ["scheduling claimed", "marketing.scheduling_job.claimed"],
+    ["scheduling handed_off", "marketing.scheduling_job.handed_off"],
+    ["scheduling blocked", "marketing.scheduling_job.blocked"],
+    ["scheduling cancelled", "marketing.scheduling_job.cancelled"],
+    ["scheduling superseded", "marketing.scheduling_job.superseded"],
+    ["scheduling lease_expired", "marketing.scheduling_job.lease_expired"],
+    ["scheduling handoff_unavailable", "marketing.scheduling_job.handoff_unavailable"],
+    ["scheduling requeued", "marketing.scheduling_job.requeued"],
     ["campaign date changes", "campaign.updated"],
     ["milestone changes", "campaign.milestone_updated"],
     ["content schedule changes", "marketing.content.updated"],

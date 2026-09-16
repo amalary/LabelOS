@@ -67,6 +67,7 @@ import {
   useUpdateSocialAccountConnection,
 } from "../../lib/social-account-connections";
 import { useActiveWorkspace, useActiveWorkspaceProfile } from "../../lib/workspace-context";
+import { SchedulingJobState } from "../../components/scheduling-job-state";
 import { ChannelScheduling } from "./channel-scheduling";
 
 type MarketingTab = "calendar" | "drafts" | "approvals" | "accounts";
@@ -1689,6 +1690,9 @@ function MonthCalendar({
                       >
                         {approvalStateLabel(instance.item)}
                       </Badge>
+                      {instance.item.channels.map((channel) => (
+                        <SchedulingJobState key={channel.id} job={channel.scheduling_job} />
+                      ))}
                       {instance.hasMultipleChannelTimes ? (
                         <Badge title={formatCalendarDateTime(instance.scheduledAt, timeZone)}>
                           Multi-time
@@ -1762,6 +1766,9 @@ function CalendarList({
               <p className="mt-1 text-sm text-slate-500">
                 {humanize(instance.item.content_type)} - {channelSummary(instance.item)}
               </p>
+              {instance.item.channels.map((channel) => (
+                <SchedulingJobState key={channel.id} job={channel.scheduling_job} />
+              ))}
               <div className="mt-2 flex flex-wrap gap-1">
                 {instance.item.channels.length ? (
                   instance.item.channels.map((channel) => {

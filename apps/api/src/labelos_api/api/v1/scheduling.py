@@ -8,7 +8,11 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from labelos_database.capabilities import Capability
-from labelos_database.models import SchedulingExecutionControl, SchedulingJob
+from labelos_database.models import (
+    SchedulingExecutionControl,
+    SchedulingJob,
+    SchedulingJobTransition,
+)
 from labelos_database.scheduling import SchedulingBlockedReason, SchedulingJobStatus
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 from pydantic_core import PydanticCustomError
@@ -29,6 +33,7 @@ from labelos_api.scheduling.contracts import (
     SchedulingFeatureControls,
     due_disposition,
 )
+from labelos_api.scheduling.events import job_correlation_id, safe_reason_code
 from labelos_api.scheduling.receivers import (
     UnavailableDeliveryReceiver,
     configured_receiver,
@@ -99,6 +104,24 @@ class SchedulingJobListResponse(BaseModel):
     jobs: list[SchedulingJobResponse]
     limit: int
     next_cursor: str | None
+
+
+class SchedulingHistoryEntry(BaseModel):
+    transition_version: int
+    operation_id: UUID
+    operation: str
+    from_status: SchedulingJobStatus | None
+    to_status: SchedulingJobStatus
+    actor_kind: str
+    reason_code: str | None
+    created_at: datetime
+
+
+class SchedulingHistoryResponse(BaseModel):
+    job_id: UUID
+    correlation_id: UUID
+    transitions: list[SchedulingHistoryEntry]
+    next_before_version: int | None
 
 
 class SchedulingBlockedReasonsResponse(BaseModel):
@@ -432,6 +455,53 @@ async def get_scheduling_job(
     workspace_id: UUID, job_id: UUID, session: Session, context: Actor
 ):
     return job_response(await _job(session, workspace_id, job_id, context))
+
+
+@router.get(
+    "/scheduling/jobs/{job_id}/history", response_model=SchedulingHistoryResponse
+)
+async def scheduling_job_history(
+    workspace_id: UUID,
+    job_id: UUID,
+    session: Session,
+    context: Actor,
+    before_version: Annotated[int | None, Query(ge=1)] = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 100,
+):
+    job = await _job(session, workspace_id, job_id, context)
+    query = select(SchedulingJobTransition).where(
+        SchedulingJobTransition.workspace_id == workspace_id,
+        SchedulingJobTransition.job_id == job_id,
+    )
+    if before_version is not None:
+        query = query.where(SchedulingJobTransition.transition_version < before_version)
+    rows = list(
+        await session.scalars(
+            query.order_by(SchedulingJobTransition.transition_version.desc()).limit(
+                limit + 1
+            )
+        )
+    )
+    return SchedulingHistoryResponse(
+        job_id=job.id,
+        correlation_id=job_correlation_id(job),
+        transitions=[
+            SchedulingHistoryEntry(
+                transition_version=row.transition_version,
+                operation_id=row.operation_id,
+                operation=row.operation,
+                from_status=row.from_status,
+                to_status=row.to_status,
+                actor_kind=row.actor_kind,
+                reason_code=safe_reason_code(row.reason_code),
+                created_at=row.created_at,
+            )
+            for row in rows[:limit]
+        ],
+        next_before_version=(
+            rows[limit - 1].transition_version if len(rows) > limit else None
+        ),
+    )
 
 
 @router.get(

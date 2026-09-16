@@ -58,7 +58,20 @@ export type SchedulingEligibility = {
   explanations: string[];
 };
 
+export type SchedulingJobProjection = {
+  job_id: string;
+  status: "pending" | "claimed" | "handed_off" | "blocked" | "cancelled" | "superseded";
+  active: boolean;
+  intent_matches: boolean;
+  scheduled_for: string;
+  schedule_timezone: string;
+  blocked_reason_code: string | null;
+  transition_version: number;
+  correlation_id: string;
+};
+
 export type MarketingContentItemChannel = {
+  scheduling_job?: SchedulingJobProjection | null;
   id: string;
   marketing_content_item_id: string;
   channel: string;

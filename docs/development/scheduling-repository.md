@@ -14,9 +14,10 @@ using the repository. A worker must invoke it only for its allowlisted workspace
 
 The repository flushes but never commits. The outer application owns one
 transaction and must roll it back on failure. Job changes and append-only
-transition records commit together. Do not call commit-owning legacy services
-inside that transaction. No provider calls, queue dispatch, realtime events,
-activation endpoints, polling loop, or execution enablement are introduced.
+transition records and sanitized scheduling outbox events commit together. Do not call commit-owning legacy services
+inside that transaction. No provider calls or external event dispatch occur.
+See [scheduling-observability.md](scheduling-observability.md) for event and
+projection contracts.
 
 ```python
 async with session_factory.begin() as session:

@@ -154,3 +154,16 @@ describe("activity event mapping", () => {
     expect(mapped.description).not.toContain("Private reviewer feedback");
   });
 });
+
+it("renders handoff activity without treating it as a publication", () => {
+  const mapped = mapActivityEvent({
+    id: "handoff",
+    type: "marketing.scheduling_job.handed_off",
+    actor: null,
+    payload: { copyText: "PRIVATE_CONTENT", rawError: "PRIVATE_ERROR" },
+    createdAt: "2026-09-16T12:00:00Z",
+  });
+  expect(mapped.title).toBe("Schedule handed off");
+  expect(mapped.description).toBe("Delivery accepted the job. Publication is not confirmed.");
+  expect(JSON.stringify(mapped)).not.toContain("PRIVATE_");
+});

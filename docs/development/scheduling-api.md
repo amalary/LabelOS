@@ -11,6 +11,7 @@ workspace membership and campaign resource checks. Foreign resources return 404.
 | POST   | `/marketing-content/{content_item_id}/channels/{channel_id}/scheduling/activate`    | Activate approved channel intent                                         |
 | GET    | `/scheduling/jobs`                                                                  | Inspect workspace jobs with keyset pagination                            |
 | GET    | `/scheduling/jobs/{job_id}`                                                         | Inspect an immutable snapshot and its current state                      |
+| GET    | `/scheduling/jobs/{job_id}/history`                                                 | Inspect safe transition history and correlation ID                       |
 | GET    | `/scheduling/jobs/{job_id}/blocked-reasons`                                         | Read sanitized persisted blocker codes                                   |
 | POST   | `/scheduling/jobs/{job_id}/cancel`                                                  | Cancel pending, claimed or blocked work                                  |
 | POST   | `/scheduling/jobs/{job_id}/revalidate`                                              | Explicitly return an unchanged, eligible blocked job to pending          |
@@ -44,7 +45,9 @@ current destination readiness, controls and the database-clock lateness window.
 It cannot repair stale approval or move a missed instant. Replacement of blocked
 or superseded work requires a material revision and a new completed approval;
 the old job is superseded and the successor is linked in one transaction.
-Replacement of cancelled work may reuse still-current approval and intent.
+Replacement of cancelled work also requires fresh approval of a newer revision.
+Operational calendar projections and audit history are documented in
+[scheduling-observability.md](scheduling-observability.md).
 Handed-off jobs are immutable; a new publication requires a material revision,
 fresh approval, and a new activation. Existing accepted intent cannot be repeated.
 

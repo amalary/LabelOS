@@ -1,5 +1,7 @@
 "use client";
 
+import { SchedulingJobState } from "../../components/scheduling-job-state";
+
 import { Badge, Button, Card, EmptyState, LoadingState, PageHeader, cn } from "@label-os/ui";
 import { useRouter } from "next/navigation";
 import { useCallback, useMemo, useState } from "react";
@@ -424,6 +426,7 @@ function EventCard({
       {destinationSummary ? (
         <span className="truncate text-xs text-slate-600">{destinationSummary}</span>
       ) : null}
+      <SchedulingJobState job={event.channel?.scheduling_job} />
       {event.status ? (
         <span className="truncate text-xs text-slate-600">{humanize(event.status)}</span>
       ) : null}
@@ -549,6 +552,7 @@ function CalendarList({
                       </p>
                     </div>
                     <div className="min-w-0">
+                      <SchedulingJobState job={event.channel?.scheduling_job} />
                       {destinationSummary ? (
                         <Badge
                           variant={destinationReadinessVariant(

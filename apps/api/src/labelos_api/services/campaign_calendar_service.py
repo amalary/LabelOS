@@ -22,6 +22,7 @@ from labelos_api.repositories.approval_resources import (
     get_approval_resource_adapter,
 )
 from labelos_api.services import approval_service, scheduling_eligibility
+from labelos_api.services.scheduling_projection import SchedulingJobProjection
 from labelos_api.services.social_account_service import (
     DestinationUnavailableReason,
     ResolvedDestination,
@@ -107,6 +108,7 @@ class CampaignCalendarChannelContext:
     placement: str
     destination_readiness: CampaignCalendarDestinationReadinessContext | None = None
     scheduling_eligibility: dict[str, object] | None = None
+    scheduling_job: SchedulingJobProjection | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -418,6 +420,7 @@ def _channel_context(
         placement=event.placement,
         destination_readiness=_destination_readiness(event, eligibility),
         scheduling_eligibility=eligibility.projection() if eligibility else None,
+        scheduling_job=readiness.jobs.get(event.channel_id) if readiness else None,
     )
 
 

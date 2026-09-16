@@ -7,7 +7,7 @@ Controls are trusted deployment inputs, never fields supplied by an API client.
 
 from dataclasses import dataclass
 from datetime import datetime
-from uuid import UUID, uuid5
+from uuid import UUID
 
 from labelos_database.capabilities import Capability
 from labelos_database.models import (
@@ -17,7 +17,6 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from labelos_api.authorization import AuthorizationActorInput
-from labelos_api.realtime import RealtimeEventType, RealtimePublisher
 from labelos_api.repositories.scheduling import (
     JobActivation,
     SchedulingConflict,
@@ -141,7 +140,7 @@ class SchedulingActivationService:
                 or predecessor.status not in ("superseded", "cancelled")
             ):
                 raise SchedulingActivationRejected("invalid_replacement")
-            if predecessor.status == "superseded" and (
+            if (
                 source.item.content_revision <= predecessor.authorized_content_revision
                 or source.approval is None
                 or source.approval.request_id == predecessor.approval_request_id
@@ -217,23 +216,6 @@ class SchedulingActivationService:
             )
         )
         # Repository inserts the immutable activation transition in this session.
-        await RealtimePublisher(self.session).publish(
-            organization_id=self.workspace_id,
-            event_type=RealtimeEventType.marketing_content_updated,
-            actor=self.user,
-            entity_type="marketing_content_item",
-            entity_id=item.id,
-            operation_id=str(
-                uuid5(self.workspace_id, f"scheduling:{command.operation_id}")
-            ),
-            payload={
-                "contentItemId": str(item.id),
-                "campaignId": str(item.campaign_id),
-                "channelId": str(channel.id),
-                "schedulingJobId": str(job.id),
-                "schedulingStatus": "pending",
-            },
-        )
         return job
 
 

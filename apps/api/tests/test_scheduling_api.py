@@ -387,18 +387,28 @@ def test_replacement_after_cancellation_preserves_lineage(scheduling_api):
     assert_reason(
         post(api, api["channel"] + "/activate", guards()), "replacement_required"
     )
+    before = counts(api)
+    assert_reason(
+        post(api, job_path(api, job, "replace"), guards()),
+        "replacement_requires_reapproval",
+    )
+    assert counts(api) == before
+    reapprove(api)
     key = uuid4()
-    response = post(api, job_path(api, job, "replace"), guards(), key)
+    response = post(api, job_path(api, job, "replace"), guards(2, 2), key)
     assert response.status_code == 200, response.text
     successor = response.json()
     assert successor["id"] != job["id"]
     assert successor["supersedes_job_id"] == job["id"]
     assert successor["lineage_root_job_id"] == job["id"]
     before = counts(api)
-    assert post(api, job_path(api, job, "replace"), guards(), key).json() == successor
+    assert (
+        post(api, job_path(api, job, "replace"), guards(2, 2), key).json() == successor
+    )
     assert counts(api) == before
     assert_reason(
-        post(api, job_path(api, job, "replace"), guards(2), key), "idempotency_conflict"
+        post(api, job_path(api, job, "replace"), guards(3, 2), key),
+        "idempotency_conflict",
     )
 
 
@@ -495,7 +505,8 @@ def test_filters_and_keyset_pagination(scheduling_api):
     api = scheduling_api
     first = activate(api)
     assert post(api, job_path(api, first, "cancel")).status_code == 200
-    second = post(api, job_path(api, first, "replace"), guards()).json()
+    reapprove(api)
+    second = post(api, job_path(api, first, "replace"), guards(2, 2)).json()
     block(api, second)
     url = api["base"] + "/scheduling/jobs"
     response = api["client"].get(url, params={"limit": 1}).json()
@@ -729,3 +740,32 @@ def test_operation_keys_are_workspace_scoped(scheduling_api):
     response = post(api, path, guards(), key)
     assert response.status_code == 200, response.text
     assert response.json()["workspace_id"] != first["workspace_id"]
+
+
+def test_history_scoped_pagination_and_safe_correlation(scheduling_api):
+    api = scheduling_api
+    job = activate(api)
+    cancel_key = uuid4()
+    assert post(api, job_path(api, job, "cancel"), key=cancel_key).status_code == 200
+    path = job_path(api, job, "history")
+    api["state"]["actor"] = api["viewer"]
+    response = api["client"].get(path, params={"limit": 1})
+    assert response.status_code == 200
+    first = response.json()
+    assert first["transitions"][0]["operation"] == "cancel"
+    assert first["transitions"][0]["operation_id"] == str(cancel_key)
+    assert first["next_before_version"] == 2
+    second = api["client"].get(path, params={"before_version": 2}).json()
+    assert [row["operation"] for row in second["transitions"]] == ["activate"]
+    assert first["correlation_id"] == second["correlation_id"]
+    assert second["next_before_version"] is None
+    assert "actor_key" not in response.text and "blocked_metadata" not in response.text
+    api["state"]["actor"] = api["denied"]
+    assert api["client"].get(path).status_code == 403
+    api["state"]["actor"] = api["outsider"]
+    assert (
+        api["client"]
+        .get(path.replace(str(api["workspace"].id), str(api["outside"].id)))
+        .status_code
+        == 404
+    )

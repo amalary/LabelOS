@@ -66,11 +66,13 @@ roll back or prevent later jobs.
 ## Observability and verification
 
 Append-only transitions audit the workload principal/instance, version and safe
-reason. Realtime uses `marketing.content.updated` with scheduling status,
-identifiers and reason only, committed with each job change. No publication fields
+reason. Realtime uses `marketing.scheduling_job.*` events with scheduling status,
+identifiers, correlation ID and safe reason only, committed with each transition. No publication fields
 or published events are written. Fixed-outcome logs and `scheduling_batch_metrics`
 provide counts and duration for log-based metrics. Exception messages, content,
-asset bytes, credentials and destination objects are excluded.
+asset bytes, credentials and destination objects are excluded. See
+[scheduling-observability.md](scheduling-observability.md) for metric definitions
+and the calendar projection contract.
 
 With `TEST_POSTGRES_URL` pointing to a disposable PostgreSQL database, run from
 `apps/api`:

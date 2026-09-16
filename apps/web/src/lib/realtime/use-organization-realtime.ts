@@ -21,6 +21,7 @@ import {
   invalidateMarketingContentCache,
   shouldInvalidateMarketingContentRealtimeCacheKey,
 } from "../marketing-content";
+import { notifySchedulingUpdate } from "../scheduling";
 import { invalidateProfileCache } from "../profiles";
 import {
   invalidateSocialAccountConnectionCache,
@@ -67,6 +68,7 @@ const maxRecentActivityEvents = 25;
 const profileEventPrefix = "profile.";
 const campaignEventPrefix = "campaign.";
 const analyticsEventPrefix = "analytics.";
+const schedulingEventPrefix = "marketing.scheduling_job.";
 const marketingContentEventPrefix = "marketing.content.";
 const marketingSocialAccountEventPrefix = "marketing.social_account.";
 const approvalEventPrefix = "approval.";
@@ -81,6 +83,15 @@ const campaignCalendarEventTypes = new Set<RealtimeEventType>([
   "campaign.milestone_created",
   "campaign.milestone_updated",
   "campaign.milestone_completed",
+  "marketing.scheduling_job.activated",
+  "marketing.scheduling_job.claimed",
+  "marketing.scheduling_job.handed_off",
+  "marketing.scheduling_job.blocked",
+  "marketing.scheduling_job.cancelled",
+  "marketing.scheduling_job.superseded",
+  "marketing.scheduling_job.lease_expired",
+  "marketing.scheduling_job.handoff_unavailable",
+  "marketing.scheduling_job.requeued",
   "marketing.content.created",
   "marketing.content.updated",
   "marketing.content.status_changed",
@@ -286,6 +297,13 @@ export function useOrganizationRealtime(organizationId: string | null): Organiza
           });
         }
 
+        if (event.type.startsWith(schedulingEventPrefix)) {
+          notifySchedulingUpdate(
+            organizationId,
+            typeof event.payload.contentItemId === "string" ? event.payload.contentItemId : null,
+          );
+        }
+
         if (refetchEventTypes.has(event.type)) {
           if (event.type.startsWith(profileEventPrefix)) {
             const profileId =
@@ -323,7 +341,10 @@ export function useOrganizationRealtime(organizationId: string | null): Organiza
           if (event.type.startsWith(analyticsEventPrefix)) {
             invalidateAnalyticsWorkspaceCache(organizationId);
           }
-          if (event.type.startsWith(marketingContentEventPrefix)) {
+          if (
+            event.type.startsWith(marketingContentEventPrefix) ||
+            event.type.startsWith(schedulingEventPrefix)
+          ) {
             const campaignId =
               typeof event.payload.campaignId === "string" ? event.payload.campaignId : null;
             const contentItemId =
@@ -398,6 +419,7 @@ export function useOrganizationRealtime(organizationId: string | null): Organiza
           const isMarketingContentWorkspaceRefresh =
             pathname.startsWith("/marketing") &&
             (event.type.startsWith(marketingContentEventPrefix) ||
+              event.type.startsWith(schedulingEventPrefix) ||
               event.type.startsWith(marketingSocialAccountEventPrefix) ||
               (event.type.startsWith(approvalEventPrefix) &&
                 (typeof event.payload.campaignId === "string" ||

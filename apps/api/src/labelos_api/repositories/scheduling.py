@@ -3,7 +3,8 @@
 PostgreSQL READ COMMITTED is required for mutations. Callers authenticate and
 authorize actors, coordinate execution controls and destination eligibility, and
 commit/roll back the complete unit of work. No method commits, calls a provider,
-or dispatches events. A claim is coordination, not execution authorization.
+or dispatches events outside the transactional outbox. A claim is coordination,
+not execution authorization.
 """
 
 from collections.abc import Sequence
@@ -44,6 +45,7 @@ from labelos_api.scheduling.contracts import (
     due_disposition,
     schedule_blocked_reason,
 )
+from labelos_api.scheduling.events import publish_transition, transition_events
 
 ACTIVE = (Status.pending, Status.claimed, Status.blocked)
 
@@ -464,7 +466,7 @@ class SchedulingRepository:
         _, reason = await self._locked_job(job_id)
         return reason
 
-    def _history(
+    async def _history(
         self,
         job,
         previous,
@@ -475,22 +477,33 @@ class SchedulingRepository:
         *,
         operation_id=None,
         reason=None,
+        lease_expired=False,
+        unavailable=False,
     ):
-        self.session.add(
-            SchedulingJobTransition(
-                job_id=job.id,
-                workspace_id=self.workspace_id,
-                marketing_content_item_id=job.marketing_content_item_id,
-                transition_version=job.transition_version,
-                operation_id=operation_id or uuid4(),
-                operation=operation,
-                from_status=previous,
-                to_status=job.status,
-                actor_kind=actor_kind,
-                actor_key=actor_key,
-                reason_code=reason,
-                created_at=now,
-            )
+        transition = SchedulingJobTransition(
+            job_id=job.id,
+            workspace_id=self.workspace_id,
+            marketing_content_item_id=job.marketing_content_item_id,
+            transition_version=job.transition_version,
+            operation_id=operation_id or uuid4(),
+            operation=operation,
+            from_status=previous,
+            to_status=job.status,
+            actor_kind=actor_kind,
+            actor_key=actor_key,
+            reason_code=reason,
+            created_at=now,
+        )
+        self.session.add(transition)
+        await publish_transition(
+            self.session,
+            job,
+            transition,
+            transition_events(
+                operation,
+                lease_expired=lease_expired,
+                unavailable=unavailable,
+            ),
         )
 
     async def create_pending_job(self, activation: JobActivation) -> SchedulingJob:
@@ -563,7 +576,7 @@ class SchedulingRepository:
             raise SchedulingConflict(
                 "Channel already reserves this active/accepted intent"
             )
-        self._history(
+        await self._history(
             job,
             None,
             "activate",
@@ -694,7 +707,7 @@ class SchedulingRepository:
                 job.claimed_at = now
                 job.claim_expires_at = now + lease_duration
                 operation = "claim"
-            self._history(
+            await self._history(
                 job,
                 previous,
                 operation,
@@ -702,6 +715,7 @@ class SchedulingRepository:
                 worker_id,
                 now,
                 reason=reason.value if reason else None,
+                lease_expired=recovering,
             )
             if recovering or include_blocked or job.status == Status.claimed:
                 result.append(job)
@@ -742,6 +756,7 @@ class SchedulingRepository:
         reason=None,
         operation_id=None,
         user_command=False,
+        unavailable=False,
     ):
         _identity(actor_key)
         previous = job.status
@@ -791,7 +806,7 @@ class SchedulingRepository:
         )
         if changed is None:
             raise SchedulingConflict("Job state or lease ownership changed/expired")
-        self._history(
+        await self._history(
             changed,
             previous,
             operation,
@@ -800,6 +815,7 @@ class SchedulingRepository:
             now,
             reason=reason,
             operation_id=operation_id,
+            unavailable=unavailable,
         )
         await self.session.flush()
         return changed
@@ -941,6 +957,7 @@ class SchedulingRepository:
             expected_worker=expected_worker,
             expected_fencing_token=expected_fencing_token,
             reason=reason.value if reason else failure.value,
+            unavailable=failure == RetryableInternalFailure.delivery_unavailable,
         )
 
     async def validate_handoff_claim(

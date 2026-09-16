@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChannelScheduling } from "./channel-scheduling";
 import type { MarketingContentItem } from "../../lib/marketing-content";
@@ -7,7 +7,7 @@ import type {
   SchedulingJobResponse,
   SchedulingJobStatus,
 } from "../../lib/generated/scheduling-api";
-import { schedulingRecovery } from "../../lib/scheduling";
+import { schedulingRecovery, notifySchedulingUpdate } from "../../lib/scheduling";
 
 const content = {
   id: "content",
@@ -439,4 +439,21 @@ describe("channel scheduling", () => {
       expect(screen.getByRole("button", { name: "Activate Schedule" })).toBeDisabled();
     },
   );
+  it("refreshes an open inspector on scoped scheduling activity", async () => {
+    render(
+      <ChannelScheduling
+        item={content}
+        channel={content.channels[0]!}
+        canSchedule={true}
+        dirty={false}
+        busy={false}
+        onBusy={() => {}}
+      />,
+    );
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+    act(() => notifySchedulingUpdate("other-workspace", "content"));
+    expect(fetch).toHaveBeenCalledTimes(2);
+    act(() => notifySchedulingUpdate("workspace", "content"));
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(4));
+  });
 });

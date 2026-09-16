@@ -645,6 +645,7 @@ def test_campaign_calendar_api_projected_event_shapes(
         "channel": "Instagram",
         "placement": "Reel",
         "scheduling_eligibility": eligibility,
+        "scheduling_job": None,
         "destination_readiness": {
             "planning_valid": True,
             "delivery_ready": False,

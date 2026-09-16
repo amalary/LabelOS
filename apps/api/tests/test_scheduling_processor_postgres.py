@@ -169,8 +169,12 @@ def test_concurrent_bounded_processors_no_duplicate_acceptance(sessions):
             items = (await session.scalars(select(MarketingContentItem))).all()
             assert all(item.status == "approved" for item in items)
             events = (await session.scalars(select(RealtimeEvent))).all()
-            assert len(events) == 16
-            assert all(e.event_type == "marketing.content.updated" for e in events)
+            assert len(events) == 24
+            assert {e.event_type for e in events} == {
+                "marketing.scheduling_job.activated",
+                "marketing.scheduling_job.claimed",
+                "marketing.scheduling_job.handed_off",
+            }
             history = (
                 await session.scalars(
                     select(SchedulingJobTransition).where(
@@ -301,6 +305,21 @@ def test_expired_leases_and_stale_workers(sessions):
         assert result.recovered == 1 and result.outcomes == {"handed_off": 1}
         assert new_claims[0].fencing_token > claim.fencing_token
         assert not old.receiver.requests
+        async with sessions() as session:
+            from labelos_api.scheduling.metrics import scheduling_metrics
+
+            metrics = await scheduling_metrics(session, workspace)
+            assert metrics["expired"] == metrics["requeued"] == 1
+            assert metrics["handed_off"] == 1
+            events = list(
+                await session.scalars(
+                    select(RealtimeEvent).where(
+                        RealtimeEvent.event_type
+                        == "marketing.scheduling_job.lease_expired"
+                    )
+                )
+            )
+            assert len(events) == 1
 
     asyncio.run(run())
 
@@ -345,7 +364,19 @@ def test_partial_failures_continue_and_known_nonacceptance_requeues(sessions, ca
     with caplog.at_level("INFO"):
         asyncio.run(run())
     assert "PRIVATE_COPY" not in caplog.text and "SECRET_TOKEN" not in caplog.text
-    assert any(record.msg == "scheduling_batch_metrics" for record in caplog.records)
+    metrics = [
+        record for record in caplog.records if record.msg == "scheduling_batch_metrics"
+    ]
+    assert metrics[0].failed_count == 1
+    assert metrics[0].job_gauges == dict(
+        pending=1, due=1, claimed=1, blocked=1, handed_off=1, cancelled=0, superseded=0
+    )
+    assert metrics[0].retained_transition_totals == dict(requeued=1, expired=0)
+    assert metrics[1].failed_count == 0
+    processed = [
+        record for record in caplog.records if record.msg == "scheduling_job_processed"
+    ]
+    assert all(record.correlation_id for record in processed)
 
 
 def test_crash_between_receiver_and_job_write_rolls_back_then_reuses_envelope(
@@ -368,7 +399,7 @@ def test_crash_between_receiver_and_job_write_rolls_back_then_reuses_envelope(
             assert (await session.get(SchedulingJob, claim.id)).status == "claimed"
             assert (
                 await session.scalar(select(func.count()).select_from(RealtimeEvent))
-                == 0
+                == 2
             )
             await expire(session, claim.id)
         monkeypatch.setattr(SchedulingRepository, "record_handoff_acceptance", original)

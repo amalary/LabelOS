@@ -159,3 +159,16 @@ export function scheduleCommand(
     headers: { "Idempotency-Key": operationId },
   });
 }
+
+// Mounted inspectors can retain their item while calendar caches refresh.
+type SchedulingListener = (workspaceId: string, contentItemId: string | null) => void;
+const schedulingListeners = new Set<SchedulingListener>();
+export function subscribeSchedulingUpdates(listener: SchedulingListener) {
+  schedulingListeners.add(listener);
+  return () => {
+    schedulingListeners.delete(listener);
+  };
+}
+export function notifySchedulingUpdate(workspaceId: string, contentItemId: string | null) {
+  for (const listener of schedulingListeners) listener(workspaceId, contentItemId);
+}

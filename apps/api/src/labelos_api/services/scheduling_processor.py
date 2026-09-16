@@ -12,7 +12,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import timedelta
 from time import monotonic
-from uuid import NAMESPACE_URL, UUID, uuid5
+from uuid import UUID
 
 from labelos_database.models import SchedulingExecutionControl
 from labelos_database.scheduling import SchedulingBlockedReason as Reason
@@ -20,7 +20,6 @@ from labelos_database.scheduling import SchedulingJobStatus as Status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from labelos_api.realtime import RealtimeEventType, RealtimePublisher
 from labelos_api.repositories.scheduling import (
     RetryableInternalFailure,
     SchedulingConflict,
@@ -33,6 +32,8 @@ from labelos_api.scheduling.contracts import (
     RetryableUnavailable,
     SchedulingFeatureControls,
 )
+from labelos_api.scheduling.events import job_correlation_id
+from labelos_api.scheduling.metrics import scheduling_metrics
 from labelos_api.scheduling.payload import InvalidHandoffPayload, prepare_request
 from labelos_api.scheduling.receivers import UnavailableDeliveryReceiver
 from labelos_api.services.scheduling_destination import lock_destination
@@ -74,6 +75,7 @@ class SchedulingWorker:
 class ClaimedJob:
     id: UUID
     fencing_token: int
+    correlation_id: UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -138,27 +140,6 @@ class SchedulingDueJobProcessor:
         if enabled is not True:
             raise SchedulingExecutionRefused("execution_disabled")
 
-    async def _event(self, session, job):
-        # SchedulingJobTransition is the append-only workload audit. The outbox
-        # uses the same transaction, with no raw payload or destination data.
-        await RealtimePublisher(session).publish(
-            organization_id=job.workspace_id,
-            event_type=RealtimeEventType.marketing_content_updated,
-            actor=None,
-            entity_type="marketing_content_item",
-            entity_id=job.marketing_content_item_id,
-            operation_id=str(uuid5(job.id, f"scheduling:{job.transition_version}")),
-            payload={
-                "contentItemId": str(job.marketing_content_item_id),
-                "channelId": str(job.marketing_content_item_channel_id),
-                "schedulingJobId": str(job.id),
-                "schedulingStatus": job.status.value,
-                "reasonCode": (
-                    job.blocked_reason_code.value if job.blocked_reason_code else None
-                ),
-            },
-        )
-
     async def run(self, workspace_id: UUID) -> SchedulingBatchResult:
         """One bounded recovery pass and one bounded claim pass; never poll/sleep.
 
@@ -175,7 +156,6 @@ class SchedulingDueJobProcessor:
                 worker_id=self.worker.worker_id, limit=self.batch_size
             )
             for job in recovered:
-                await self._event(session, job)
                 if job.status == Status.blocked:
                     outcomes[job.blocked_reason_code.value] += 1
             recovered_count = len(recovered)
@@ -189,9 +169,10 @@ class SchedulingDueJobProcessor:
             )
             claims = []
             for job in jobs:
-                await self._event(session, job)
                 if job.status == Status.claimed:
-                    claims.append(ClaimedJob(job.id, job.fencing_token))
+                    claims.append(
+                        ClaimedJob(job.id, job.fencing_token, job_correlation_id(job))
+                    )
                 else:
                     outcomes[job.blocked_reason_code.value] += 1
         for claim in claims:
@@ -208,12 +189,37 @@ class SchedulingDueJobProcessor:
             outcomes[outcome] += 1
             logger.info(
                 "scheduling_job_processed",
-                extra={"scheduling_outcome": outcome, "job_id": str(claim.id)},
+                extra={
+                    "scheduling_outcome": outcome,
+                    "job_id": str(claim.id),
+                    "correlation_id": (
+                        str(claim.correlation_id) if claim.correlation_id else None
+                    ),
+                    "failed_count": int(outcome == "job_failed"),
+                },
             )
+        async with self.sessions() as session:
+            metrics = await scheduling_metrics(session, workspace_id)
         # Fixed, low-cardinality dimensions suitable for log-based counters.
         logger.info(
             "scheduling_batch_metrics",
             extra={
+                "job_gauges": {
+                    key: metrics[key]
+                    for key in (
+                        "pending",
+                        "due",
+                        "claimed",
+                        "handed_off",
+                        "blocked",
+                        "cancelled",
+                        "superseded",
+                    )
+                },
+                "retained_transition_totals": {
+                    key: metrics[key] for key in ("requeued", "expired")
+                },
+                "failed_count": outcomes["job_failed"],
                 "claimed_count": len(claims),
                 "recovered_count": recovered_count,
                 "outcome_counts": dict(outcomes),
@@ -278,7 +284,7 @@ class SchedulingDueJobProcessor:
                             destination_id=job.social_account_connection_id,
                             artist_profile_id=job.effective_artist_id,
                             authoring_timezone=job.schedule_timezone,
-                            correlation_id=uuid5(NAMESPACE_URL, job.idempotency_key),
+                            correlation_id=job_correlation_id(job),
                             item=source.item,
                             channel=source.channel,
                             asset_bytes=self.asset_bytes,
@@ -293,7 +299,6 @@ class SchedulingDueJobProcessor:
                         expected_worker=self.worker.worker_id,
                         expected_fencing_token=claim.fencing_token,
                     )
-                    await self._event(session, job)
                     return reason.value
                 assert self.receiver is not None
                 result = await accept_scheduling_handoff(
@@ -305,7 +310,6 @@ class SchedulingDueJobProcessor:
                     controls=self.controls,
                 )
                 if isinstance(result, DurableAccepted):
-                    await self._event(session, job)
                     return "handed_off"
             # Savepoint rollback can expire ORM state. Reload after leaving cache.
             if isinstance(result, RetryableUnavailable):
@@ -339,5 +343,4 @@ class SchedulingDueJobProcessor:
                 )
                 assert job.blocked_reason_code is not None
                 outcome = job.blocked_reason_code.value
-            await self._event(session, job)
             return outcome

@@ -28,6 +28,7 @@ from labelos_api.services.marketing_content_service import (
     MarketingContentNotFoundError,
     MarketingContentRelationshipError,
 )
+from labelos_api.services.scheduling_projection import SchedulingJobProjection
 from labelos_api.services.social_account_service import (
     DestinationUnavailableReason,
     ResolvedDestination,
@@ -112,6 +113,7 @@ class MarketingContentStatusUpdateRequest(BaseModel):
 
 
 class MarketingContentChannelResponse(BaseModel):
+    scheduling_job: SchedulingJobProjection | None = None
     id: UUID
     marketing_content_item_id: UUID
     channel: str
@@ -318,6 +320,7 @@ def _stored_schedule_instant(value: datetime | None) -> datetime | None:
 def _channel_response(
     channel: MarketingContentItemChannel,
     eligibility: scheduling_eligibility.SchedulingEligibility,
+    job: SchedulingJobProjection | None = None,
 ) -> MarketingContentChannelResponse:
     return MarketingContentChannelResponse(
         id=channel.id,
@@ -337,6 +340,7 @@ def _channel_response(
         asset_refs=list(channel.asset_refs),
         metadata=dict(channel.metadata_json),
         scheduling_eligibility=eligibility.projection(),
+        scheduling_job=job,
         destination_readiness=_destination_readiness(eligibility),
         created_at=channel.created_at,
         updated_at=channel.updated_at,
@@ -531,7 +535,9 @@ def _content_response(
         approved_at=item.approved_at,
         approved_by_profile_id=item.approved_by_profile_id,
         channels=[
-            _channel_response(channel, readiness.channels[channel.id])
+            _channel_response(
+                channel, readiness.channels[channel.id], readiness.jobs.get(channel.id)
+            )
             for channel in item.channels
         ],
         created_at=item.created_at,

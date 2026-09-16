@@ -25,7 +25,7 @@ from labelos_database.models import (
 )
 from sqlalchemy import event, func, select, text, update
 
-from labelos_api.realtime import RealtimePublisher
+import labelos_api.repositories.scheduling as scheduling_repository
 from labelos_api.repositories.scheduling import SchedulingConflict
 from labelos_api.scheduling.contracts import SchedulingFeatureControls
 from labelos_api.services import marketing_content_service as content
@@ -182,7 +182,7 @@ def test_success_replay_immutable_intent_and_no_credentials(sessions):
                 )
                 outbox = await session.scalar(select(RealtimeEvent))
                 assert outbox.operation_id == str(
-                    uuid5(workspace.id, f"scheduling:{command.operation_id}")
+                    uuid5(job.id, "scheduling:1:marketing.scheduling_job.activated")
                 )
                 assert outbox.payload["schedulingJobId"] == str(job.id)
                 await session.commit()
@@ -551,13 +551,13 @@ def test_workspace_resource_and_destination_isolation(sessions):
 def test_public_boundary_rolls_back_after_outbox_failure(
     sessions, monkeypatch, failure
 ):
-    original = RealtimePublisher.publish
+    original = scheduling_repository.publish_transition
 
-    async def fail_after_write(self, **kwargs):
-        await original(self, **kwargs)
+    async def fail_after_write(*args, **kwargs):
+        await original(*args, **kwargs)
         raise failure("injected outbox failure")
 
-    monkeypatch.setattr(RealtimePublisher, "publish", fail_after_write)
+    monkeypatch.setattr(scheduling_repository, "publish_transition", fail_after_write)
 
     async def run():
         async with sessions.begin() as session:

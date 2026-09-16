@@ -53,6 +53,26 @@ export type SchedulingErrorResponse = {
 };
 
 // prettier-ignore
+export type SchedulingHistoryEntry = {
+  "transition_version": number;
+  "operation_id": string;
+  "operation": string;
+  "from_status": SchedulingJobStatus | null;
+  "to_status": SchedulingJobStatus;
+  "actor_kind": string;
+  "reason_code": string | null;
+  "created_at": string;
+};
+
+// prettier-ignore
+export type SchedulingHistoryResponse = {
+  "job_id": string;
+  "correlation_id": string;
+  "transitions": Array<SchedulingHistoryEntry>;
+  "next_before_version": number | null;
+};
+
+// prettier-ignore
 export type SchedulingJobListResponse = {
   "jobs": Array<SchedulingJobResponse>;
   "limit": number;
@@ -187,6 +207,23 @@ export type SchedulingApi = {
       body: ScheduleJobCommandRequest;
       responses: {
         200: SchedulingJobResponse;
+        409: SchedulingErrorResponse;
+        422: HTTPValidationError;
+      };
+    };
+  };
+  "/api/v1/workspaces/{workspace_id}/scheduling/jobs/{job_id}/history": {
+    get: {
+      path: {
+  "workspace_id": string;
+  "job_id": string;
+};
+      query: {
+  "before_version"?: number | null;
+  "limit"?: number;
+};
+      responses: {
+        200: SchedulingHistoryResponse;
         409: SchedulingErrorResponse;
         422: HTTPValidationError;
       };

@@ -36,8 +36,8 @@ canonical intent nor publication state; changing time or destination remains a
 material edit requiring reapproval.
 
 The repository enforces active-job and accepted-intent uniqueness and creates the
-pending job plus immutable activation transition. The service inserts a sanitized
-`marketing.content.updated` realtime outbox record in the same transaction. There
+pending job plus immutable activation transition and a sanitized
+`marketing.scheduling_job.activated` outbox record in the same transaction. There
 is no network dispatch. Any failure rolls all three records back.
 
 An authorized retry of the same operation, actor, content/channel and expected

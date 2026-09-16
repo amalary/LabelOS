@@ -379,7 +379,7 @@ def test_repository_authority_batch_queries_and_read_only_projection(
                     controls=ENABLED,
                     execution_mode=SchedulingExecutionMode.automatic,
                 )
-                assert len(statements) == one_count == 3
+                assert len(statements) == one_count == 4
                 assert all(
                     channel.eligible
                     for item in batch.values()

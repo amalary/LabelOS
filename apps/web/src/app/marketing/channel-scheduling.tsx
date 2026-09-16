@@ -18,6 +18,7 @@ import {
   reasonMessage,
   scheduleCommand,
   schedulingPaths,
+  subscribeSchedulingUpdates,
   SchedulingApiError,
 } from "../../lib/scheduling";
 
@@ -38,7 +39,7 @@ const stateDescriptions: Record<SchedulingJobStatus, string> = {
   blocked:
     "Delivery cannot proceed. Resolve the blocker and revalidate unchanged intent, or edit, reapprove, and activate a replacement.",
   cancelled:
-    "This job will not be handed off. Its approved intent may be activated again through a replacement.",
+    "This job will not be handed off. Edit, obtain fresh approval, and activate a replacement.",
   superseded:
     "This job was retired by a material edit or replacement. Inspect the latest job for current delivery state.",
 };
@@ -123,7 +124,27 @@ export function ChannelScheduling({
       request.current?.abort();
       window.clearInterval(timer);
     };
-  }, [refresh, revision, generation]);
+  }, [
+    refresh,
+    revision,
+    generation,
+    channel.scheduling_job?.job_id,
+    channel.scheduling_job?.transition_version,
+  ]);
+
+  useEffect(
+    () =>
+      subscribeSchedulingUpdates((workspace, contentItem) => {
+        if (
+          workspace === workspaceId &&
+          (!contentItem || contentItem === itemId) &&
+          !mutationLock.current
+        ) {
+          void refresh();
+        }
+      }),
+    [workspaceId, itemId, refresh],
+  );
 
   async function run(
     action: "activate" | "replace" | "cancel" | "revalidate",
@@ -204,9 +225,8 @@ export function ChannelScheduling({
     eligibility.reason_codes.every(
       (code) => code === "replacement_required" || code === "active_job_conflict",
     ) &&
-    (replacement.status === "cancelled" ||
-      (revision > replacement.content_revision &&
-        eligibility.approval_request_id !== replacement.approval_request_id));
+    revision > replacement.content_revision &&
+    eligibility.approval_request_id !== replacement.approval_request_id;
   const ready =
     canSchedule &&
     approved &&

@@ -6,7 +6,7 @@ original job's current representation, even after subsequent state changes.
 """
 
 from hashlib import sha256
-from uuid import UUID, uuid5
+from uuid import UUID
 
 from labelos_database.capabilities import Capability
 from labelos_database.models import (
@@ -17,7 +17,6 @@ from labelos_database.models import (
 from sqlalchemy import func, select
 from sqlalchemy.orm import lazyload, selectinload
 
-from labelos_api.realtime import RealtimeEventType, RealtimePublisher
 from labelos_api.services import marketing_content_service as content
 from labelos_api.services.scheduling_activation import (
     ActivateChannelSchedule,
@@ -175,7 +174,7 @@ class SchedulingCommandService(SchedulingActivationService):
         if operation == "replace":
             if job.status not in ("blocked", "superseded", "cancelled"):
                 raise SchedulingActivationRejected("invalid_state_transition")
-            if job.status != "cancelled" and (
+            if (
                 source.item.content_revision <= job.authorized_content_revision
                 or source.approval is None
                 or source.approval.request_id == job.approval_request_id
@@ -231,19 +230,5 @@ class SchedulingCommandService(SchedulingActivationService):
             operation=operation,
             operation_id=operation_id,
             actor_key=str(self.user.id),
-        )
-        await RealtimePublisher(self.session).publish(
-            organization_id=self.workspace_id,
-            event_type=RealtimeEventType.marketing_content_updated,
-            actor=self.user,
-            entity_type="marketing_content_item",
-            entity_id=result.marketing_content_item_id,
-            operation_id=str(uuid5(self.workspace_id, f"scheduling:{operation_id}")),
-            payload={
-                "contentItemId": str(result.marketing_content_item_id),
-                "channelId": str(result.marketing_content_item_channel_id),
-                "schedulingJobId": str(result.id),
-                "schedulingStatus": result.status.value,
-            },
         )
         return result

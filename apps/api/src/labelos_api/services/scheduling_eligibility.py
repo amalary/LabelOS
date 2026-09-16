@@ -6,7 +6,7 @@ of durable handoff. Future execution must reload under the contract's locks.
 """
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from uuid import UUID
@@ -34,6 +34,10 @@ from labelos_api.scheduling.timezones import (
     authoring_zone,
     schedule_values,
     utc_instant,
+)
+from labelos_api.services.scheduling_projection import (
+    SchedulingJobProjection,
+    load_scheduling_projections,
 )
 from labelos_api.services.social_account_service import (
     DestinationUnavailableReason,
@@ -101,6 +105,7 @@ class ContentSchedulingReadiness:
     approved_revision_is_current: bool
     planning_can_schedule: bool
     channels: dict[UUID, SchedulingEligibility]
+    jobs: dict[UUID, SchedulingJobProjection] = field(default_factory=dict)
 
 
 def current_approval_matches(
@@ -329,7 +334,7 @@ async def evaluate_content_batch(
     execution_mode: SchedulingExecutionMode = SchedulingExecutionMode.disabled,
     controls: SchedulingFeatureControls = DISABLED_CONTROLS,
 ) -> dict[UUID, ContentSchedulingReadiness]:
-    """Evaluate authorized, loaded parents/channels with three batch SELECTs.
+    """Evaluate authorized, loaded parents/channels with four batch SELECTs.
 
     Connections load only routing/health fields and the existing artist mapping;
     no credentials, credential references, provider metadata, or network access.
@@ -384,6 +389,7 @@ async def evaluate_content_batch(
             .execution_options(populate_existing=True)
         )
         connections = {connection.id: connection for connection in rows}
+    jobs = await load_scheduling_projections(session, workspace_id, items)
     results = {}
     for item in items:
         current = current_approval_matches(item, workspace_id, evidence.get(item.id))
@@ -426,5 +432,10 @@ async def evaluate_content_batch(
             approved_revision_is_current=current,
             planning_can_schedule=planning_can_schedule(item, approval_current=current),
             channels=channels,
+            jobs={
+                channel.id: jobs[channel.id]
+                for channel in item.channels
+                if channel.id in jobs
+            },
         )
     return results
