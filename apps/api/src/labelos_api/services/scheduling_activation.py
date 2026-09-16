@@ -11,14 +11,10 @@ from uuid import UUID
 
 from labelos_database.capabilities import Capability
 from labelos_database.models import (
-    ArtistProfile,
     SchedulingJob,
-    SocialAccountConnection,
 )
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import lazyload, load_only
-from sqlalchemy.orm.attributes import set_committed_value
 
 from labelos_api.authorization import AuthorizationActorInput
 from labelos_api.realtime import RealtimeEventType, RealtimePublisher
@@ -35,6 +31,7 @@ from labelos_api.scheduling.contracts import (
     schedule_blocked_reason,
 )
 from labelos_api.services import marketing_content_service as content
+from labelos_api.services.scheduling_destination import lock_destination
 from labelos_api.services.scheduling_eligibility import (
     SchedulingExecutionMode,
     evaluate_channel_eligibility,
@@ -83,46 +80,7 @@ class SchedulingActivationService:
         )
 
     async def _destination(self, destination_id: UUID | None):
-        if destination_id is None:
-            return None
-        # Deliberately exclude credentials, credential references and metadata.
-        connection = await self.session.scalar(
-            select(SocialAccountConnection)
-            .options(
-                lazyload("*"),
-                load_only(
-                    SocialAccountConnection.id,
-                    SocialAccountConnection.organization_id,
-                    SocialAccountConnection.artist_profile_id,
-                    SocialAccountConnection.provider,
-                    SocialAccountConnection.status,
-                    SocialAccountConnection.capabilities,
-                    SocialAccountConnection.last_error_code,
-                    raiseload=True,
-                ),
-            )
-            .where(
-                SocialAccountConnection.id == destination_id,
-                SocialAccountConnection.organization_id == self.workspace_id,
-            )
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
-        if connection is not None:
-            profile = None
-            if connection.artist_profile_id is not None:
-                profile = await self.session.scalar(
-                    select(ArtistProfile)
-                    .options(
-                        lazyload("*"),
-                        load_only(ArtistProfile.artist_id, raiseload=True),
-                    )
-                    .where(ArtistProfile.id == connection.artist_profile_id)
-                    .with_for_update()
-                    .execution_options(populate_existing=True)
-                )
-            set_committed_value(connection, "artist_profile", profile)
-        return connection
+        return await lock_destination(self.session, self.workspace_id, destination_id)
 
     async def activate(self, command: ActivateChannelSchedule) -> SchedulingJob:
         if self.session.get_bind().dialect.name != "postgresql":

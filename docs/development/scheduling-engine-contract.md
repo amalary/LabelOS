@@ -1,6 +1,12 @@
 # LabelOS Scheduling Engine architecture and policy contract
 
 Status: accepted contract, 2026-09-14. Execution is not implemented or enabled.
+Implementation update, 2026-09-15: the
+[durable handoff boundary](scheduling-delivery-handoff.md) resolves the v1 payload
+normalization and asset-immutability policies below, adds typed acceptance outcomes
+and transaction composition, and verifies a test-only durable receiver. Production
+execution remains unavailable; no successful production receiver is configured.
+
 This document is normative for the next implementation. It adds no job table,
 migration, worker, queue, delivery inbox, configuration wiring, or API behavior.
 The isolated [Python contracts](../../apps/api/src/labelos_api/scheduling/contracts.py)
@@ -298,22 +304,27 @@ out-of-band drift or concurrent observations, not a substitute for invalidation.
 
 `PublishingDeliveryAcceptancePort.accept(session, request)` accepts a
 provider-neutral envelope under the caller's locked transaction. The receiver
-must persist a Delivery-owned inbox payload and return a matching
-`DeliveryAcceptanceReceipt`. Scheduling sets `handed_off` in that transaction;
+must persist a Delivery-owned inbox payload and return `DurableAccepted` with a
+matching `DeliveryAcceptanceReceipt`, or return `RetryableUnavailable` or
+`TerminalRejected` without accepting work. Scheduling sets `handed_off` only for
+`DurableAccepted` in that transaction;
 durability is confirmed only by successful outer commit. The receiver must not
 commit independently. Receipt construction or a successful method return alone
 is not evidence of durable acceptance.
 
 The envelope contains snapshot IDs/revision/approval/generation/time, job ID,
 destination ID, effective artist profile, IANA authoring timezone, schema version,
-canonical payload bytes and fingerprint. Payload v1 is canonical JSON with resolved
-caption (channel override before parent), immutable versioned asset references,
+canonical payload bytes and fingerprint, execution mode and stable correlation
+UUID. Payload v1 is canonical JSON with resolved
+caption (channel override before parent), approved digest asset references with
+embedded verified immutable bytes,
 structured hashtags, channel/placement, and sanitized delivery-relevant metadata.
 Use UTF-8, sorted keys, compact separators, no NaN, and SHA-256 of a versioned
 canonical envelope including all routing, authorization and payload fields except
-the fingerprint itself. Define exact normalization fixtures with Delivery before
-its adapter ships. Mutable asset references must be versioned or copied into
-immutable Delivery storage before acceptance; a bare mutable URL is insufficient.
+the fingerprint itself. The [v1 policy and fixtures](scheduling-delivery-handoff.md)
+define the encoding and asset verification required of a future Delivery adapter.
+Mutable asset references must be versioned or copied into immutable Delivery
+storage before acceptance; a bare mutable URL is insufficient.
 The receiver rechecks fingerprint binding. Credentials and provider result fields
 are prohibited. The DTO's bytes do not themselves validate payload schema.
 
@@ -326,8 +337,9 @@ these bindings before commit. A contract violation rolls back acceptance and is
 recorded as blocked in a new guarded transaction if no acceptance committed.
 
 A fake may model acceptance in contract tests but cannot certify production
-durability. A no-op development receiver must raise
-`DurableDeliveryReceiverUnavailable`, never manufacture success. Timeout or unknown
+durability. A no-op development receiver returns `RetryableUnavailable`, never
+manufactures success. The composer also translates legacy
+`DurableDeliveryReceiverUnavailable` exceptions to nonacceptance. Timeout or unknown
 commit outcome requires durable readback; an explicit unavailable receiver blocks
 or leaves work pending. No delivery inbox exists today, so execution remains off.
 Provider retry/backoff begins only inside Delivery after acceptance; Scheduling
@@ -530,8 +542,10 @@ execution.
 
 Remaining implementation/deployment choices (must be settled before their gate):
 
-- Delivery payload normalization fixtures and immutable asset storage/version
-  mechanism (step 6); no arbitrary mutable references allowed.
+- Delivery normalization and immutable assets (step 6) are resolved for the
+  [v1 snapshot boundary](scheduling-delivery-handoff.md): approved digest references
+  plus embedded verified bytes. Production inbox/adapter certification remains a
+  deployment gate; no arbitrary mutable references are allowed.
 - Workload identity issuer/audience and deployment provisioning, least-privilege
   role wiring (steps 2/7); the trusted boundary is mandatory regardless of issuer.
 - Lease duration, batch size, polling interval, and deployment approval of the

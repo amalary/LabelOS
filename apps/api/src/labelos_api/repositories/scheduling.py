@@ -825,6 +825,23 @@ class SchedulingRepository:
             reason=reason.value if reason else failure.value,
         )
 
+    async def validate_handoff_claim(
+        self, job_id: UUID, *, expected_worker: str, expected_fencing_token: int
+    ) -> None:
+        """Pre-inbox check; recording acceptance also rechecks these guards."""
+        job, reason = await self._locked_job(job_id)
+        now = await self._now()
+        if (
+            reason is not None
+            or job.status != Status.claimed
+            or job.claimed_by != expected_worker
+            or job.fencing_token != expected_fencing_token
+            or job.claim_expires_at is None
+            or job.claim_expires_at <= now
+            or self._disposition(job, now) != DueDisposition.claimable
+        ):
+            raise SchedulingConflict("handoff_claim_invalid")
+
     async def record_handoff_acceptance(
         self,
         job_id: UUID,

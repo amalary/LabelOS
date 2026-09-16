@@ -29,6 +29,7 @@ class Settings(DatabaseSettings):
     credential_store_secret_prefix: str = "labelos-credential"
     youtube_oauth_client_id: str | None = None
     youtube_oauth_client_secret: str | None = None
+    delivery_receiver_backend: str = "unavailable"
 
     @field_validator("allowed_frontend_origins", mode="before")
     @classmethod
@@ -58,6 +59,7 @@ class Settings(DatabaseSettings):
         return f"https://api.workos.com/sso/jwks/{self.workos_client_id}"
 
     def validate_startup_environment(self) -> None:
+        self.validate_delivery_receiver()
         if not self.requires_strict_startup_validation:
             return
 
@@ -78,6 +80,15 @@ class Settings(DatabaseSettings):
 
         self.validate_credential_store_backend()
         self.validate_youtube_oauth_configuration()
+
+    def validate_delivery_receiver(self) -> None:
+        # There is no certified production adapter yet. Test doubles may only be
+        # injected in tests, never selected through deployment configuration.
+        if self.delivery_receiver_backend != "unavailable":
+            raise RuntimeError(
+                "DELIVERY_RECEIVER_BACKEND must be unavailable; successful fake "
+                "receivers are not deployable"
+            )
 
     def validate_youtube_oauth_configuration(self) -> None:
         configured = bool(self.youtube_oauth_client_id) or bool(
@@ -155,4 +166,5 @@ def get_settings() -> Settings:
         ),
         youtube_oauth_client_id=os.getenv("YOUTUBE_OAUTH_CLIENT_ID") or None,
         youtube_oauth_client_secret=os.getenv("YOUTUBE_OAUTH_CLIENT_SECRET") or None,
+        delivery_receiver_backend=os.getenv("DELIVERY_RECEIVER_BACKEND", "unavailable"),
     )

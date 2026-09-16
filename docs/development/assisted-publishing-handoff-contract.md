@@ -5,6 +5,11 @@ Assisted destinations are social account connections that expose
 destinations, but LabelOS must hand them to a human publishing workflow instead
 of an automatic delivery provider.
 
+The [durable Scheduling acceptance boundary](scheduling-delivery-handoff.md) now
+defines canonical content snapshots, verified immutable asset copies, receipt
+outcomes and fail-closed configuration. It does not enable manual delivery or use
+this preparation DTO as acceptance evidence.
+
 ## Persistence Decision
 
 Do not create a `manual_publish_tasks` table yet.

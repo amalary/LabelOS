@@ -4,7 +4,7 @@ These values do not authenticate callers, load authoritative evidence, coordinat
 transactions, or prove durability. Future adapters must meet those obligations.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Protocol
@@ -226,7 +226,9 @@ class DeliveryAcceptanceRequest:
     authoring_timezone: str
     payload_fingerprint: str
     payload_schema_version: int
-    canonical_payload: bytes
+    canonical_payload: bytes = field(repr=False)
+    execution_mode: str = "automatic"
+    correlation_id: UUID | None = None
 
     @property
     def idempotency_key(self) -> str:
@@ -250,18 +252,45 @@ class DeliveryAcceptanceReceipt:
 
 
 class DurableDeliveryReceiverUnavailable(RuntimeError):
-    """An absent/no-op receiver must fail closed with this error, never a receipt."""
+    """Legacy unavailable signal, translated to RetryableUnavailable by composition."""
+
+
+@dataclass(frozen=True, kw_only=True)
+class DurableAccepted:
+    """Staged in the caller's transaction; durable only after its commit."""
+
+    receipt: DeliveryAcceptanceReceipt
+
+    @property
+    def receipt_id(self) -> UUID:
+        return self.receipt.delivery_request_id
+
+
+@dataclass(frozen=True)
+class RetryableUnavailable:
+    # No free-form provider errors or exception messages cross this boundary.
+    reason_code: str = field(default="delivery_unavailable", init=False)
+
+
+@dataclass(frozen=True)
+class TerminalRejected:
+    reason_code: str = field(default="handoff_rejected", init=False)
+
+
+DeliveryAcceptanceResult = DurableAccepted | RetryableUnavailable | TerminalRejected
 
 
 class PublishingDeliveryAcceptancePort(Protocol):
     async def accept(
         self, session: AsyncSession, request: DeliveryAcceptanceRequest
-    ) -> DeliveryAcceptanceReceipt:
+    ) -> DeliveryAcceptanceResult:
         """Insert/deduplicate a delivery-owned inbox in the caller's transaction.
 
         No internal commit, external I/O, credentials, or provider calls. Persist
         the complete immutable payload before returning a matching receipt. The
         receipt and handed_off transition become durable together at outer commit.
-        Same key/different fingerprint must raise, never overwrite accepted work.
+        Same key/different fingerprint returns TerminalRejected, never overwrites.
+        Nonacceptance results must leave no inbox writes. Unknown commit outcomes
+        are exceptions requiring durable readback, never RetryableUnavailable.
         """
         ...
