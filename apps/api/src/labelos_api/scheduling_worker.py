@@ -155,7 +155,7 @@ def main(argv: list[str] | None = None) -> int:
             await reset_engine()
 
     response = asyncio.run(run())
-    print(response.body.decode())
+    print(bytes(response.body).decode())
     return 0 if response.status_code == 200 else 1
 
 

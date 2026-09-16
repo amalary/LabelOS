@@ -724,6 +724,35 @@ def test_default_receiver_is_unavailable_and_inspection_remains_available(
     assert api["client"].get(job_path(api, job)).status_code == 200
 
 
+@pytest.mark.parametrize("seconds_ago", [0, 1, 299])
+def test_eligibility_rejects_overdue_intent_inside_worker_grace(
+    scheduling_api, seconds_ago
+):
+    api = scheduling_api
+
+    async def set_due():
+        async with api["sessions"].begin() as session:
+            now = await session.scalar(select(func.clock_timestamp()))
+            instant = now - timedelta(seconds=seconds_ago)
+            await session.execute(
+                update(MarketingContentItemChannel)
+                .where(MarketingContentItemChannel.id == api["command"].channel_id)
+                .values(
+                    scheduled_at=instant,
+                    schedule_local_time=instant.replace(tzinfo=None).isoformat(),
+                )
+            )
+
+    asyncio.run(set_due())
+    response = api["client"].get(api["channel"] + "/eligibility")
+    assert response.status_code == 200
+    assert not response.json()["eligible"]
+    assert "missed_schedule_window" in response.json()["reason_codes"]
+    assert_reason(
+        post(api, api["channel"] + "/activate", guards()), "missed_schedule_window"
+    )
+
+
 def test_concurrent_same_key_is_one_activation(scheduling_api):
     from concurrent.futures import ThreadPoolExecutor
     from threading import Barrier

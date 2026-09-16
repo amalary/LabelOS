@@ -6,20 +6,23 @@ Implemented against the accepted [Scheduling Engine contract](scheduling-engine-
 [shared eligibility](scheduling-eligibility.md) foundations.
 
 The subsequent [persistence implementation](scheduling-persistence.md) adds job and
-history storage with restricted deletion; application-service integration remains
-a separate gate.
+history storage with restricted deletion. The
+[production-readiness audit](scheduling-production-readiness.md) completes material-edit
+invalidation: occupying sibling jobs retire in the content transaction, including
+claimed jobs, while terminal history remains unchanged. The phase-specific
+verification notes below record the earlier foundation work.
 
 ## Boundaries and audit
 
-| Area                        | Audit finding and resulting boundary                                                                                                                                                                                                          |
-| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Marketing Content           | Create, edit, combined edit, replacement, single-channel edit, status transition and archive committed internally. Each now has a private, flush-only operation body. Existing public functions own one final commit.                         |
-| Nested approval transitions | Content submission/approval now calls the noncommitting approval bodies. The content application boundary commits the whole operation.                                                                                                        |
-| Approval                    | Submission, assignment, human decisions, cancellation/invalidation and resubmission now have noncommitting bodies. Resubmission no longer commits its new submission before adding resubmission history and realtime.                         |
-| Repositories                | Content and approval writes already flushed without committing. This remains true. Approval resource adapters also never commit.                                                                                                              |
-| Realtime                    | `RealtimePublisher.publish` inserts and flushes the database outbox record in the supplied session. No network dispatch or independent commit was added.                                                                                      |
-| Invalidation                | `record_current_approval_invalidated` and the inactive `invalidate_content_channels` hook remain transaction-local. The hook still receives the old revision, approval identity and affected/removed channel IDs before mutation or deletion. |
-| Destination resolution      | The existing resolver performs reads without committing. It remains an authoring/read projection boundary; it is not an authenticated worker adapter.                                                                                         |
+| Area                        | Audit finding and resulting boundary                                                                                                                                                                                                                                |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Marketing Content           | Create, edit, combined edit, replacement, single-channel edit, status transition and archive committed internally. Each now has a private, flush-only operation body. Existing public functions own one final commit.                                               |
+| Nested approval transitions | Content submission/approval now calls the noncommitting approval bodies. The content application boundary commits the whole operation.                                                                                                                              |
+| Approval                    | Submission, assignment, human decisions, cancellation/invalidation and resubmission now have noncommitting bodies. Resubmission no longer commits its new submission before adding resubmission history and realtime.                                               |
+| Repositories                | Content and approval writes already flushed without committing. This remains true. Approval resource adapters also never commit.                                                                                                                                    |
+| Realtime                    | `RealtimePublisher.publish` inserts and flushes the database outbox record in the supplied session. No network dispatch or independent commit was added.                                                                                                            |
+| Invalidation                | `record_current_approval_invalidated` and `invalidate_content_channels` remain transaction-local. The hook supersedes active sibling jobs, fences claims, and writes audit/outbox records before mutation. Referenced physical deletion still fails and rolls back. |
+| Destination resolution      | The existing resolver performs reads without committing. It remains an authoring/read projection boundary; it is not an authenticated worker adapter.                                                                                                               |
 
 Public service signatures, authoring permissions, endpoint payloads and planning
 status semantics remain compatible. Public write wrappers use a savepoint for the

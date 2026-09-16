@@ -760,6 +760,7 @@ class SchedulingRepository:
         operation_id=None,
         user_command=False,
         unavailable=False,
+        actor_kind=None,
     ):
         _identity(actor_key)
         previous = job.status
@@ -813,7 +814,7 @@ class SchedulingRepository:
             changed,
             previous,
             operation,
-            "worker" if expected_worker is not None else "user",
+            actor_kind or ("worker" if expected_worker is not None else "user"),
             actor_key,
             now,
             reason=reason,
@@ -824,7 +825,13 @@ class SchedulingRepository:
         return changed
 
     async def apply_user_transition(
-        self, job_id: UUID, *, operation: str, operation_id: UUID, actor_key: str
+        self,
+        job_id: UUID,
+        *,
+        operation: str,
+        operation_id: UUID,
+        actor_key: str,
+        actor_kind: str = "user",
     ) -> SchedulingJob:
         """User coordination under source/job locks, including expired claims.
 
@@ -866,6 +873,7 @@ class SchedulingRepository:
             actor_key=actor_key,
             now=now,
             user_command=True,
+            actor_kind=actor_kind,
             reason="user_cancelled" if operation == "cancel" else None,
         )
 

@@ -28,11 +28,7 @@ from labelos_api.repositories.scheduling import (
     SchedulingConflict,
     SchedulingRepository,
 )
-from labelos_api.scheduling.contracts import (
-    DueDisposition,
-    SchedulingFeatureControls,
-    due_disposition,
-)
+from labelos_api.scheduling.contracts import SchedulingFeatureControls
 from labelos_api.scheduling.events import job_correlation_id, safe_reason_code
 from labelos_api.scheduling.receivers import (
     UnavailableDeliveryReceiver,
@@ -348,14 +344,9 @@ async def channel_scheduling_eligibility(
         assert isinstance(now, datetime)
         if now.tzinfo is None:
             now = now.replace(tzinfo=UTC)
-        if (
-            due_disposition(
-                scheduled_for=readiness.scheduled_for,
-                now=now,
-                lateness_window=repository.window,
-            )
-            == DueDisposition.missed
-        ):
+        # This projection describes new activation, whose instant must be future.
+        # The worker's lateness allowance applies only to already activated jobs.
+        if readiness.scheduled_for <= now:
             reasons.append("missed_schedule_window")
     previous = await session.scalar(
         select(SchedulingJob)

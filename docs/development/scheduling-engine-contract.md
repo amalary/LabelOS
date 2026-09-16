@@ -1,6 +1,11 @@
 # LabelOS Scheduling Engine architecture and policy contract
 
-Status: accepted contract, 2026-09-14. Execution is not implemented or enabled.
+Status: accepted contract, 2026-09-14. This document records the original phased
+design; references to future implementation describe those phases. For current
+implementation and verification, see the
+[production-readiness audit](scheduling-production-readiness.md),
+[rollout policy](scheduling-reliability.md), and [worker runbook](scheduling-worker.md).
+The worker and persistence now exist; production execution remains disabled.
 Implementation update, 2026-09-15: the
 [durable handoff boundary](scheduling-delivery-handoff.md) resolves the v1 payload
 normalization and asset-immutability policies below, adds typed acceptance outcomes
