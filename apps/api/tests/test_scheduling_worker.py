@@ -91,7 +91,12 @@ def worker_client(monkeypatch, worker_settings):
 
 
 def test_defaults_and_environment_parsing(monkeypatch):
-    assert Settings().scheduling_execution_enabled is False
+    defaults = Settings()
+    assert defaults.scheduling_execution_enabled is False
+    assert defaults.scheduling_worker_batch_size == 25
+    assert defaults.scheduling_worker_lease_seconds == 120
+    assert defaults.scheduling_worker_lateness_seconds == 300
+    assert defaults.scheduling_worker_timeout_seconds == 30
     monkeypatch.setenv("SCHEDULING_EXECUTION_ENABLED", "false")
     monkeypatch.setenv("SCHEDULING_WORKER_BATCH_SIZE", "7")
     monkeypatch.setenv("SCHEDULING_WORKER_LEASE_SECONDS", "90")

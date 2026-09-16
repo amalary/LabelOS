@@ -682,7 +682,25 @@ def test_missed_work_requires_material_reschedule(scheduling_api):
         scheduled_at=instant,
         schedule_local_time=instant.replace(tzinfo=None).isoformat(),
     )
-    job = activate(api)
+    assert_reason(
+        post(api, api["channel"] + "/activate", guards()), "missed_schedule_window"
+    )
+
+    async def existing_overdue_job():
+        # Model a job explicitly activated before its window elapsed. The public
+        # activation boundary must no longer admit already overdue legacy work.
+        async with api["sessions"].begin() as session:
+            job = await SchedulingRepository(
+                session, api["workspace"].id, lateness_window_seconds=300
+            ).create_pending_job(
+                replace(
+                    api["activation"],
+                    snapshot=replace(api["activation"].snapshot, scheduled_for=instant),
+                )
+            )
+            return {"id": str(job.id)}
+
+    job = asyncio.run(existing_overdue_job())
     block(api, job)
     get_settings().scheduling_worker_lateness_seconds = 0
     assert_reason(post(api, job_path(api, job, "revalidate")), "missed_schedule_window")

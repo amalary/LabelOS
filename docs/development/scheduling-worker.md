@@ -77,6 +77,11 @@ The worker does not require WorkOS, YouTube OAuth, or provider-credential secret
 Google public signing keys are fetched from a fixed HTTPS endpoint with a five-second
 authentication deadline; key-service failure denies execution with 503.
 
+The [reliability and rollout policy](scheduling-reliability.md) fixes internal
+availability attempts at three per automatic run of a job and retains scheduling
+history indefinitely, without automatic archival or deletion. The lateness window
+does not permit new activation of overdue legacy rows.
+
 ## Deployment and safe rollout
 
 1. Review migrations through `202609152100` and the certified transactional Delivery

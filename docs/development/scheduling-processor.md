@@ -57,6 +57,10 @@ existing acceptance boundary returns the original receipt. A receiver that commi
 independently does not satisfy this contract.
 
 Only `RetryableUnavailable` is safely requeued, or blocked if it became stale/late.
+Committed history limits availability to three attempts (two automatic retries);
+the third nonacceptance blocks with `missing_durable_delivery_receiver`. Rollback
+does not consume the budget. See [rollout policy](scheduling-reliability.md) for
+defaults, explicit revalidation, legacy safety, retention and shutdown.
 Terminal rejection and invalid payloads block with `handoff_contract_violation`;
 validation failures retain stable reasons. Unknown exceptions and ambiguous commits
 leave durable state for readback/lease recovery. Expired workers cannot write a

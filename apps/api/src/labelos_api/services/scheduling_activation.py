@@ -23,10 +23,8 @@ from labelos_api.repositories.scheduling import (
     SchedulingRepository,
 )
 from labelos_api.scheduling.contracts import (
-    DueDisposition,
     ScheduleSnapshot,
     SchedulingFeatureControls,
-    due_disposition,
     schedule_blocked_reason,
 )
 from labelos_api.services import marketing_content_service as content
@@ -190,14 +188,10 @@ class SchedulingActivationService:
         # Use actual DB time after waiting for locks, not transaction start time.
         now = await self.session.scalar(select(func.clock_timestamp()))
         assert isinstance(now, datetime)
-        if (
-            due_disposition(
-                scheduled_for=snapshot.scheduled_for,
-                now=now,
-                lateness_window=self.repository.window,
-            )
-            == DueDisposition.missed
-        ):
+        # Lateness is recovery tolerance for already activated jobs, never
+        # permission to activate overdue legacy intent. Replays returned above
+        # remain valid, but every new activation must still be in the future.
+        if snapshot.scheduled_for <= now:
             raise SchedulingActivationRejected("missed_schedule_window")
         job = await self.repository.create_pending_job(
             JobActivation(

@@ -548,9 +548,12 @@ Remaining implementation/deployment choices (must be settled before their gate):
   deployment gate; no arbitrary mutable references are allowed.
 - Workload identity issuer/audience and deployment provisioning, least-privilege
   role wiring (steps 2/7); the trusted boundary is mandatory regardless of issuer.
-- Lease duration, batch size, polling interval, and deployment approval of the
-  recommended 300-second lateness value (step 7); no domain hard-coded window.
-- Physical tombstone/history retention design and operational retention period
-  (step 4), consistent with complete lineage and no cascade deletion.
+- Operating defaults are resolved in the [rollout policy](scheduling-reliability.md):
+  120-second lease, 25-job batches, minute sweeps, 300-second lateness tolerance
+  for existing jobs, and three internal availability attempts. New activations
+  must be future-dated; deployment timing overrides remain explicit.
+- History is retained indefinitely in PostgreSQL, without automatic archival or
+  deletion. Physical channel tombstones remain a future gate; referenced channel
+  removal currently fails and rolls back rather than deleting history.
 - Product timing of a future manual Delivery workflow or remote acceptance design;
   neither is part of this initial execution contract.

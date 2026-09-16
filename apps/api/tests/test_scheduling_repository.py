@@ -599,7 +599,7 @@ def test_batch_reads_do_not_grow_per_job(sessions, postgres_test_engine):
     async def run():
         async with sessions.begin() as session:
             one, _, _ = await seed(session)
-            many, _, _ = await seed(session, count=12)
+            many, _, _ = await seed(session, count=128)
         reads = []
 
         def record(_conn, _cursor, statement, _parameters, _context, _many):
@@ -613,7 +613,7 @@ def test_batch_reads_do_not_grow_per_job(sessions, postgres_test_engine):
             baseline = len(reads)
             reads.clear()
             async with sessions.begin() as session:
-                assert len(await claim(session, many.id)) == 12
+                assert len(await claim(session, many.id, limit=128)) == 128
             assert len(reads) == baseline
         finally:
             event.remove(

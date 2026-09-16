@@ -169,6 +169,7 @@ def test_postgres_schedule_migration_round_trip(postgres_test_engine):
 def test_migration_preserves_legacy_data_on_upgrade_downgrade_reupgrade(
     tmp_path, monkeypatch
 ):
+    import logging
     from pathlib import Path
 
     from alembic import command
@@ -177,6 +178,8 @@ def test_migration_preserves_legacy_data_on_upgrade_downgrade_reupgrade(
     from sqlalchemy import create_engine, inspect
 
     path = tmp_path / "schedule-migration.db"
+    worker_logger = logging.getLogger("labelos_api.services.scheduling_processor")
+    monkeypatch.setattr(worker_logger, "disabled", False)
     monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{path}")
     config = Config(
         str(Path(__file__).resolve().parents[3] / "packages/database/alembic.ini")
@@ -202,6 +205,7 @@ def test_migration_preserves_legacy_data_on_upgrade_downgrade_reupgrade(
         (command.upgrade, "202609151000"),
     ]:
         direction(config, revision)
+        assert not worker_logger.disabled
         with engine.connect() as connection:
             assert (
                 connection.exec_driver_sql(

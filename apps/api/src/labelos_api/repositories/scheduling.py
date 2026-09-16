@@ -48,6 +48,9 @@ from labelos_api.scheduling.contracts import (
 from labelos_api.scheduling.events import publish_transition, transition_events
 
 ACTIVE = (Status.pending, Status.claimed, Status.blocked)
+# Two retries after the initial known nonacceptance. Durable history makes this
+# budget survive worker replacement, lease recovery and operator revalidation.
+MAX_HANDOFF_AVAILABILITY_ATTEMPTS = 3
 
 
 class SchedulingConflict(ValueError):
@@ -945,6 +948,20 @@ class SchedulingRepository:
         now = await self._now()
         if reason is None and self._disposition(job, now) == DueDisposition.missed:
             reason = Reason.missed_schedule_window
+        if reason is None and failure == RetryableInternalFailure.delivery_unavailable:
+            previous_failures = list(
+                await self.session.scalars(
+                    select(SchedulingJobTransition.id)
+                    .where(
+                        SchedulingJobTransition.workspace_id == self.workspace_id,
+                        SchedulingJobTransition.job_id == job.id,
+                        SchedulingJobTransition.reason_code == "delivery_unavailable",
+                    )
+                    .limit(MAX_HANDOFF_AVAILABILITY_ATTEMPTS - 1)
+                )
+            )
+            if len(previous_failures) >= MAX_HANDOFF_AVAILABILITY_ATTEMPTS - 1:
+                reason = Reason.missing_durable_delivery_receiver
         values = (
             self._block_values(reason, now) if reason else dict(status=Status.pending)
         )

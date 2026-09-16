@@ -28,8 +28,9 @@ than the earlier architecture's optional planning-only activation; such planning
 jobs are not implemented here. Eligibility does not dispatch or retrieve
 credentials, and execution must revalidate independently before handoff.
 
-New activations reject schedules outside the configured lateness window using
-database wall-clock time after lock acquisition. Parent planning times never
+New activations reject schedules at or before database wall-clock time after lock
+acquisition. The worker lateness window applies only to already activated jobs;
+it is not permission to activate overdue legacy work. Parent planning times never
 produce jobs. Historical scheduled rows remain inert until explicitly activated
 with current approval and complete timezone context. Activation changes neither
 canonical intent nor publication state; changing time or destination remains a
