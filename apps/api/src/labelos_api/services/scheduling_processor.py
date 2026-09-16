@@ -1,4 +1,4 @@
-"""Bounded internal scheduling runner. No public route or deployment is enabled.
+"""Bounded internal scheduling runner, hosted by the private scheduling_worker app.
 
 The host authenticates a workload and constructs its workspace allowlist; this
 module must never receive a principal or receiver from user request JSON. Each

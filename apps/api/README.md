@@ -30,6 +30,15 @@ python -m black .
 
 The API reads configuration from environment variables. Start from the root `.env.example`.
 
+### Scheduling worker
+
+The private Cloud Run entrypoint uses the same image with
+`uvicorn labelos_api.scheduling_worker:create_worker_app --factory --host 0.0.0.0 --port 4000`.
+It is separate from the user API and requires a pinned Google OIDC workload identity.
+Execution defaults to disabled and remains gated on a certified Delivery receiver.
+See the [worker configuration and operations runbook](../../docs/development/scheduling-worker.md)
+for IAM, environment variables, local execution, rollout, shutdown, and rollback.
+
 ### PostgreSQL integration tests
 
 Set `TEST_POSTGRES_URL` to a disposable PostgreSQL database using the asyncpg

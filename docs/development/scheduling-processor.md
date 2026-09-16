@@ -12,8 +12,9 @@ calls providers, or publishes content.
 
 The host must authenticate its workload and construct `SchedulingWorker` with the
 verified principal UUID, instance UUID, and workspace allowlist. These are internal
-composition inputs, never user JSON or human impersonation. No public endpoint,
-task scheduler, production receiver, or execution enablement is introduced.
+composition inputs, never user JSON or human impersonation. The separate
+[trusted worker entrypoint](scheduling-worker.md) supplies Google OIDC authentication
+and deployment scope. No production receiver or execution enablement is introduced.
 
 Both trusted deployment controls and the workspace's
 `scheduling_execution_controls.execution_enabled` must permit execution. A missing
