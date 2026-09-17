@@ -14,6 +14,7 @@ from labelos_api.api.v1.onboarding import router as onboarding_router
 from labelos_api.api.v1.organizations import router as organizations_router
 from labelos_api.api.v1.profiles import router as profiles_router
 from labelos_api.api.v1.realtime import router as realtime_router
+from labelos_api.api.v1.scheduling import router as scheduling_router
 from labelos_api.api.v1.social_account_connections import (
     oauth_router as social_account_connections_oauth_router,
 )
@@ -38,6 +39,7 @@ api_router.include_router(onboarding_router)
 api_router.include_router(organizations_router)
 api_router.include_router(profiles_router)
 api_router.include_router(realtime_router)
+api_router.include_router(scheduling_router)
 api_router.include_router(social_account_connections_oauth_router)
 api_router.include_router(social_account_connections_router)
 api_router.include_router(status_router)

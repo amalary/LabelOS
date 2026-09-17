@@ -27,6 +27,7 @@
     "db:migration": "cd apps/api && python -m alembic -c ../../packages/database/alembic.ini revision --autogenerate",
     "db:rollback": "cd apps/api && python -m alembic -c ../../packages/database/alembic.ini downgrade -1",
     "generate:capabilities": "python scripts/generate-capability-registry.py",
+    "generate:scheduling-client": "python scripts/generate-scheduling-client.py",
     "build": "turbo build",
     "lint": "turbo lint",
     "format": "prettier --write .",

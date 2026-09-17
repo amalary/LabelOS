@@ -37,6 +37,15 @@ export type RealtimeEventType =
   | "campaign.milestone_completed"
   | "analytics.observation.created"
   | "analytics.observations.ingested"
+  | "marketing.scheduling_job.activated"
+  | "marketing.scheduling_job.claimed"
+  | "marketing.scheduling_job.handed_off"
+  | "marketing.scheduling_job.blocked"
+  | "marketing.scheduling_job.cancelled"
+  | "marketing.scheduling_job.superseded"
+  | "marketing.scheduling_job.lease_expired"
+  | "marketing.scheduling_job.handoff_unavailable"
+  | "marketing.scheduling_job.requeued"
   | "marketing.content.created"
   | "marketing.content.updated"
   | "marketing.content.status_changed"
@@ -108,6 +117,15 @@ export const activityEventTypes = new Set<RealtimeEventType>([
   "campaign.milestone_created",
   "campaign.milestone_updated",
   "campaign.milestone_completed",
+  "marketing.scheduling_job.activated",
+  "marketing.scheduling_job.claimed",
+  "marketing.scheduling_job.handed_off",
+  "marketing.scheduling_job.blocked",
+  "marketing.scheduling_job.cancelled",
+  "marketing.scheduling_job.superseded",
+  "marketing.scheduling_job.lease_expired",
+  "marketing.scheduling_job.handoff_unavailable",
+  "marketing.scheduling_job.requeued",
   "marketing.content.created",
   "marketing.content.updated",
   "marketing.content.status_changed",
@@ -163,6 +181,15 @@ export const refetchEventTypes = new Set<RealtimeEventType>([
   "campaign.milestone_completed",
   "analytics.observation.created",
   "analytics.observations.ingested",
+  "marketing.scheduling_job.activated",
+  "marketing.scheduling_job.claimed",
+  "marketing.scheduling_job.handed_off",
+  "marketing.scheduling_job.blocked",
+  "marketing.scheduling_job.cancelled",
+  "marketing.scheduling_job.superseded",
+  "marketing.scheduling_job.lease_expired",
+  "marketing.scheduling_job.handoff_unavailable",
+  "marketing.scheduling_job.requeued",
   "marketing.content.created",
   "marketing.content.updated",
   "marketing.content.status_changed",

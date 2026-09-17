@@ -20,7 +20,6 @@ from labelos_database.models import (
 )
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from labelos_api.authorization import (
     ActorKind,
@@ -269,9 +268,12 @@ async def _load_resource(
     workspace_id: UUID,
     resource_type: str,
     resource_id: UUID,
+    for_update: bool = False,
 ) -> tuple[ApprovalResourceAdapter, object]:
     adapter = _adapter(resource_type)
-    resource = await adapter.resolve(session, workspace_id, resource_id)
+    resource = await adapter.resolve(
+        session, workspace_id, resource_id, for_update=for_update
+    )
     if resource is None:
         raise ApprovalResourceNotFoundError("Approval resource not found")
     return adapter, resource
@@ -299,17 +301,26 @@ async def _lock_request(
     workspace_id: UUID,
     approval_request_id: UUID,
 ) -> ApprovalRequest:
-    request = await session.scalar(
-        select(ApprovalRequest)
-        .options(
-            selectinload(ApprovalRequest.stages).selectinload(
-                ApprovalRequestStage.decisions
-            ),
-            selectinload(ApprovalRequest.decisions),
+    # Resource identity is immutable. Read it without a lock, then acquire the
+    # parent lock before the request lock, matching content-edit lock order.
+    identity = (
+        await session.execute(
+            select(ApprovalRequest.resource_type, ApprovalRequest.resource_id)
+            .where(ApprovalRequest.organization_id == workspace_id)
+            .where(ApprovalRequest.id == approval_request_id)
         )
-        .where(ApprovalRequest.organization_id == workspace_id)
-        .where(ApprovalRequest.id == approval_request_id)
-        .with_for_update()
+    ).one_or_none()
+    if identity is None:
+        raise ApprovalRequestNotFoundError("Approval request not found")
+    await _load_resource(
+        session,
+        workspace_id=workspace_id,
+        resource_type=identity.resource_type,
+        resource_id=identity.resource_id,
+        for_update=True,
+    )
+    request = await approvals.get_request_for_update(
+        session, workspace_id, approval_request_id
     )
     if request is None:
         raise ApprovalRequestNotFoundError("Approval request not found")
@@ -347,8 +358,9 @@ async def _guarded_lifecycle_transition(
         .where(ApprovalRequest.id == request.id)
         .where(ApprovalRequest.status.in_(ACTIVE_STATUSES))
         .values(status=request_status, resolved_at=resolved_at)
+        .returning(ApprovalRequest.id)
     )
-    if request_result.rowcount != 1:
+    if request_result.scalar_one_or_none() is None:
         raise ApprovalAlreadyResolvedError("Approval request is already resolved")
 
     stage_result = await session.execute(
@@ -357,8 +369,9 @@ async def _guarded_lifecycle_transition(
         .where(ApprovalRequestStage.approval_request_id == request.id)
         .where(ApprovalRequestStage.status.in_(allowed_stage_statuses))
         .values(status=stage_status, completed_at=resolved_at)
+        .returning(ApprovalRequestStage.id)
     )
-    if stage_result.rowcount != 1:
+    if stage_result.scalar_one_or_none() is None:
         raise ApprovalAlreadyResolvedError("Approval request is already resolved")
 
     request.status = request_status
@@ -551,13 +564,13 @@ def _decision_projection(
         resource.approval_request_id = None
 
 
-async def submit_resource_for_approval(
+async def _submit_resource_for_approval(
     session: AsyncSession,
     workspace_id: UUID,
     resource_type: str,
     resource_id: UUID,
     *,
-    actor: AuthorizationActorInput | None = None,
+    actor: AuthorizationActorInput | None,
     summary: str | None = None,
     metadata_json: dict | None = None,
     expected_resource_revision: int | None = None,
@@ -567,6 +580,7 @@ async def submit_resource_for_approval(
         workspace_id=workspace_id,
         resource_type=resource_type,
         resource_id=resource_id,
+        for_update=True,
     )
     await _require_capability(
         session,
@@ -660,7 +674,7 @@ async def submit_resource_for_approval(
         resource=resource,
         event_action=ApprovalDecisionValue.submitted,
     )
-    await session.commit()
+    await session.flush()
     return await _load_request(
         session,
         workspace_id=workspace_id,
@@ -762,6 +776,8 @@ async def available_actions_for_request(
     *,
     actor: AuthorizationActorInput | None = None,
 ) -> tuple[ApprovalDecisionValue, ...]:
+    if actor is None:
+        return ()
     if request.status in TERMINAL_STATUSES or request.status not in ACTIVE_STATUSES:
         return ()
 
@@ -860,13 +876,13 @@ async def _list_authorization_resource(
     return adapter, placeholder
 
 
-async def assign_stage_reviewer(
+async def _assign_stage_reviewer(
     session: AsyncSession,
     workspace_id: UUID,
     approval_request_id: UUID,
     assigned_profile_id: UUID | None,
     *,
-    actor: AuthorizationActorInput | None = None,
+    actor: AuthorizationActorInput | None,
 ) -> ApprovalRequest:
     request = await _lock_request(
         session,
@@ -905,7 +921,7 @@ async def assign_stage_reviewer(
         resource=resource,
         event_action="assigned",
     )
-    await session.commit()
+    await session.flush()
     return await _load_request(
         session,
         workspace_id=workspace_id,
@@ -913,12 +929,12 @@ async def assign_stage_reviewer(
     )
 
 
-async def approve_request(
+async def _approve_request(
     session: AsyncSession,
     workspace_id: UUID,
     approval_request_id: UUID,
     *,
-    actor: AuthorizationActorInput | None = None,
+    actor: AuthorizationActorInput | None,
     comment: str | None = None,
     decision_payload: dict | None = None,
 ) -> ApprovalRequest:
@@ -935,12 +951,12 @@ async def approve_request(
     )
 
 
-async def request_changes(
+async def _request_changes(
     session: AsyncSession,
     workspace_id: UUID,
     approval_request_id: UUID,
     *,
-    actor: AuthorizationActorInput | None = None,
+    actor: AuthorizationActorInput | None,
     comment: str | None = None,
     decision_payload: dict | None = None,
 ) -> ApprovalRequest:
@@ -957,12 +973,12 @@ async def request_changes(
     )
 
 
-async def reject_request(
+async def _reject_request(
     session: AsyncSession,
     workspace_id: UUID,
     approval_request_id: UUID,
     *,
-    actor: AuthorizationActorInput | None = None,
+    actor: AuthorizationActorInput | None,
     comment: str | None = None,
     decision_payload: dict | None = None,
 ) -> ApprovalRequest:
@@ -1074,7 +1090,7 @@ async def _human_stage_decision(
         resource=resource,
         event_action=decision,
     )
-    await session.commit()
+    await session.flush()
     return await _load_request(
         session,
         workspace_id=workspace_id,
@@ -1082,12 +1098,12 @@ async def _human_stage_decision(
     )
 
 
-async def cancel_request(
+async def _cancel_request(
     session: AsyncSession,
     workspace_id: UUID,
     approval_request_id: UUID,
     *,
-    actor: AuthorizationActorInput | None = None,
+    actor: AuthorizationActorInput | None,
     reason: str | None = None,
     decision_payload: dict | None = None,
 ) -> ApprovalRequest:
@@ -1104,12 +1120,12 @@ async def cancel_request(
     )
 
 
-async def invalidate_request(
+async def _invalidate_request(
     session: AsyncSession,
     workspace_id: UUID,
     approval_request_id: UUID,
     *,
-    actor: AuthorizationActorInput | None = None,
+    actor: AuthorizationActorInput | None,
     reason: str | None = None,
     decision_payload: dict | None = None,
 ) -> ApprovalRequest:
@@ -1211,7 +1227,7 @@ async def _system_or_submitter_resolution(
         resource=resource,
         event_action=decision,
     )
-    await session.commit()
+    await session.flush()
     return await _load_request(
         session,
         workspace_id=workspace_id,
@@ -1219,14 +1235,14 @@ async def _system_or_submitter_resolution(
     )
 
 
-async def resubmit_resource(
+async def _resubmit_resource(
     session: AsyncSession,
     workspace_id: UUID,
     resource_type: str,
     resource_id: UUID,
     *,
     previous_approval_request_id: UUID,
-    actor: AuthorizationActorInput | None = None,
+    actor: AuthorizationActorInput | None,
     summary: str | None = None,
     expected_resource_revision: int | None = None,
 ) -> ApprovalRequest:
@@ -1240,11 +1256,17 @@ async def resubmit_resource(
         workspace_id=workspace_id,
         resource_type=resource_type,
         resource_id=resource_id,
+        for_update=True,
     )
     if previous.resource_type != resource_type or previous.resource_id != resource_id:
         raise ApprovalInvalidTransitionError(
             "Previous approval request does not belong to resource"
         )
+    previous = await _lock_request(
+        session,
+        workspace_id=workspace_id,
+        approval_request_id=previous_approval_request_id,
+    )
     current_revision = adapter.current_revision(resource)
     if (
         expected_resource_revision is not None
@@ -1257,7 +1279,7 @@ async def resubmit_resource(
         raise ApprovalStaleResourceRevisionError(
             "Resubmission must target a newer resource revision"
         )
-    new_request = await submit_resource_for_approval(
+    new_request = await _submit_resource_for_approval(
         session,
         workspace_id,
         resource_type,
@@ -1292,7 +1314,7 @@ async def resubmit_resource(
         resource=resource,
         event_action=ApprovalDecisionValue.resubmitted,
     )
-    await session.commit()
+    await session.flush()
     return await _load_request(
         session,
         workspace_id=workspace_id,
@@ -1331,7 +1353,7 @@ async def record_current_approval_invalidated(
     actor: AuthorizationActorInput | None = None,
     reason: str | None = None,
 ) -> ApprovalRequest:
-    request = await _load_request(
+    request = await _lock_request(
         session,
         workspace_id=workspace_id,
         approval_request_id=approval_request_id,
@@ -1383,3 +1405,257 @@ async def record_current_approval_invalidated(
         event_action=ApprovalDecisionValue.invalidated,
     )
     return request
+
+
+async def submit_resource_for_approval(
+    session: AsyncSession,
+    workspace_id: UUID,
+    resource_type: str,
+    resource_id: UUID,
+    *,
+    actor: AuthorizationActorInput | None = None,
+    summary: str | None = None,
+    metadata_json: dict | None = None,
+    expected_resource_revision: int | None = None,
+) -> ApprovalRequest:
+    """Commit one application operation; roll back all writes on failure."""
+    try:
+        async with session.begin_nested():
+            result = await _submit_resource_for_approval(
+                session,
+                workspace_id,
+                resource_type,
+                resource_id,
+                actor=actor,
+                summary=summary,
+                metadata_json=metadata_json,
+                expected_resource_revision=expected_resource_revision,
+            )
+        await session.commit()
+        return result
+    except ApprovalServiceError:
+        # The savepoint rolled back this operation; retain legacy validation
+        # behavior for callers holding other loaded objects in this session.
+        raise
+    except BaseException:
+        await session.rollback()
+        raise
+
+
+async def assign_stage_reviewer(
+    session: AsyncSession,
+    workspace_id: UUID,
+    approval_request_id: UUID,
+    assigned_profile_id: UUID | None,
+    *,
+    actor: AuthorizationActorInput | None = None,
+) -> ApprovalRequest:
+    """Commit one application operation; roll back all writes on failure."""
+    try:
+        async with session.begin_nested():
+            result = await _assign_stage_reviewer(
+                session,
+                workspace_id,
+                approval_request_id,
+                assigned_profile_id,
+                actor=actor,
+            )
+        await session.commit()
+        return result
+    except ApprovalServiceError:
+        # The savepoint rolled back this operation; retain legacy validation
+        # behavior for callers holding other loaded objects in this session.
+        raise
+    except BaseException:
+        await session.rollback()
+        raise
+
+
+async def approve_request(
+    session: AsyncSession,
+    workspace_id: UUID,
+    approval_request_id: UUID,
+    *,
+    actor: AuthorizationActorInput | None = None,
+    comment: str | None = None,
+    decision_payload: dict | None = None,
+) -> ApprovalRequest:
+    """Commit one application operation; roll back all writes on failure."""
+    try:
+        async with session.begin_nested():
+            result = await _approve_request(
+                session,
+                workspace_id,
+                approval_request_id,
+                actor=actor,
+                comment=comment,
+                decision_payload=decision_payload,
+            )
+        await session.commit()
+        return result
+    except ApprovalServiceError:
+        # The savepoint rolled back this operation; retain legacy validation
+        # behavior for callers holding other loaded objects in this session.
+        raise
+    except BaseException:
+        await session.rollback()
+        raise
+
+
+async def request_changes(
+    session: AsyncSession,
+    workspace_id: UUID,
+    approval_request_id: UUID,
+    *,
+    actor: AuthorizationActorInput | None = None,
+    comment: str | None = None,
+    decision_payload: dict | None = None,
+) -> ApprovalRequest:
+    """Commit one application operation; roll back all writes on failure."""
+    try:
+        async with session.begin_nested():
+            result = await _request_changes(
+                session,
+                workspace_id,
+                approval_request_id,
+                actor=actor,
+                comment=comment,
+                decision_payload=decision_payload,
+            )
+        await session.commit()
+        return result
+    except ApprovalServiceError:
+        # The savepoint rolled back this operation; retain legacy validation
+        # behavior for callers holding other loaded objects in this session.
+        raise
+    except BaseException:
+        await session.rollback()
+        raise
+
+
+async def reject_request(
+    session: AsyncSession,
+    workspace_id: UUID,
+    approval_request_id: UUID,
+    *,
+    actor: AuthorizationActorInput | None = None,
+    comment: str | None = None,
+    decision_payload: dict | None = None,
+) -> ApprovalRequest:
+    """Commit one application operation; roll back all writes on failure."""
+    try:
+        async with session.begin_nested():
+            result = await _reject_request(
+                session,
+                workspace_id,
+                approval_request_id,
+                actor=actor,
+                comment=comment,
+                decision_payload=decision_payload,
+            )
+        await session.commit()
+        return result
+    except ApprovalServiceError:
+        # The savepoint rolled back this operation; retain legacy validation
+        # behavior for callers holding other loaded objects in this session.
+        raise
+    except BaseException:
+        await session.rollback()
+        raise
+
+
+async def cancel_request(
+    session: AsyncSession,
+    workspace_id: UUID,
+    approval_request_id: UUID,
+    *,
+    actor: AuthorizationActorInput | None = None,
+    reason: str | None = None,
+    decision_payload: dict | None = None,
+) -> ApprovalRequest:
+    """Commit one application operation; roll back all writes on failure."""
+    try:
+        async with session.begin_nested():
+            result = await _cancel_request(
+                session,
+                workspace_id,
+                approval_request_id,
+                actor=actor,
+                reason=reason,
+                decision_payload=decision_payload,
+            )
+        await session.commit()
+        return result
+    except ApprovalServiceError:
+        # The savepoint rolled back this operation; retain legacy validation
+        # behavior for callers holding other loaded objects in this session.
+        raise
+    except BaseException:
+        await session.rollback()
+        raise
+
+
+async def invalidate_request(
+    session: AsyncSession,
+    workspace_id: UUID,
+    approval_request_id: UUID,
+    *,
+    actor: AuthorizationActorInput | None = None,
+    reason: str | None = None,
+    decision_payload: dict | None = None,
+) -> ApprovalRequest:
+    """Commit one application operation; roll back all writes on failure."""
+    try:
+        async with session.begin_nested():
+            result = await _invalidate_request(
+                session,
+                workspace_id,
+                approval_request_id,
+                actor=actor,
+                reason=reason,
+                decision_payload=decision_payload,
+            )
+        await session.commit()
+        return result
+    except ApprovalServiceError:
+        # The savepoint rolled back this operation; retain legacy validation
+        # behavior for callers holding other loaded objects in this session.
+        raise
+    except BaseException:
+        await session.rollback()
+        raise
+
+
+async def resubmit_resource(
+    session: AsyncSession,
+    workspace_id: UUID,
+    resource_type: str,
+    resource_id: UUID,
+    *,
+    previous_approval_request_id: UUID,
+    actor: AuthorizationActorInput | None = None,
+    summary: str | None = None,
+    expected_resource_revision: int | None = None,
+) -> ApprovalRequest:
+    """Commit one application operation; roll back all writes on failure."""
+    try:
+        async with session.begin_nested():
+            result = await _resubmit_resource(
+                session,
+                workspace_id,
+                resource_type,
+                resource_id,
+                previous_approval_request_id=previous_approval_request_id,
+                actor=actor,
+                summary=summary,
+                expected_resource_revision=expected_resource_revision,
+            )
+        await session.commit()
+        return result
+    except ApprovalServiceError:
+        # The savepoint rolled back this operation; retain legacy validation
+        # behavior for callers holding other loaded objects in this session.
+        raise
+    except BaseException:
+        await session.rollback()
+        raise

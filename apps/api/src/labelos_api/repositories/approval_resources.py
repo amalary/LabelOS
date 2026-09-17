@@ -15,6 +15,8 @@ from sqlalchemy import ColumnElement, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from labelos_api.repositories import marketing_content
+
 MARKETING_CONTENT_ITEM_RESOURCE_TYPE = "marketing_content_item"
 
 
@@ -68,6 +70,8 @@ class ApprovalResourceAdapter(Protocol):
         session: AsyncSession,
         organization_id: UUID,
         resource_id: UUID,
+        *,
+        for_update: bool = False,
     ) -> object | None: ...
 
     def current_revision(self, resource: object) -> int: ...
@@ -117,7 +121,13 @@ class MarketingContentItemApprovalResourceAdapter:
         session: AsyncSession,
         organization_id: UUID,
         resource_id: UUID,
+        *,
+        for_update: bool = False,
     ) -> MarketingContentItem | None:
+        if for_update:
+            return await marketing_content.get_item_for_update(
+                session, resource_id, workspace_id=organization_id
+            )
         return await session.scalar(
             select(MarketingContentItem)
             .options(

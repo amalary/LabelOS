@@ -3,6 +3,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
+from typing import cast
 from uuid import UUID
 
 from labelos_database.models import (
@@ -573,10 +574,17 @@ def _destination_status_reason(
         return DestinationUnavailableReason.disconnected
     if connection.status == SocialAccountConnectionStatus.reconnect_required:
         return DestinationUnavailableReason.reconnect_required
-    if connection.status == SocialAccountConnectionStatus.error:
+    if connection.status in {
+        SocialAccountConnectionStatus.error,
+        SocialAccountConnectionStatus.limited,
+    }:
         return DestinationUnavailableReason.connection_error
     if connection.status == SocialAccountConnectionStatus.pending:
         return DestinationUnavailableReason.reconnect_required
+    if connection.status != SocialAccountConnectionStatus.connected:
+        return DestinationUnavailableReason.connection_error
+    if connection.last_error_code not in (None, "", "assisted_action_required"):
+        return DestinationUnavailableReason.connection_error
     return None
 
 
@@ -587,6 +595,7 @@ def _resolved_destination(
     provider: str | None,
     artist_profile_id: UUID | None,
     desired_capability: str | None,
+    artist_id: UUID | None = None,
 ) -> ResolvedDestination:
     reasons: list[DestinationUnavailableReason] = []
     if connection.organization_id != workspace_id:
@@ -599,6 +608,10 @@ def _resolved_destination(
         and connection.artist_profile_id != artist_profile_id
     ):
         reasons.append(DestinationUnavailableReason.wrong_artist)
+    if artist_id is not None and connection.artist_profile_id is not None:
+        profile = connection.artist_profile
+        if profile is None or profile.artist_id != artist_id:
+            reasons.append(DestinationUnavailableReason.wrong_artist)
     status_reason = _destination_status_reason(connection)
     if status_reason is not None:
         reasons.append(status_reason)
@@ -624,6 +637,7 @@ def resolved_destination_for_connection(
     provider: str | None = None,
     artist_profile_id: UUID | None = None,
     desired_capability: str | None = None,
+    artist_id: UUID | None = None,
 ) -> ResolvedDestination:
     return _resolved_destination(
         connection,
@@ -631,6 +645,7 @@ def resolved_destination_for_connection(
         provider=_normalize_destination_provider(provider),
         artist_profile_id=artist_profile_id,
         desired_capability=_normalize_desired_capability(desired_capability),
+        artist_id=artist_id,
     )
 
 
@@ -990,7 +1005,7 @@ async def create_connection(
     values = _create_values(payload)
     _assert_transition_allowed(
         SocialAccountConnectionStatus.pending,
-        values["status"],
+        cast(SocialAccountConnectionStatus, values["status"]),
         recovery_succeeded=True,
     )
     await _validate_relationships(session, workspace_id, values)
@@ -1435,7 +1450,7 @@ def _capabilities_for_adapter_scopes(
 ) -> list[str]:
     mapper = getattr(adapter, "capabilities_for_scopes", None)
     if callable(mapper):
-        return adapter.normalize_capabilities(mapper(scopes))
+        return adapter.normalize_capabilities(cast(Sequence[str], mapper(scopes)))
     return adapter.normalize_capabilities(adapter.default_capabilities())
 
 

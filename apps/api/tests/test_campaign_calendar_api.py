@@ -622,10 +622,30 @@ def test_campaign_calendar_api_projected_event_shapes(
     assert content_event["source_id"] == str(seeded.content_item_id)
     assert channel_event["source_type"] == "marketing_content_channel"
     assert channel_event["source_parent_id"] == str(seeded.content_item_id)
+    eligibility = channel_event["channel"]["scheduling_eligibility"]
+    assert eligibility["eligible"] is False
+    assert eligibility["automatic_handoff_eligible"] is False
+    assert eligibility["manual_handoff_required"] is False
+    assert eligibility["execution_mode"] == "disabled"
+    assert eligibility["content_revision"] == 1
+    assert eligibility["approval_request_id"] is None
+    assert eligibility["scheduled_for"] == "2026-09-07T17:00:00Z"
+    assert eligibility["schedule_timezone"] is None
+    assert eligibility["destination_resolution"] is None
+    assert eligibility["reason_codes"] == [
+        "stale_approval",
+        "timezone_required",
+        "execution_disabled",
+        "missing_durable_delivery_receiver",
+        "connection_unavailable",
+    ]
+    assert len(eligibility["explanations"]) == len(eligibility["reason_codes"])
     assert channel_event["channel"] == {
         "id": str(seeded.channel_id),
         "channel": "Instagram",
         "placement": "Reel",
+        "scheduling_eligibility": eligibility,
+        "scheduling_job": None,
         "destination_readiness": {
             "planning_valid": True,
             "delivery_ready": False,

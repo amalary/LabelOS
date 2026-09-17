@@ -245,18 +245,19 @@ these events arrive for the current workspace.
 
 ## Deferred Boundaries
 
-Scheduling Engine owns future scheduling decisions:
+The [Scheduling Engine contract](scheduling-engine-contract.md) owns future
+scheduling decisions:
 
 - selecting approved content for publication
-- choosing intended publication time
-- assigning manual work
-- retry cadence and reminder policies
-- recurring or queue-based scheduling state
+- preserving channel authoring time as an immutable approved job snapshot
+- due-time validation, claims, cancellation, supersession, and durable handoff
+- scheduling state separate from provider delivery state
 
 Publishing Delivery owns future execution:
 
 - automatic provider publication calls
 - assisted manual task lifecycle
+- manual assignment and reminders
 - delivery retries and failure history
 - final write-back of `published_at`, `external_post_id`, and `external_url`
 - publication audit/history beyond the current channel result fields

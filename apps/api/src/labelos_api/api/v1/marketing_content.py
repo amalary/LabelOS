@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Annotated, Any, NoReturn
 from uuid import UUID
 
@@ -11,13 +11,16 @@ from labelos_database.models import (
     WorkspaceMembership,
 )
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic_core import PydanticCustomError
 from sqlalchemy import select
 
 from labelos_api.auth import CurrentUserContext, SessionDep, get_current_user_context
-from labelos_api.services import marketing_content_service
+from labelos_api.scheduling.timezones import ScheduleValidationError, utc_instant
+from labelos_api.services import marketing_content_service, scheduling_eligibility
 from labelos_api.services.marketing_content_service import (
     MarketingContentAuthorizationError,
     MarketingContentChannelCreate,
+    MarketingContentChannelReplacement,
     MarketingContentItemCreate,
     MarketingContentItemQuery,
     MarketingContentItemUpdate,
@@ -25,10 +28,10 @@ from labelos_api.services.marketing_content_service import (
     MarketingContentNotFoundError,
     MarketingContentRelationshipError,
 )
+from labelos_api.services.scheduling_projection import SchedulingJobProjection
 from labelos_api.services.social_account_service import (
     DestinationUnavailableReason,
     ResolvedDestination,
-    resolved_destination_for_connection,
 )
 
 router = APIRouter(prefix="/workspaces", tags=["marketing-content"])
@@ -41,12 +44,16 @@ class MarketingContentChannelCreateRequest(BaseModel):
     placement: str | None = Field(default=None, max_length=80)
     social_account_connection_id: UUID | None = None
     scheduled_at: datetime | None = None
+    schedule_timezone: str | None = None
+    schedule_local_time: str | None = None
+    schedule_disambiguation: str | None = None
+    schedule_offset_seconds: int | None = None
     copy_text_override: str | None = Field(default=None, max_length=8000)
     asset_refs: list[Any] | None = None
 
-    @field_validator("scheduled_at")
+    @field_validator("scheduled_at", mode="before")
     @classmethod
-    def require_timezone(cls, value: datetime | None) -> datetime | None:
+    def require_timezone(cls, value: datetime | str | None) -> datetime | None:
         return _require_timezone(value)
 
 
@@ -63,10 +70,14 @@ class MarketingContentCreateRequest(BaseModel):
     scheduled_at: datetime | None = None
     channels: list[MarketingContentChannelCreateRequest] = Field(default_factory=list)
 
-    @field_validator("scheduled_at")
+    @field_validator("scheduled_at", mode="before")
     @classmethod
-    def require_timezone(cls, value: datetime | None) -> datetime | None:
+    def require_timezone(cls, value: datetime | str | None) -> datetime | None:
         return _require_timezone(value)
+
+
+class MarketingContentChannelReplacementRequest(MarketingContentChannelCreateRequest):
+    id: UUID | None = None
 
 
 class MarketingContentUpdateRequest(BaseModel):
@@ -80,11 +91,11 @@ class MarketingContentUpdateRequest(BaseModel):
     release_id: UUID | None = None
     owner_profile_id: UUID | None = None
     scheduled_at: datetime | None = None
-    channels: list[MarketingContentChannelCreateRequest] | None = None
+    channels: list[MarketingContentChannelReplacementRequest] | None = None
 
-    @field_validator("scheduled_at")
+    @field_validator("scheduled_at", mode="before")
     @classmethod
-    def require_timezone(cls, value: datetime | None) -> datetime | None:
+    def require_timezone(cls, value: datetime | str | None) -> datetime | None:
         return _require_timezone(value)
 
     @model_validator(mode="after")
@@ -102,18 +113,24 @@ class MarketingContentStatusUpdateRequest(BaseModel):
 
 
 class MarketingContentChannelResponse(BaseModel):
+    scheduling_job: SchedulingJobProjection | None = None
     id: UUID
     marketing_content_item_id: UUID
     channel: str
     placement: str
     social_account_connection_id: UUID | None
     scheduled_at: datetime | None
+    schedule_generation: int
+    schedule_timezone: str | None = None
+    schedule_local_time: str | None = None
+    schedule_offset_seconds: int | None = None
     published_at: datetime | None
     external_post_id: str | None
     external_url: str | None
     copy_text_override: str | None
     asset_refs: list[Any]
     metadata: dict[str, Any]
+    scheduling_eligibility: dict[str, object]
     destination_readiness: "MarketingContentDestinationReadinessResponse"
     created_at: datetime
     updated_at: datetime
@@ -183,10 +200,11 @@ class MarketingContentListResponse(BaseModel):
     offset: int
 
 
-def _require_timezone(value: datetime | None) -> datetime | None:
-    if value is not None and (value.tzinfo is None or value.utcoffset() is None):
-        raise ValueError("Datetime must include timezone information")
-    return value
+def _require_timezone(value: datetime | str | None) -> datetime | None:
+    try:
+        return utc_instant(value) if value is not None else None
+    except ScheduleValidationError as exc:
+        raise PydanticCustomError(exc.code, "{message}", {"message": str(exc)}) from exc
 
 
 def _not_found() -> HTTPException:
@@ -218,9 +236,12 @@ def _service_error(
         MarketingContentNotFoundError
         | MarketingContentRelationshipError
         | MarketingContentLifecycleError
+        | ScheduleValidationError
         | MarketingContentAuthorizationError
     ),
 ) -> NoReturn:
+    if isinstance(exc, ScheduleValidationError):
+        raise exc
     if isinstance(exc, MarketingContentAuthorizationError):
         _raise_capability_denial(exc.reason)
     if isinstance(exc, MarketingContentNotFoundError):
@@ -248,6 +269,8 @@ async def _current_workspace_membership(
 def _channel_create(
     channel: MarketingContentChannelCreateRequest,
 ) -> MarketingContentChannelCreate:
+    if isinstance(channel, MarketingContentChannelReplacementRequest):
+        return MarketingContentChannelReplacement(**channel.model_dump())
     return MarketingContentChannelCreate(**channel.model_dump())
 
 
@@ -286,8 +309,18 @@ def _update_payload(
     )
 
 
+def _stored_schedule_instant(value: datetime | None) -> datetime | None:
+    # Only for persisted UTC schedule columns: SQLite drops their tzinfo on read.
+    # Untrusted authoring timestamps must instead pass utc_instant unchanged.
+    if value is None:
+        return None
+    return utc_instant(value.replace(tzinfo=UTC) if value.tzinfo is None else value)
+
+
 def _channel_response(
     channel: MarketingContentItemChannel,
+    eligibility: scheduling_eligibility.SchedulingEligibility,
+    job: SchedulingJobProjection | None = None,
 ) -> MarketingContentChannelResponse:
     return MarketingContentChannelResponse(
         id=channel.id,
@@ -295,24 +328,30 @@ def _channel_response(
         channel=channel.channel,
         placement=channel.placement,
         social_account_connection_id=channel.social_account_connection_id,
-        scheduled_at=channel.scheduled_at,
+        scheduled_at=_stored_schedule_instant(channel.scheduled_at),
+        schedule_generation=channel.schedule_generation,
+        schedule_timezone=channel.schedule_timezone,
+        schedule_local_time=channel.schedule_local_time,
+        schedule_offset_seconds=channel.schedule_offset_seconds,
         published_at=channel.published_at,
         external_post_id=channel.external_post_id,
         external_url=channel.external_url,
         copy_text_override=channel.copy_text_override,
         asset_refs=list(channel.asset_refs),
         metadata=dict(channel.metadata_json),
-        destination_readiness=_destination_readiness(channel),
+        scheduling_eligibility=eligibility.projection(),
+        scheduling_job=job,
+        destination_readiness=_destination_readiness(eligibility),
         created_at=channel.created_at,
         updated_at=channel.updated_at,
     )
 
 
 def _destination_readiness(
-    channel: MarketingContentItemChannel,
+    eligibility: scheduling_eligibility.SchedulingEligibility,
 ) -> MarketingContentDestinationReadinessResponse:
-    connection = channel.social_account_connection
-    if channel.social_account_connection_id is None or connection is None:
+    destination = eligibility.destination_resolution
+    if destination is None:
         return MarketingContentDestinationReadinessResponse(
             planning_valid=True,
             delivery_ready=False,
@@ -324,11 +363,6 @@ def _destination_readiness(
             ),
             account=None,
         )
-    destination = resolved_destination_for_connection(
-        connection,
-        workspace_id=connection.organization_id,
-        provider=channel.channel,
-    )
     return _destination_readiness_response(destination)
 
 
@@ -425,19 +459,11 @@ def _destination_unavailable_warning(status_value: str) -> str:
 
 def _approval_state(
     item: MarketingContentItem,
+    readiness: scheduling_eligibility.ContentSchedulingReadiness,
 ) -> MarketingContentApprovalStateResponse:
     approval_request = item.approval_request
-    approved_revision_is_current = (
-        item.approved_revision is not None
-        and item.approved_revision == item.content_revision
-        and approval_request is not None
-        and approval_request.status == ApprovalRequestStatus.approved
-    )
-    can_schedule = (
-        item.status == MarketingContentItemStatus.approved
-        and approved_revision_is_current
-        and _has_schedule_target(item)
-    )
+    approved_revision_is_current = readiness.approved_revision_is_current
+    can_schedule = readiness.planning_can_schedule
     if item.status in {
         MarketingContentItemStatus.published,
         MarketingContentItemStatus.cancelled,
@@ -480,14 +506,10 @@ def _approval_state(
     )
 
 
-def _has_schedule_target(item: MarketingContentItem) -> bool:
-    return bool(
-        item.scheduled_at is not None
-        or any(channel.scheduled_at is not None for channel in item.channels)
-    )
-
-
-def _content_response(item: MarketingContentItem) -> MarketingContentResponse:
+def _content_response(
+    item: MarketingContentItem,
+    readiness: scheduling_eligibility.ContentSchedulingReadiness,
+) -> MarketingContentResponse:
     return MarketingContentResponse(
         id=item.id,
         workspace_id=item.organization_id,
@@ -503,24 +525,36 @@ def _content_response(item: MarketingContentItem) -> MarketingContentResponse:
         owner_profile_id=item.owner_profile_id,
         created_by_user_id=item.created_by_user_id,
         created_by_profile_id=item.created_by_profile_id,
-        scheduled_at=item.scheduled_at,
+        scheduled_at=_stored_schedule_instant(item.scheduled_at),
         published_at=item.published_at,
         approval_requested_at=item.approval_requested_at,
         approval_request_id=item.approval_request_id,
-        approval_state=_approval_state(item),
+        approval_state=_approval_state(item, readiness),
         content_revision=item.content_revision,
         approved_revision=item.approved_revision,
         approved_at=item.approved_at,
         approved_by_profile_id=item.approved_by_profile_id,
-        channels=[_channel_response(channel) for channel in item.channels],
+        channels=[
+            _channel_response(
+                channel, readiness.channels[channel.id], readiness.jobs.get(channel.id)
+            )
+            for channel in item.channels
+        ],
         created_at=item.created_at,
         updated_at=item.updated_at,
     )
 
 
-def _list_response(page) -> MarketingContentListResponse:
+async def _list_response(
+    session, workspace_id: UUID, page
+) -> MarketingContentListResponse:
+    readiness = await scheduling_eligibility.evaluate_content_batch(
+        session, workspace_id, page.items
+    )
     return MarketingContentListResponse(
-        marketing_content=[_content_response(item) for item in page.items],
+        marketing_content=[
+            _content_response(item, readiness[item.id]) for item in page.items
+        ],
         total=page.total,
         limit=page.limit,
         offset=page.offset,
@@ -594,6 +628,7 @@ async def list_workspace_marketing_content(
     except (
         MarketingContentNotFoundError,
         MarketingContentRelationshipError,
+        ScheduleValidationError,
         MarketingContentLifecycleError,
         MarketingContentAuthorizationError,
         ValueError,
@@ -603,13 +638,14 @@ async def list_workspace_marketing_content(
             (
                 MarketingContentNotFoundError,
                 MarketingContentRelationshipError,
+                ScheduleValidationError,
                 MarketingContentLifecycleError,
                 MarketingContentAuthorizationError,
             ),
         ):
             raise _bad_request(str(exc)) from exc
         _service_error(exc)
-    return _list_response(page)
+    return await _list_response(session, workspace_id, page)
 
 
 @router.get(
@@ -636,10 +672,11 @@ async def list_campaign_marketing_content(
     except (
         MarketingContentNotFoundError,
         MarketingContentRelationshipError,
+        ScheduleValidationError,
         MarketingContentAuthorizationError,
     ) as exc:
         _service_error(exc)
-    return _list_response(page)
+    return await _list_response(session, workspace_id, page)
 
 
 @router.post(
@@ -676,10 +713,14 @@ async def create_marketing_content(
     except (
         MarketingContentNotFoundError,
         MarketingContentRelationshipError,
+        ScheduleValidationError,
         MarketingContentAuthorizationError,
     ) as exc:
         _service_error(exc)
-    return _content_response(item)
+    readiness = await scheduling_eligibility.evaluate_content_batch(
+        session, workspace_id, [item]
+    )
+    return _content_response(item, readiness[item.id])
 
 
 @router.get(
@@ -706,7 +747,10 @@ async def get_marketing_content(
         MarketingContentAuthorizationError,
     ) as exc:
         _service_error(exc)
-    return _content_response(item)
+    readiness = await scheduling_eligibility.evaluate_content_batch(
+        session, workspace_id, [item]
+    )
+    return _content_response(item, readiness[item.id])
 
 
 @router.patch(
@@ -749,11 +793,15 @@ async def update_marketing_content(
     except (
         MarketingContentNotFoundError,
         MarketingContentRelationshipError,
+        ScheduleValidationError,
         MarketingContentLifecycleError,
         MarketingContentAuthorizationError,
     ) as exc:
         _service_error(exc)
-    return _content_response(item)
+    readiness = await scheduling_eligibility.evaluate_content_batch(
+        session, workspace_id, [item]
+    )
+    return _content_response(item, readiness[item.id])
 
 
 @router.patch(
@@ -800,11 +848,15 @@ async def update_marketing_content_status(
     except (
         MarketingContentNotFoundError,
         MarketingContentRelationshipError,
+        ScheduleValidationError,
         MarketingContentLifecycleError,
         MarketingContentAuthorizationError,
     ) as exc:
         _service_error(exc)
-    return _content_response(item)
+    readiness = await scheduling_eligibility.evaluate_content_batch(
+        session, workspace_id, [item]
+    )
+    return _content_response(item, readiness[item.id])
 
 
 @router.post(
@@ -838,4 +890,7 @@ async def archive_marketing_content(
         MarketingContentAuthorizationError,
     ) as exc:
         _service_error(exc)
-    return _content_response(item)
+    readiness = await scheduling_eligibility.evaluate_content_batch(
+        session, workspace_id, [item]
+    )
+    return _content_response(item, readiness[item.id])

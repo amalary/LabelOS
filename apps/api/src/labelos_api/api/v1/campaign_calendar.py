@@ -17,6 +17,7 @@ from labelos_api.services.campaign_calendar_service import (
     CampaignCalendarValidationError,
     NormalizedCampaignCalendarEvent,
 )
+from labelos_api.services.scheduling_projection import SchedulingJobProjection
 
 router = APIRouter(prefix="/workspaces", tags=["campaign-calendar"])
 
@@ -58,6 +59,8 @@ class CampaignCalendarDestinationReadinessContextResponse(BaseModel):
 
 
 class CampaignCalendarChannelContextResponse(BaseModel):
+    scheduling_job: SchedulingJobProjection | None = None
+    scheduling_eligibility: dict[str, object] | None = None
     id: UUID
     channel: str
     placement: str

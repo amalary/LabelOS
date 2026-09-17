@@ -337,6 +337,51 @@ const activityEventMappers: Partial<Record<ActivityEventType, ActivityEventMappe
     description: `${textValue(event.payload, ["milestoneTitle", "title"], "A milestone")} was completed`,
     tone: "campaign",
   }),
+  "marketing.scheduling_job.activated": () => ({
+    title: "Schedule activated",
+    description: "Approved channel intent is waiting for delivery.",
+    tone: "campaign",
+  }),
+  "marketing.scheduling_job.claimed": () => ({
+    title: "Schedule claimed",
+    description: "A worker is preparing delivery.",
+    tone: "campaign",
+  }),
+  "marketing.scheduling_job.handed_off": () => ({
+    title: "Schedule handed off",
+    description: "Delivery accepted the job. Publication is not confirmed.",
+    tone: "campaign",
+  }),
+  "marketing.scheduling_job.blocked": () => ({
+    title: "Schedule blocked",
+    description: "Delivery requires attention before it can proceed.",
+    tone: "campaign",
+  }),
+  "marketing.scheduling_job.cancelled": () => ({
+    title: "Schedule cancelled",
+    description: "This job will not be handed off.",
+    tone: "campaign",
+  }),
+  "marketing.scheduling_job.superseded": () => ({
+    title: "Schedule superseded",
+    description: "This job was retired. A replacement requires activation.",
+    tone: "campaign",
+  }),
+  "marketing.scheduling_job.lease_expired": () => ({
+    title: "Schedule lease expired",
+    description: "The worker lease expired and the job was reevaluated.",
+    tone: "campaign",
+  }),
+  "marketing.scheduling_job.handoff_unavailable": () => ({
+    title: "Delivery handoff unavailable",
+    description: "Delivery did not accept the job.",
+    tone: "campaign",
+  }),
+  "marketing.scheduling_job.requeued": () => ({
+    title: "Schedule requeued",
+    description: "The job is pending after recovery or revalidation.",
+    tone: "campaign",
+  }),
   "approval.updated": (event) => ({
     ...approvalActivityCopy(event),
     tone: "approval",

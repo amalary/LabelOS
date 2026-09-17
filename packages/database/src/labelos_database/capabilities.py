@@ -44,6 +44,7 @@ class Capability(StrEnum):
     marketing_content_view = "marketing.content.view"
     marketing_content_create = "marketing.content.create"
     marketing_content_edit = "marketing.content.edit"
+    marketing_content_schedule = "marketing.content.schedule"
     marketing_content_archive = "marketing.content.archive"
     marketing_content_submit_for_review = "marketing.content.submit_for_review"
     marketing_content_approve = "marketing.content.approve"
@@ -261,6 +262,11 @@ CAPABILITY_REGISTRY: tuple[CapabilityDefinition, ...] = (
         Capability.marketing_content_edit,
         "Edit marketing content",
         "Edit marketing content item details and channels.",
+    ),
+    _definition(
+        Capability.marketing_content_schedule,
+        "Activate marketing schedules",
+        "Activate approved channel schedules without editing their intent.",
     ),
     _definition(
         Capability.marketing_content_archive,

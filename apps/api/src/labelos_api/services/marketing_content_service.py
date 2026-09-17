@@ -6,7 +6,6 @@ from urllib.parse import urlparse
 from uuid import UUID
 
 from labelos_database.models import (
-    ApprovalRequestStatus,
     MarketingContentItem,
     MarketingContentItemChannel,
     MarketingContentItemStatus,
@@ -30,7 +29,12 @@ from labelos_api.repositories import approvals, marketing_content
 from labelos_api.repositories.approval_resources import (
     MARKETING_CONTENT_ITEM_RESOURCE_TYPE,
 )
-from labelos_api.services import approval_service
+from labelos_api.scheduling.timezones import schedule_values, utc_instant
+from labelos_api.services import (
+    approval_service,
+    content_invalidation,
+    scheduling_eligibility,
+)
 from labelos_api.services.approval_service import (
     ApprovalDuplicateActiveRequestError,
     ApprovalMissingCapabilityError,
@@ -89,17 +93,7 @@ MATERIAL_FIELDS = frozenset(
         "scheduled_at",
     }
 )
-CHANNEL_MATERIAL_FIELDS = frozenset(
-    {
-        "channel",
-        "placement",
-        "social_account_connection_id",
-        "scheduled_at",
-        "copy_text_override",
-        "asset_refs",
-        "metadata_json",
-    }
-)
+CHANNEL_MATERIAL_FIELDS = marketing_content.CHANNEL_MATERIAL_FIELDS
 PUBLISHING_CAPABILITY_FIELDS = frozenset({"content_publish", "manual_publish"})
 ALLOWED_MARKETING_CONTENT_TRANSITIONS: dict[
     MarketingContentItemStatus, frozenset[MarketingContentItemStatus]
@@ -151,6 +145,10 @@ class MarketingContentChannelCreate:
     placement: str | None = None
     social_account_connection_id: UUID | None = None
     scheduled_at: datetime | None = None
+    schedule_timezone: str | None = None
+    schedule_local_time: str | None = None
+    schedule_disambiguation: str | None = None
+    schedule_offset_seconds: int | None = None
     published_at: datetime | None = None
     external_post_id: str | None = None
     external_url: str | None = None
@@ -160,11 +158,20 @@ class MarketingContentChannelCreate:
 
 
 @dataclass(frozen=True, kw_only=True)
+class MarketingContentChannelReplacement(MarketingContentChannelCreate):
+    id: UUID | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
 class MarketingContentChannelUpdate:
     channel: str | None = None
     placement: str | None = None
     social_account_connection_id: UUID | None = None
     scheduled_at: datetime | None = None
+    schedule_timezone: str | None = None
+    schedule_local_time: str | None = None
+    schedule_disambiguation: str | None = None
+    schedule_offset_seconds: int | None = None
     published_at: datetime | None = None
     external_post_id: str | None = None
     external_url: str | None = None
@@ -364,7 +371,15 @@ def _channel_create_values(
         "social_account_connection_id",
         payload.social_account_connection_id,
     )
-    _set_if_not_none(values, "scheduled_at", payload.scheduled_at)
+    values.update(
+        schedule_values(
+            scheduled_at=payload.scheduled_at,
+            schedule_timezone=payload.schedule_timezone,
+            schedule_local_time=payload.schedule_local_time,
+            schedule_disambiguation=payload.schedule_disambiguation,
+            schedule_offset_seconds=payload.schedule_offset_seconds,
+        )
+    )
     _set_if_not_none(values, "published_at", payload.published_at)
     _set_if_not_none(
         values,
@@ -395,7 +410,25 @@ def _channel_update_values(
         "social_account_connection_id",
         payload.social_account_connection_id,
     )
-    _set_if_not_none(values, "scheduled_at", payload.scheduled_at)
+    if any(
+        value is not None
+        for value in (
+            payload.scheduled_at,
+            payload.schedule_timezone,
+            payload.schedule_local_time,
+            payload.schedule_disambiguation,
+            payload.schedule_offset_seconds,
+        )
+    ):
+        values.update(
+            schedule_values(
+                scheduled_at=payload.scheduled_at,
+                schedule_timezone=payload.schedule_timezone,
+                schedule_local_time=payload.schedule_local_time,
+                schedule_disambiguation=payload.schedule_disambiguation,
+                schedule_offset_seconds=payload.schedule_offset_seconds,
+            )
+        )
     _set_if_not_none(values, "published_at", payload.published_at)
     _set_if_not_none(
         values,
@@ -546,7 +579,11 @@ def _create_values(payload: MarketingContentItemCreate) -> dict[str, object]:
     _set_if_not_none(values, "artist_id", payload.artist_id)
     _set_if_not_none(values, "release_id", payload.release_id)
     _set_if_not_none(values, "copy_text", _normalize_optional_text(payload.copy_text))
-    _set_if_not_none(values, "scheduled_at", payload.scheduled_at)
+    _set_if_not_none(
+        values,
+        "scheduled_at",
+        utc_instant(payload.scheduled_at) if payload.scheduled_at is not None else None,
+    )
     _set_if_not_none(values, "published_at", payload.published_at)
     _set_if_not_none(values, "created_by_user_id", payload.created_by_user_id)
     _set_if_not_none(values, "created_by_profile_id", payload.created_by_profile_id)
@@ -568,7 +605,11 @@ def _update_values(payload: MarketingContentItemUpdate) -> dict[str, object]:
         values["asset_refs"] = _json_list(payload.asset_refs, "asset_refs")
     if payload.metadata_json is not None:
         values["metadata_json"] = _json_object(payload.metadata_json, "metadata_json")
-    _set_if_not_none(values, "scheduled_at", payload.scheduled_at)
+    _set_if_not_none(
+        values,
+        "scheduled_at",
+        utc_instant(payload.scheduled_at) if payload.scheduled_at is not None else None,
+    )
     _set_if_not_none(values, "published_at", payload.published_at)
     _set_if_not_none(values, "owner_profile_id", payload.owner_profile_id)
     if payload.clear_artist:
@@ -800,9 +841,7 @@ def _assert_transition_allowed(
 
 
 def _assert_can_schedule(item: MarketingContentItem) -> None:
-    if item.scheduled_at is not None:
-        return
-    if any(channel.scheduled_at is not None for channel in item.channels):
+    if scheduling_eligibility.has_planning_schedule(item):
         return
     raise MarketingContentLifecycleError(
         "scheduled status requires item or channel scheduled_at"
@@ -824,56 +863,13 @@ def _changed_fields(
     }
 
 
-def _changed_channel_fields(
-    channel: MarketingContentItemChannel,
-    values: Mapping[str, object],
-) -> set[str]:
-    return {
-        field
-        for field, value in values.items()
-        if _value_changed(getattr(channel, field), value)
-    }
-
-
-def _channel_signature(channel: MarketingContentItemChannel) -> tuple:
-    return (
-        channel.channel,
-        channel.placement,
-        channel.social_account_connection_id,
-        channel.scheduled_at,
-        channel.copy_text_override,
-        list(channel.asset_refs),
-        dict(channel.metadata_json),
-    )
-
-
-def _channel_values_signature(values: Mapping[str, object]) -> tuple:
-    return (
-        values.get("channel"),
-        values.get("placement"),
-        values.get("social_account_connection_id"),
-        values.get("scheduled_at"),
-        values.get("copy_text_override"),
-        list(values.get("asset_refs", [])),
-        dict(values.get("metadata_json", {})),
-    )
-
-
-def _replacement_channels_materially_changed(
-    item: MarketingContentItem,
-    channel_values: Sequence[Mapping[str, object]],
-) -> bool:
-    current = sorted(_channel_signature(channel) for channel in item.channels)
-    proposed = sorted(_channel_values_signature(values) for values in channel_values)
-    return current != proposed
-
-
 async def _apply_material_change(
     session: AsyncSession,
     *,
     workspace_id: UUID,
     item: MarketingContentItem,
     actor: AuthorizationActorInput | None,
+    reconciliation: marketing_content.ChannelReconciliationPlan | None = None,
 ) -> bool:
     if item.status == MarketingContentItemStatus.published:
         raise MarketingContentLifecycleError(
@@ -892,6 +888,33 @@ async def _apply_material_change(
             actor=actor,
             reason="Material marketing content edit superseded this approval.",
         )
+    await content_invalidation.invalidate_content_channels(
+        session,
+        content_invalidation.ContentInvalidation(
+            workspace_id=workspace_id,
+            content_item_id=item.id,
+            previous_content_revision=item.content_revision,
+            previous_approval_request_id=previous_request_id,
+            previous_channel_ids=tuple(sorted(row.id for row in item.channels)),
+            materially_changed_channel_ids=(
+                tuple(
+                    sorted(
+                        row.id
+                        for row, changes in reconciliation.updated
+                        if changes.keys() & CHANNEL_MATERIAL_FIELDS
+                    )
+                )
+                if reconciliation is not None
+                else ()
+            ),
+            removed_channel_ids=(
+                tuple(sorted(row.id for row in reconciliation.removed))
+                if reconciliation is not None
+                else ()
+            ),
+        ),
+        actor=actor,
+    )
     item.content_revision += 1
     item.approved_at = None
     item.approved_by_profile_id = None
@@ -908,16 +931,14 @@ async def _has_completed_approval_for_current_revision(
     workspace_id: UUID,
     item: MarketingContentItem,
 ) -> bool:
-    if item.approved_revision != item.content_revision:
-        return False
-    request = await approvals.find_conflicting_or_resolved_request(
+    evidence = await approvals.load_current_approval_evidence_for_update(
         session,
         workspace_id,
         MARKETING_CONTENT_ITEM_RESOURCE_TYPE,
         item.id,
         item.content_revision,
     )
-    return request is not None and request.status == ApprovalRequestStatus.approved
+    return scheduling_eligibility.current_approval_matches(item, workspace_id, evidence)
 
 
 def _approval_error(exc: ApprovalServiceError) -> MarketingContentServiceError:
@@ -933,7 +954,9 @@ async def _load_content_item_for_workspace(
     workspace_id: UUID,
     content_item_id: UUID,
 ) -> MarketingContentItem:
-    item = await marketing_content.get_item(session, workspace_id, content_item_id)
+    item = await marketing_content.get_item_for_update(
+        session, content_item_id, workspace_id=workspace_id
+    )
     if item is None:
         raise MarketingContentNotFoundError("Marketing content item not found")
     return item
@@ -951,12 +974,12 @@ def _capability_for_status_transition(
     return Capability.marketing_content_edit
 
 
-async def create_content_item(
+async def _create_content_item(
     session: AsyncSession,
     workspace_id: UUID,
     payload: MarketingContentItemCreate,
     *,
-    actor: AuthorizationActorInput | None = None,
+    actor: AuthorizationActorInput | None,
 ) -> MarketingContentItem:
     await _require_capability(
         session,
@@ -988,7 +1011,7 @@ async def create_content_item(
         item=item,
         status=item.status,
     )
-    await session.commit()
+    await session.flush()
     return await get_content_item(session, workspace_id, item.id)
 
 
@@ -1256,13 +1279,13 @@ async def list_content_items_by_date_range(
     )
 
 
-async def update_content_item(
+async def _update_content_item(
     session: AsyncSession,
     workspace_id: UUID,
     content_item_id: UUID,
     payload: MarketingContentItemUpdate,
     *,
-    actor: AuthorizationActorInput | None = None,
+    actor: AuthorizationActorInput | None,
 ) -> MarketingContentItem:
     item = await _load_content_item_for_workspace(
         session,
@@ -1278,6 +1301,7 @@ async def update_content_item(
     )
     values = _update_values(payload)
     if not values:
+        await session.flush()
         return item
     relationship_values = dict(values)
     relationship_values.setdefault("campaign_id", item.campaign_id)
@@ -1288,6 +1312,7 @@ async def update_content_item(
     await _validate_item_relationships(session, workspace_id, relationship_values)
     changed_fields = _changed_fields(item, values)
     if not changed_fields:
+        await session.flush()
         return item
     material_change = bool(payload.material_change and changed_fields & MATERIAL_FIELDS)
     if material_change:
@@ -1313,18 +1338,18 @@ async def update_content_item(
         item=updated,
         status=updated.status,
     )
-    await session.commit()
+    await session.flush()
     return updated
 
 
-async def update_content_item_with_channels(
+async def _update_content_item_with_channels(
     session: AsyncSession,
     workspace_id: UUID,
     content_item_id: UUID,
     payload: MarketingContentItemUpdate,
     channels: Sequence[MarketingContentChannelCreate],
     *,
-    actor: AuthorizationActorInput | None = None,
+    actor: AuthorizationActorInput | None,
 ) -> MarketingContentItem:
     item = await _load_content_item_for_workspace(
         session,
@@ -1346,35 +1371,48 @@ async def update_content_item_with_channels(
     if "release_id" not in relationship_values and item.release_id is not None:
         relationship_values["release_id"] = item.release_id
     await _validate_item_relationships(session, workspace_id, relationship_values)
-    channel_values = [_channel_create_values(channel) for channel in channels]
+    channel_values = [
+        {
+            **_channel_create_values(channel),
+            **(
+                {"id": channel.id}
+                if isinstance(channel, MarketingContentChannelReplacement)
+                else {}
+            ),
+        }
+        for channel in channels
+    ]
     _assert_unique_channel_targets(channel_values)
+    effective_artist_id = relationship_values.get("artist_id")
     await _validate_channel_destinations(
         session,
         workspace_id,
         campaign_id=item.campaign_id,
         artist_id=(
-            relationship_values.get("artist_id")
-            if isinstance(relationship_values.get("artist_id"), UUID)
-            else None
+            effective_artist_id if isinstance(effective_artist_id, UUID) else None
         ),
         channel_values=channel_values,
     )
     changed_fields = _changed_fields(item, values) if values else set()
-    channel_material_change = _replacement_channels_materially_changed(
-        item,
-        channel_values,
-    )
+    try:
+        reconciliation = marketing_content.plan_channel_reconciliation(
+            item, channel_values
+        )
+    except ValueError as exc:
+        raise MarketingContentRelationshipError(str(exc)) from exc
     item_material_change = bool(
         payload.material_change and changed_fields & MATERIAL_FIELDS
     )
-    if not changed_fields and not channel_material_change:
+    if not changed_fields and not reconciliation.changed:
+        await session.flush()
         return item
-    if item_material_change or channel_material_change:
+    if item_material_change or reconciliation.material_change:
         await _apply_material_change(
             session,
             workspace_id=workspace_id,
             item=item,
             actor=actor,
+            reconciliation=reconciliation,
         )
     if changed_fields:
         updated = await marketing_content.update_item(
@@ -1386,9 +1424,7 @@ async def update_content_item_with_channels(
         if updated is None:
             raise MarketingContentNotFoundError("Marketing content item not found")
         item = updated
-    if channel_material_change:
-        await marketing_content.replace_channels(session, item.id, channel_values)
-        session.expire(item, ["channels"])
+    await marketing_content.apply_channel_reconciliation(session, reconciliation)
     await _publish_content_event(
         session,
         workspace_id=workspace_id,
@@ -1397,70 +1433,36 @@ async def update_content_item_with_channels(
         item=item,
         status=item.status,
     )
-    await session.commit()
+    await session.flush()
     return await get_content_item(session, workspace_id, item.id)
 
 
-async def replace_channels(
+async def _replace_channels(
     session: AsyncSession,
     workspace_id: UUID,
     content_item_id: UUID,
     channels: Sequence[MarketingContentChannelCreate],
     *,
-    actor: AuthorizationActorInput | None = None,
+    actor: AuthorizationActorInput | None,
 ) -> MarketingContentItem:
-    item = await _load_content_item_for_workspace(
+    return await _update_content_item_with_channels(
         session,
         workspace_id,
         content_item_id,
-    )
-    await _require_capability(
-        session,
-        actor=actor,
-        workspace_id=workspace_id,
-        capability=Capability.marketing_content_edit,
-        campaign_id=item.campaign_id,
-    )
-    channel_values = [_channel_create_values(channel) for channel in channels]
-    _assert_unique_channel_targets(channel_values)
-    await _validate_channel_destinations(
-        session,
-        workspace_id,
-        campaign_id=item.campaign_id,
-        artist_id=item.artist_id,
-        channel_values=channel_values,
-    )
-    material_change = _replacement_channels_materially_changed(item, channel_values)
-    if not material_change:
-        return item
-    await marketing_content.replace_channels(session, item.id, channel_values)
-    session.expire(item, ["channels"])
-    await _apply_material_change(
-        session,
-        workspace_id=workspace_id,
-        item=item,
+        MarketingContentItemUpdate(),
+        channels,
         actor=actor,
     )
-    await _publish_content_event(
-        session,
-        workspace_id=workspace_id,
-        event_type=RealtimeEventType.marketing_content_updated,
-        actor=actor,
-        item=item,
-        status=item.status,
-    )
-    await session.commit()
-    return await get_content_item(session, workspace_id, item.id)
 
 
-async def update_channel(
+async def _update_channel(
     session: AsyncSession,
     workspace_id: UUID,
     content_item_id: UUID,
     channel_id: UUID,
     payload: MarketingContentChannelUpdate,
     *,
-    actor: AuthorizationActorInput | None = None,
+    actor: AuthorizationActorInput | None,
 ) -> MarketingContentItemChannel:
     item = await _load_content_item_for_workspace(
         session,
@@ -1479,17 +1481,20 @@ async def update_channel(
         raise MarketingContentNotFoundError("Marketing content channel not found")
     values = _channel_update_values(payload)
     if not values:
+        await session.flush()
         return channel
-    changed_fields = _changed_channel_fields(channel, values)
+    changed_fields = marketing_content.changed_channel_fields(channel, values)
     if not changed_fields:
+        await session.flush()
         return channel
     prospective = []
     for row in item.channels:
+        row_values = values if row.id == channel_id else {}
         prospective.append(
             {
-                "channel": values.get("channel", row.channel),
-                "placement": values.get("placement", row.placement),
-                "social_account_connection_id": values.get(
+                "channel": row_values.get("channel", row.channel),
+                "placement": row_values.get("placement", row.placement),
+                "social_account_connection_id": row_values.get(
                     "social_account_connection_id",
                     row.social_account_connection_id,
                 ),
@@ -1503,20 +1508,28 @@ async def update_channel(
         artist_id=item.artist_id,
         channel_values=prospective,
     )
-    updated = await marketing_content.update_channel(
-        session,
-        channel_id,
-        {key: values[key] for key in changed_fields},
-    )
-    if updated is None:
-        raise MarketingContentNotFoundError("Marketing content channel not found")
-    if changed_fields & CHANNEL_MATERIAL_FIELDS:
+    replacements = [
+        {
+            "id": row.id,
+            **{
+                field: getattr(row, field)
+                for field in marketing_content.CHANNEL_VALUE_FIELDS
+            },
+            **(values if row.id == channel_id else {}),
+        }
+        for row in item.channels
+    ]
+    reconciliation = marketing_content.plan_channel_reconciliation(item, replacements)
+    if reconciliation.material_change:
         await _apply_material_change(
             session,
             workspace_id=workspace_id,
             item=item,
             actor=actor,
+            reconciliation=reconciliation,
         )
+    await marketing_content.apply_channel_reconciliation(session, reconciliation)
+    updated = reconciliation.created[0] if reconciliation.created else channel
     await _publish_content_event(
         session,
         workspace_id=workspace_id,
@@ -1525,17 +1538,17 @@ async def update_channel(
         item=item,
         status=item.status,
     )
-    await session.commit()
+    await session.flush()
     return updated
 
 
-async def transition_status(
+async def _transition_status(
     session: AsyncSession,
     workspace_id: UUID,
     content_item_id: UUID,
     status: MarketingContentItemStatus | str,
     *,
-    actor: AuthorizationActorInput | None = None,
+    actor: AuthorizationActorInput | None,
     approved_by_profile_id: UUID | None = None,
     assume_approval_capability: bool = False,
 ) -> MarketingContentItem:
@@ -1546,10 +1559,11 @@ async def transition_status(
     )
     next_status = _assert_transition_allowed(item.status, status)
     if next_status == item.status:
+        await session.flush()
         return item
     if next_status == MarketingContentItemStatus.in_review:
         try:
-            request = await approval_service.submit_resource_for_approval(
+            request = await approval_service._submit_resource_for_approval(
                 session,
                 workspace_id,
                 MARKETING_CONTENT_ITEM_RESOURCE_TYPE,
@@ -1584,7 +1598,7 @@ async def transition_status(
                     "current revision"
                 )
             try:
-                approved = await approval_service.approve_request(
+                approved = await approval_service._approve_request(
                     session,
                     workspace_id,
                     request.id,
@@ -1633,8 +1647,183 @@ async def transition_status(
         item=item,
         status=next_status,
     )
-    await session.commit()
+    await session.flush()
     return item
+
+
+async def _archive_content_item(
+    session: AsyncSession,
+    workspace_id: UUID,
+    content_item_id: UUID,
+    *,
+    actor: AuthorizationActorInput | None,
+) -> MarketingContentItem:
+    return await _transition_status(
+        session,
+        workspace_id,
+        content_item_id,
+        MarketingContentItemStatus.archived,
+        actor=actor,
+    )
+
+
+async def create_content_item(
+    session: AsyncSession,
+    workspace_id: UUID,
+    payload: MarketingContentItemCreate,
+    *,
+    actor: AuthorizationActorInput | None = None,
+) -> MarketingContentItem:
+    """Commit one application operation; roll back all writes on failure."""
+    try:
+        async with session.begin_nested():
+            result = await _create_content_item(
+                session, workspace_id, payload, actor=actor
+            )
+        await session.commit()
+        return result
+    except MarketingContentServiceError:
+        # The savepoint rolled back this operation; retain legacy validation
+        # behavior for callers holding other loaded objects in this session.
+        raise
+    except BaseException:
+        await session.rollback()
+        raise
+
+
+async def update_content_item(
+    session: AsyncSession,
+    workspace_id: UUID,
+    content_item_id: UUID,
+    payload: MarketingContentItemUpdate,
+    *,
+    actor: AuthorizationActorInput | None = None,
+) -> MarketingContentItem:
+    """Commit one application operation; roll back all writes on failure."""
+    try:
+        async with session.begin_nested():
+            result = await _update_content_item(
+                session, workspace_id, content_item_id, payload, actor=actor
+            )
+        await session.commit()
+        return result
+    except MarketingContentServiceError:
+        # The savepoint rolled back this operation; retain legacy validation
+        # behavior for callers holding other loaded objects in this session.
+        raise
+    except BaseException:
+        await session.rollback()
+        raise
+
+
+async def update_content_item_with_channels(
+    session: AsyncSession,
+    workspace_id: UUID,
+    content_item_id: UUID,
+    payload: MarketingContentItemUpdate,
+    channels: Sequence[MarketingContentChannelCreate],
+    *,
+    actor: AuthorizationActorInput | None = None,
+) -> MarketingContentItem:
+    """Commit one application operation; roll back all writes on failure."""
+    try:
+        async with session.begin_nested():
+            result = await _update_content_item_with_channels(
+                session, workspace_id, content_item_id, payload, channels, actor=actor
+            )
+        await session.commit()
+        return result
+    except MarketingContentServiceError:
+        # The savepoint rolled back this operation; retain legacy validation
+        # behavior for callers holding other loaded objects in this session.
+        raise
+    except BaseException:
+        await session.rollback()
+        raise
+
+
+async def replace_channels(
+    session: AsyncSession,
+    workspace_id: UUID,
+    content_item_id: UUID,
+    channels: Sequence[MarketingContentChannelCreate],
+    *,
+    actor: AuthorizationActorInput | None = None,
+) -> MarketingContentItem:
+    """Commit one application operation; roll back all writes on failure."""
+    try:
+        async with session.begin_nested():
+            result = await _replace_channels(
+                session, workspace_id, content_item_id, channels, actor=actor
+            )
+        await session.commit()
+        return result
+    except MarketingContentServiceError:
+        # The savepoint rolled back this operation; retain legacy validation
+        # behavior for callers holding other loaded objects in this session.
+        raise
+    except BaseException:
+        await session.rollback()
+        raise
+
+
+async def update_channel(
+    session: AsyncSession,
+    workspace_id: UUID,
+    content_item_id: UUID,
+    channel_id: UUID,
+    payload: MarketingContentChannelUpdate,
+    *,
+    actor: AuthorizationActorInput | None = None,
+) -> MarketingContentItemChannel:
+    """Commit one application operation; roll back all writes on failure."""
+    try:
+        async with session.begin_nested():
+            result = await _update_channel(
+                session, workspace_id, content_item_id, channel_id, payload, actor=actor
+            )
+        await session.commit()
+        return result
+    except MarketingContentServiceError:
+        # The savepoint rolled back this operation; retain legacy validation
+        # behavior for callers holding other loaded objects in this session.
+        raise
+    except BaseException:
+        await session.rollback()
+        raise
+
+
+async def transition_status(
+    session: AsyncSession,
+    workspace_id: UUID,
+    content_item_id: UUID,
+    status: MarketingContentItemStatus | str,
+    *,
+    actor: AuthorizationActorInput | None = None,
+    approved_by_profile_id: UUID | None = None,
+    assume_approval_capability: bool = False,
+) -> MarketingContentItem:
+    """Commit one application operation; roll back all writes on failure."""
+    try:
+        async with session.begin_nested():
+            result = await _transition_status(
+                session,
+                workspace_id,
+                content_item_id,
+                status,
+                actor=actor,
+                approved_by_profile_id=approved_by_profile_id,
+                assume_approval_capability=assume_approval_capability,
+            )
+        await session.commit()
+        return result
+    except MarketingContentServiceError:
+        # The savepoint rolled back this operation; retain legacy validation
+        # behavior for callers holding other loaded objects in this session.
+        raise
+    except BaseException:
+        await session.rollback()
+        raise
 
 
 async def archive_content_item(
@@ -1644,10 +1833,18 @@ async def archive_content_item(
     *,
     actor: AuthorizationActorInput | None = None,
 ) -> MarketingContentItem:
-    return await transition_status(
-        session,
-        workspace_id,
-        content_item_id,
-        MarketingContentItemStatus.archived,
-        actor=actor,
-    )
+    """Commit one application operation; roll back all writes on failure."""
+    try:
+        async with session.begin_nested():
+            result = await _archive_content_item(
+                session, workspace_id, content_item_id, actor=actor
+            )
+        await session.commit()
+        return result
+    except MarketingContentServiceError:
+        # The savepoint rolled back this operation; retain legacy validation
+        # behavior for callers holding other loaded objects in this session.
+        raise
+    except BaseException:
+        await session.rollback()
+        raise

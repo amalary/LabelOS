@@ -823,6 +823,58 @@ def test_campaign_calendar_service_timezone_projection_and_dst_boundaries(
     }
 
 
+def test_channel_authoring_zone_does_not_change_calendar_projection_or_activate(
+    sessionmaker,
+):
+    from dataclasses import asdict
+
+    from labelos_api.scheduling.timezones import resolve_local_time
+
+    async def run():
+        async with sessionmaker() as session:
+            data = await _seed_workspace_graph(session)
+            workspace, campaign = data["workspace"], data["campaign"]
+            schedule = resolve_local_time("2027-06-15T23:30", "America/Los_Angeles")
+            channel = MarketingContentItemChannel(
+                channel="instagram", **asdict(schedule)
+            )
+            item = MarketingContentItem(
+                organization=workspace,
+                campaign=campaign,
+                title="Explicit zone",
+                content_type="video",
+                channels=[channel],
+            )
+            session.add(item)
+            await session.flush()
+            channel_id = channel.id
+            for display_zone, hour in [("UTC", 6), ("America/New_York", 2)]:
+                page = await list_campaign_calendar_events(
+                    session,
+                    workspace.id,
+                    query=CampaignCalendarEventQuery(
+                        start=datetime(2027, 6, 15, tzinfo=UTC),
+                        end=datetime(2027, 6, 17, tzinfo=UTC),
+                        timezone=display_zone,
+                    ),
+                )
+                event = next(
+                    event
+                    for event in page.events
+                    if event.id == f"marketing_content_channel:{channel_id}:scheduled"
+                )
+                instant = datetime.fromisoformat(event.starts_at)
+                assert instant.hour == hour
+                assert instant == schedule.scheduled_at
+                assert item.status == MarketingContentItemStatus.draft
+                assert item.content_revision == 1
+                assert channel.schedule_generation == 1
+                assert channel.schedule_timezone == "America/Los_Angeles"
+                assert item.scheduled_at is None
+
+    asyncio.run(run())
+
+
 def test_campaign_calendar_service_includes_late_local_month_boundary_event(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:

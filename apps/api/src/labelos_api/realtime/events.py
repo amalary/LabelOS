@@ -61,6 +61,17 @@ class RealtimeEventType(StrEnum):
     campaign_milestone_completed = "campaign.milestone_completed"
     analytics_observation_created = "analytics.observation.created"
     analytics_observations_ingested = "analytics.observations.ingested"
+    marketing_scheduling_job_activated = "marketing.scheduling_job.activated"
+    marketing_scheduling_job_claimed = "marketing.scheduling_job.claimed"
+    marketing_scheduling_job_handed_off = "marketing.scheduling_job.handed_off"
+    marketing_scheduling_job_blocked = "marketing.scheduling_job.blocked"
+    marketing_scheduling_job_cancelled = "marketing.scheduling_job.cancelled"
+    marketing_scheduling_job_superseded = "marketing.scheduling_job.superseded"
+    marketing_scheduling_job_lease_expired = "marketing.scheduling_job.lease_expired"
+    marketing_scheduling_job_handoff_unavailable = (
+        "marketing.scheduling_job.handoff_unavailable"
+    )
+    marketing_scheduling_job_requeued = "marketing.scheduling_job.requeued"
     marketing_content_created = "marketing.content.created"
     marketing_content_updated = "marketing.content.updated"
     marketing_content_status_changed = "marketing.content.status_changed"

@@ -19,7 +19,9 @@ _REGISTERED_MODELS = (
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # Embedded migration commands must not silently disable already imported
+    # application loggers, including scheduling outcomes and batch metrics.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 

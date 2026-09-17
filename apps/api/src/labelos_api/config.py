@@ -1,5 +1,7 @@
 import os
 from functools import lru_cache
+from typing import Literal
+from uuid import UUID
 
 from labelos_database.config import DatabaseSettings
 from pydantic import Field, field_validator
@@ -29,6 +31,18 @@ class Settings(DatabaseSettings):
     credential_store_secret_prefix: str = "labelos-credential"
     youtube_oauth_client_id: str | None = None
     youtube_oauth_client_secret: str | None = None
+    delivery_receiver_backend: str = "unavailable"
+    scheduling_execution_enabled: bool = False
+    scheduling_authoring_enabled: bool = True
+    scheduling_worker_auth_mode: Literal["google-oidc", "local-cli"] = "google-oidc"
+    scheduling_worker_service_account_email: str | None = None
+    scheduling_worker_service_account_subject: str | None = None
+    scheduling_worker_oidc_audience: str | None = None
+    scheduling_worker_workspace_id: UUID | None = None
+    scheduling_worker_batch_size: int = Field(default=25, ge=1, le=1000)
+    scheduling_worker_lease_seconds: int = Field(default=120, ge=1, le=3600)
+    scheduling_worker_lateness_seconds: int = Field(default=300, ge=0, le=86400)
+    scheduling_worker_timeout_seconds: int = Field(default=30, ge=1, le=300)
 
     @field_validator("allowed_frontend_origins", mode="before")
     @classmethod
@@ -58,6 +72,7 @@ class Settings(DatabaseSettings):
         return f"https://api.workos.com/sso/jwks/{self.workos_client_id}"
 
     def validate_startup_environment(self) -> None:
+        self.validate_delivery_receiver()
         if not self.requires_strict_startup_validation:
             return
 
@@ -78,6 +93,15 @@ class Settings(DatabaseSettings):
 
         self.validate_credential_store_backend()
         self.validate_youtube_oauth_configuration()
+
+    def validate_delivery_receiver(self) -> None:
+        # There is no certified production adapter yet. Test doubles may only be
+        # injected in tests, never selected through deployment configuration.
+        if self.delivery_receiver_backend != "unavailable":
+            raise RuntimeError(
+                "DELIVERY_RECEIVER_BACKEND must be unavailable; successful fake "
+                "receivers are not deployable"
+            )
 
     def validate_youtube_oauth_configuration(self) -> None:
         configured = bool(self.youtube_oauth_client_id) or bool(
@@ -125,6 +149,11 @@ class Settings(DatabaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
+    scheduling_settings = {
+        name: os.environ[name.upper()]
+        for name in Settings.model_fields
+        if name.startswith("scheduling_") and name.upper() in os.environ
+    }
     return Settings(
         environment=os.getenv("APP_ENV", "local"),
         app_version=os.getenv("APP_VERSION", "0.0.0"),
@@ -155,4 +184,6 @@ def get_settings() -> Settings:
         ),
         youtube_oauth_client_id=os.getenv("YOUTUBE_OAUTH_CLIENT_ID") or None,
         youtube_oauth_client_secret=os.getenv("YOUTUBE_OAUTH_CLIENT_SECRET") or None,
+        delivery_receiver_backend=os.getenv("DELIVERY_RECEIVER_BACKEND", "unavailable"),
+        **scheduling_settings,
     )

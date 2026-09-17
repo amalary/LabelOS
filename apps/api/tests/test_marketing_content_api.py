@@ -13,6 +13,8 @@ from labelos_database.models import (
     ApprovalRequestStatus,
     Artist,
     Campaign,
+    MarketingContentItem,
+    MarketingContentItemChannel,
     MembershipRole,
     Organization,
     OrganizationMembership,
@@ -24,8 +26,7 @@ from labelos_database.models import (
     WorkspacePermission,
 )
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from labelos_api.auth import (
     AuthenticatedPrincipal,
@@ -61,15 +62,12 @@ class SeededMarketingContentApi:
 @pytest.fixture
 def marketing_content_client(
     monkeypatch: pytest.MonkeyPatch,
+    database_test_engine,
 ) -> Iterator[
     tuple[TestClient, async_sessionmaker[AsyncSession], SeededMarketingContentApi]
 ]:
     monkeypatch.setenv("APP_ENV", "test")
-    engine = create_async_engine(
-        "sqlite+aiosqlite://",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
+    engine = database_test_engine
     sessionmaker = async_sessionmaker(bind=engine, expire_on_commit=False)
 
     async def prepare_database() -> SeededMarketingContentApi:
@@ -229,8 +227,6 @@ def marketing_content_client(
     with TestClient(app) as client:
         yield client, sessionmaker, seeded
 
-    asyncio.run(engine.dispose())
-
 
 def _set_context(
     client: TestClient,
@@ -341,6 +337,115 @@ def _draft_payload(
     if scheduled_at is not None:
         payload["scheduled_at"] = scheduled_at.isoformat()
     return payload
+
+
+@pytest.mark.parametrize(
+    "schedule,code",
+    [
+        (
+            {"schedule_timezone": "EST", "schedule_local_time": "2026-11-01T01:30"},
+            "invalid_timezone",
+        ),
+        (
+            {
+                "schedule_timezone": "America/New_York",
+                "schedule_local_time": "2026-03-08T02:30",
+            },
+            "nonexistent_local_time",
+        ),
+        (
+            {
+                "schedule_timezone": "America/New_York",
+                "schedule_local_time": "2026-11-01T01:30",
+            },
+            "disambiguation_required",
+        ),
+        ({"schedule_local_time": "2027-01-01T12:00"}, "timezone_required"),
+        (
+            {
+                "schedule_timezone": "UTC",
+                "schedule_local_time": "2027-01-01T12:00",
+                "scheduled_at": "2027-01-01T13:00Z",
+            },
+            "timezone_instant_mismatch",
+        ),
+    ],
+)
+def test_api_schedule_validation_codes(marketing_content_client, schedule, code):
+    client, _, seeded = marketing_content_client
+    _set_context(client, seeded)
+    response = client.post(
+        _base(seeded),
+        json={
+            **_draft_payload(seeded),
+            "channels": [{"channel": "instagram", **schedule}],
+        },
+    )
+    assert response.status_code == 422
+    assert response.json()["code"] == code
+
+
+def test_api_explicit_schedule_round_trip_and_legacy(marketing_content_client):
+    client, _, seeded = marketing_content_client
+    _set_context(client, seeded)
+    payload = {
+        **_draft_payload(seeded),
+        "channels": [
+            {
+                "channel": "instagram",
+                "schedule_timezone": "America/New_York",
+                "schedule_local_time": "2026-11-01T01:30",
+                "schedule_disambiguation": "later",
+            }
+        ],
+    }
+    response = client.post(_base(seeded), json=payload)
+    assert response.status_code == 201
+    item = response.json()
+    channel = item["channels"][0]
+    assert datetime.fromisoformat(channel["scheduled_at"]) == datetime(
+        2026, 11, 1, 6, 30, tzinfo=UTC
+    )
+    assert channel["schedule_timezone"] == "America/New_York"
+    assert channel["schedule_local_time"] == "2026-11-01T01:30:00"
+    assert channel["schedule_offset_seconds"] == -18000
+    response = client.patch(
+        f"{_base(seeded)}/{item['id']}",
+        json={"channels": [{"id": channel["id"], **payload["channels"][0]}]},
+    )
+    assert response.status_code == 200
+    assert response.json()["content_revision"] == item["content_revision"]
+    assert response.json()["channels"][0]["id"] == channel["id"]
+    legacy = client.post(
+        _base(seeded),
+        json={
+            **_draft_payload(seeded),
+            "channels": [{"channel": "instagram", "scheduled_at": "2027-01-01T12:00Z"}],
+        },
+    ).json()["channels"][0]
+    assert legacy["schedule_timezone"] is None
+    assert legacy["schedule_local_time"] is None
+
+
+@pytest.mark.parametrize(
+    "value, code",
+    [
+        ("2027-01-01T12:00", "timestamp_timezone_required"),
+        ("not a timestamp", "invalid_timestamp"),
+    ],
+)
+def test_api_naive_schedule_has_stable_code(marketing_content_client, value, code):
+    client, _, seeded = marketing_content_client
+    _set_context(client, seeded)
+    response = client.post(
+        _base(seeded),
+        json={
+            **_draft_payload(seeded),
+            "channels": [{"channel": "instagram", "scheduled_at": value}],
+        },
+    )
+    assert response.status_code == 422
+    assert response.json()["code"] == code
 
 
 def test_marketing_content_routes_require_authentication(client: TestClient) -> None:
@@ -485,6 +590,11 @@ def test_marketing_content_campaign_crud_and_lifecycle(
     )
     assert approved_multi.status_code == 200
     assert approved_multi.json()["approval_state"]["can_schedule"] is True
+    for channel in approved_multi.json()["channels"]:
+        eligibility = channel["scheduling_eligibility"]
+        assert eligibility["eligible"] is False
+        assert eligibility["automatic_handoff_eligible"] is False
+        assert "execution_disabled" in eligibility["reason_codes"]
     _set_context(client, seeded)
     scheduled = client.patch(
         f"{base}/{multi_channel['id']}/status",
@@ -1191,6 +1301,10 @@ def test_marketing_content_openapi_contract_exposes_stable_routes(
         "channel",
         "placement",
         "social_account_connection_id",
+        "schedule_timezone",
+        "schedule_local_time",
+        "schedule_disambiguation",
+        "schedule_offset_seconds",
         "scheduled_at",
         "copy_text_override",
         "asset_refs",
@@ -1252,7 +1366,10 @@ def test_marketing_content_draft_authoring_accepts_multi_channel_overrides_only(
     assert created.status_code == 201
     content = created.json()
     assert content["status"] == "draft"
-    assert content["scheduled_at"] == "2026-09-10T12:00:00Z"
+    item_schedule = datetime.fromisoformat(content["scheduled_at"])
+    if item_schedule.tzinfo is None:
+        item_schedule = item_schedule.replace(tzinfo=UTC)
+    assert item_schedule == scheduled_at
     assert [channel["channel"] for channel in content["channels"]] == [
         "instagram",
         "tiktok",
@@ -1263,7 +1380,10 @@ def test_marketing_content_draft_authoring_accepts_multi_channel_overrides_only(
     assert content["channels"][0]["published_at"] is None
     assert content["channels"][0]["external_post_id"] is None
     assert content["channels"][0]["external_url"] is None
-    assert content["channels"][1]["scheduled_at"] == "2026-09-11T16:30:00"
+    channel_schedule = datetime.fromisoformat(content["channels"][1]["scheduled_at"])
+    if channel_schedule.tzinfo is None:
+        channel_schedule = channel_schedule.replace(tzinfo=UTC)
+    assert channel_schedule == tiktok_scheduled_at
     assert content["channels"][1]["copy_text_override"] == "TikTok cut"
 
 
@@ -2267,3 +2387,122 @@ def test_approval_queue_openapi_contract_exposes_stable_routes(
         "cancelled",
     }
     assert "available_actions" in schemas["ApprovalRequestDetailResponse"]["properties"]
+
+
+def test_channel_replacement_api_preserves_ids_and_rejects_duplicates(
+    marketing_content_client,
+):
+    client, _sessionmaker, seeded = marketing_content_client
+    _set_context(client, seeded)
+    base = _base(seeded)
+    channels = [
+        {"channel": "Instagram", "placement": "Feed", "copy_text_override": "Original"},
+        {"channel": "Threads"},
+    ]
+    response = client.post(base, json={**_draft_payload(seeded), "channels": channels})
+    assert response.status_code == 201
+    original = response.json()
+    url = f"{base}/{original['id']}"
+    original_ids = [row["id"] for row in original["channels"]]
+    noop = client.patch(url, json={"channels": list(reversed(channels))})
+    assert noop.status_code == 200
+    assert [row["id"] for row in noop.json()["channels"]] == original_ids
+    assert noop.json()["content_revision"] == original["content_revision"]
+    channels[0]["copy_text_override"] = "Updated"
+    edited = client.patch(url, json={"title": "Updated parent", "channels": channels})
+    assert edited.status_code == 200
+    assert [row["id"] for row in edited.json()["channels"]] == original_ids
+    assert edited.json()["content_revision"] == original["content_revision"] + 1
+    assert edited.json()["channels"][0]["copy_text_override"] == "Updated"
+    channels[0]["scheduled_at"] = "2026-10-01T12:00:00+00:00"
+    scheduled = client.patch(url, json={"channels": channels})
+    assert scheduled.status_code == 200
+    assert [row["id"] for row in scheduled.json()["channels"]] == original_ids
+    assert scheduled.json()["content_revision"] == original["content_revision"] + 2
+    # A second API request reads timestamps back from the database.
+    same_schedule = client.patch(url, json={"channels": channels})
+    assert same_schedule.status_code == 200
+    assert (
+        same_schedule.json()["content_revision"] == scheduled.json()["content_revision"]
+    )
+    duplicate = client.patch(
+        url,
+        json={
+            "title": "Must roll back",
+            "channels": [
+                channels[0],
+                {"channel": "instagram", "placement": "feed"},
+            ],
+        },
+    )
+    assert duplicate.status_code == 400
+    after_failure = client.get(url).json()
+    assert after_failure["title"] == "Updated parent"
+    assert [row["id"] for row in after_failure["channels"]] == original_ids
+    assert after_failure["content_revision"] == scheduled.json()["content_revision"]
+    added = client.patch(url, json={"channels": [*channels, {"channel": "TikTok"}]})
+    assert added.status_code == 200
+    added_ids = [row["id"] for row in added.json()["channels"]]
+    assert added_ids[:2] == original_ids
+    assert len(set(added_ids) - set(original_ids)) == 1
+    removed = client.patch(url, json={"channels": [channels[0]]})
+    assert removed.status_code == 200
+    assert [row["id"] for row in removed.json()["channels"]] == original_ids[:1]
+
+
+def test_channel_replacement_api_validates_explicit_ids_and_preserves_response_shape(
+    marketing_content_client,
+):
+    client, _sessionmaker, seeded = marketing_content_client
+    _set_context(client, seeded)
+    base = _base(seeded)
+    payload = {
+        **_draft_payload(seeded),
+        "channels": [{"channel": "instagram", "placement": "feed"}],
+    }
+    original = client.post(base, json=payload).json()
+    other = client.post(base, json=payload).json()
+
+    async def seed_foreign_channel():
+        async with _sessionmaker() as session:
+            foreign = MarketingContentItem(
+                organization_id=seeded.outside_workspace_id,
+                campaign_id=seeded.outside_campaign_id,
+                title="Foreign content",
+                content_type="image",
+                channels=[
+                    MarketingContentItemChannel(channel="instagram", placement="feed")
+                ],
+            )
+            session.add(foreign)
+            await session.commit()
+            return str(foreign.channels[0].id)
+
+    foreign_channel_id = asyncio.run(seed_foreign_channel())
+    url = f"{base}/{original['id']}"
+    channel = {**payload["channels"][0], "id": original["channels"][0]["id"]}
+    noop = client.patch(url, json={"channels": [channel]})
+    assert noop.status_code == 200
+    assert noop.json()["content_revision"] == original["content_revision"]
+    assert noop.json()["channels"][0]["id"] == channel["id"]
+    assert noop.json().keys() == original.keys()
+    assert noop.json()["channels"][0].keys() == original["channels"][0].keys()
+    for invalid_id in (str(uuid4()), other["channels"][0]["id"], foreign_channel_id):
+        rejected = client.patch(
+            url,
+            json={
+                "title": "Must not persist",
+                "channels": [{**channel, "id": invalid_id}],
+            },
+        )
+        assert rejected.status_code == 400
+    restored = client.get(url).json()
+    assert restored["title"] == original["title"]
+    assert restored["content_revision"] == original["content_revision"]
+    replaced = client.patch(url, json={"channels": [{**channel, "placement": "story"}]})
+    assert replaced.status_code == 200
+    assert replaced.json()["channels"][0]["id"] != channel["id"]
+    assert replaced.json()["content_revision"] == original["content_revision"] + 1
+    # A stale explicit ID cannot silently fall back to a matching logical key.
+    stale = client.patch(url, json={"channels": [{**channel, "placement": "story"}]})
+    assert stale.status_code == 400

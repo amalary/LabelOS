@@ -1,5 +1,13 @@
 "use client";
 
+import {
+  occurrenceLabel,
+  resolveSchedule,
+  scheduleFromInstant,
+  scheduleOccurrences,
+  type ScheduleDisambiguation,
+} from "../../lib/schedule-timezones";
+
 import { Badge, Button, Card, EmptyState, LoadingState, PageHeader, cn } from "@label-os/ui";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -40,7 +48,6 @@ import {
   useArchiveMarketingContentItem,
   useCreateMarketingContentItem,
   useMarketingContentItem,
-  useTransitionMarketingContentStatus,
   useUpdateMarketingContentItem,
   useWorkspaceMarketingContent,
   useWorkspaceCalendarContent,
@@ -60,6 +67,8 @@ import {
   useUpdateSocialAccountConnection,
 } from "../../lib/social-account-connections";
 import { useActiveWorkspace, useActiveWorkspaceProfile } from "../../lib/workspace-context";
+import { SchedulingJobState } from "../../components/scheduling-job-state";
+import { ChannelScheduling } from "./channel-scheduling";
 
 type MarketingTab = "calendar" | "drafts" | "approvals" | "accounts";
 type CalendarView = "month" | "list";
@@ -207,6 +216,11 @@ function approvalStateVariant(item: MarketingContentItem) {
 }
 
 function approvalStateLabel(item: MarketingContentItem): string {
+  if (
+    item.approval_state?.state === "scheduled" ||
+    (!item.approval_state && item.status === "scheduled")
+  )
+    return "Planned";
   return item.approval_state?.label ?? humanize(item.status);
 }
 
@@ -216,13 +230,6 @@ function approvedRevisionIsCurrent(item: MarketingContentItem): boolean {
     (item.approved_revision !== null &&
       item.approved_revision !== undefined &&
       item.approved_revision === item.content_revision),
-  );
-}
-
-function canScheduleApprovedRevision(item: MarketingContentItem): boolean {
-  return Boolean(
-    item.approval_state?.can_schedule ??
-    (item.status === "approved" && approvedRevisionIsCurrent(item)),
   );
 }
 
@@ -358,10 +365,15 @@ type ContentEditorSurface = "calendar" | "drafts";
 
 type ChannelFormRow = {
   id: string;
+  legacyInstant?: string | null;
+  legacyLocalTime?: string;
+  persistedId?: string;
   channel: string;
   placement: string;
   socialAccountConnectionId: string;
   scheduledAt: string;
+  scheduleTimezone: string;
+  scheduleChoice: ScheduleDisambiguation;
   copyTextOverride: string;
   assetRefsJson: string;
 };
@@ -376,21 +388,65 @@ type ContentFormState = {
   assetRefsJson: string;
   ownerProfileId: string;
   scheduledAt: string;
+  scheduleTimezone: string;
+  scheduleChoice: ScheduleDisambiguation;
   channels: ChannelFormRow[];
 };
 
 const contentTypeOptions = ["social_post", "video", "email", "ad", "press", "playlist_pitch"];
 
-function formatDateTimeInput(value: string | null): string {
-  return value ? value.slice(0, 16) : "";
-}
-
 function selectedDateInput(dateKey: string | null): string {
   return dateKey ? `${dateKey}T09:00` : "";
 }
 
-function dateTimeInputToIso(value: string): string | null {
-  return value ? new Date(value).toISOString() : null;
+function ScheduleFeedback({
+  localTime,
+  timeZone,
+  choice,
+  disabled,
+  onChoice,
+}: {
+  localTime: string;
+  timeZone: string;
+  choice: ScheduleDisambiguation;
+  disabled: boolean;
+  onChoice: (choice: ScheduleDisambiguation) => void;
+}) {
+  if (!localTime || !timeZone) return null;
+  try {
+    const occurrences = scheduleOccurrences(localTime, timeZone);
+    return (
+      <div className="text-xs text-slate-600">
+        {occurrences.length > 1 && (
+          <label className="grid gap-1">
+            This local time occurs twice. Choose an occurrence.
+            <select
+              aria-label="Schedule occurrence"
+              disabled={disabled}
+              value={choice}
+              onChange={(event) => onChoice(event.target.value as ScheduleDisambiguation)}
+            >
+              <option value="">Select earlier or later</option>
+              <option value="earlier">Earlier: {occurrenceLabel(occurrences[0]!)}</option>
+              <option value="later">Later: {occurrenceLabel(occurrences[1]!)}</option>
+            </select>
+          </label>
+        )}
+        {(occurrences.length === 1 || choice) && (
+          <p>
+            Time to store: {localTime} in {timeZone};{" "}
+            {occurrenceLabel(occurrences[choice === "later" ? occurrences.length - 1 : 0]!)}
+          </p>
+        )}
+      </div>
+    );
+  } catch (error) {
+    return (
+      <p role="alert" className="text-sm text-red-700">
+        {error instanceof Error ? error.message : "Invalid schedule."}
+      </p>
+    );
+  }
 }
 
 function parseAssetRefs(value: string, fieldName: string): unknown[] {
@@ -453,7 +509,7 @@ function accountConnectionWarning(connection: SocialAccountConnection): string |
   return null;
 }
 
-function emptyChannelRow(index: number): ChannelFormRow {
+function emptyChannelRow(index: number, timeZone = "UTC"): ChannelFormRow {
   return {
     assetRefsJson: "",
     channel: index === 0 ? "instagram" : "",
@@ -462,6 +518,8 @@ function emptyChannelRow(index: number): ChannelFormRow {
     placement: index === 0 ? "feed" : "",
     socialAccountConnectionId: "",
     scheduledAt: "",
+    scheduleTimezone: timeZone,
+    scheduleChoice: "",
   };
 }
 
@@ -470,7 +528,9 @@ function initialFormState({
   createDate,
   filters,
   item,
+  timeZone,
 }: {
+  timeZone: string;
   campaigns: Campaign[];
   createDate: string | null;
   filters: CalendarFilters;
@@ -486,15 +546,30 @@ function initialFormState({
         channel: channel.channel,
         copyTextOverride: channel.copy_text_override ?? "",
         id: channel.id || `channel_${index}`,
+        persistedId: channel.id,
         placement: channel.placement ?? "",
         socialAccountConnectionId: channel.social_account_connection_id ?? "",
-        scheduledAt: formatDateTimeInput(channel.scheduled_at),
+        scheduledAt: scheduleFromInstant(
+          channel.scheduled_at,
+          channel.schedule_timezone || timeZone,
+        ).localTime,
+        scheduleTimezone: channel.schedule_timezone ?? (channel.scheduled_at ? "" : timeZone),
+        scheduleChoice: channel.schedule_timezone
+          ? scheduleFromInstant(channel.scheduled_at, channel.schedule_timezone).choice
+          : "",
+        legacyInstant: channel.schedule_timezone ? null : channel.scheduled_at,
+        legacyLocalTime: scheduleFromInstant(
+          channel.scheduled_at,
+          channel.schedule_timezone || timeZone,
+        ).localTime,
       })),
       contentType: item.content_type,
       copyText: item.copy_text ?? "",
       ownerProfileId: item.owner_profile_id ?? "",
       releaseId: item.release_id ?? "",
-      scheduledAt: formatDateTimeInput(item.scheduled_at),
+      scheduledAt: scheduleFromInstant(item.scheduled_at, timeZone).localTime,
+      scheduleTimezone: timeZone,
+      scheduleChoice: scheduleFromInstant(item.scheduled_at, timeZone).choice,
       title: item.title,
     };
   }
@@ -504,12 +579,14 @@ function initialFormState({
     assetRefsJson: "",
     artistId: campaign?.primary_artist?.id ?? "",
     campaignId,
-    channels: [emptyChannelRow(0)],
+    channels: [emptyChannelRow(0, timeZone)],
     contentType: "social_post",
     copyText: "",
     ownerProfileId: campaign?.owner_profile_id ?? "",
     releaseId: campaign?.release?.id ?? "",
     scheduledAt: selectedDateInput(createDate),
+    scheduleTimezone: timeZone,
+    scheduleChoice: "",
     title: "",
   };
 }
@@ -519,18 +596,27 @@ function formToPayload(form: ContentFormState): MarketingContentItemCreate {
     artist_id: form.artistId || null,
     asset_refs: parseAssetRefs(form.assetRefsJson, "Asset references"),
     channels: form.channels.map<MarketingContentChannelCreate>((channel) => ({
+      ...(channel.persistedId ? { id: channel.persistedId } : {}),
       asset_refs: parseAssetRefs(channel.assetRefsJson, "Channel asset references"),
       channel: channel.channel,
       copy_text_override: channel.copyTextOverride || null,
       placement: channel.placement || null,
       social_account_connection_id: channel.socialAccountConnectionId || null,
-      scheduled_at: dateTimeInputToIso(channel.scheduledAt),
+      ...(channel.scheduledAt
+        ? !channel.scheduleTimezone &&
+          channel.legacyInstant &&
+          channel.scheduledAt === channel.legacyLocalTime
+          ? { scheduled_at: channel.legacyInstant }
+          : resolveSchedule(channel.scheduledAt, channel.scheduleTimezone, channel.scheduleChoice)
+        : { scheduled_at: null }),
     })),
     content_type: form.contentType,
     copy_text: form.copyText || null,
     owner_profile_id: form.ownerProfileId || null,
     release_id: form.releaseId || null,
-    scheduled_at: dateTimeInputToIso(form.scheduledAt),
+    scheduled_at: form.scheduledAt
+      ? resolveSchedule(form.scheduledAt, form.scheduleTimezone, form.scheduleChoice).scheduled_at
+      : null,
     title: form.title,
   };
 }
@@ -592,7 +678,7 @@ function Filters({
             <option value="">Any status</option>
             {statuses.map((status) => (
               <option key={status} value={status}>
-                {humanize(status)}
+                {status === "scheduled" ? "Planned" : humanize(status)}
               </option>
             ))}
           </select>
@@ -675,6 +761,7 @@ function ContentEditor({
   onArchived,
   onOpenApprovalReview,
   onSaved,
+  onReloadContent,
   surface,
   timeZone,
 }: {
@@ -690,13 +777,23 @@ function ContentEditor({
   onArchived: (item: MarketingContentItem) => void;
   onOpenApprovalReview: (approvalRequestId: string | null) => void;
   onSaved: (item: MarketingContentItem | null) => void;
+  onReloadContent: () => void;
   surface: ContentEditorSurface;
   timeZone: string;
 }) {
   const [form, setForm] = useState(() =>
-    initialFormState({ campaigns, createDate, filters, item }),
+    initialFormState({ campaigns, createDate, filters, item, timeZone }),
   );
   const [clientError, setClientError] = useState<string | null>(null);
+  const [schedulingBusy, setSchedulingBusy] = useState(false);
+  const [publishNowNotice, setPublishNowNotice] = useState<string | null>(null);
+  const profile = useActiveWorkspaceProfile();
+  const canSchedule = Boolean(
+    profile.subject && can(profile.subject, null, capabilities.marketingContentSchedule),
+  );
+  const dirty =
+    JSON.stringify(form) !==
+    JSON.stringify(initialFormState({ campaigns, createDate, filters, item, timeZone }));
   const selectedCampaign = campaigns.find((campaign) => campaign.id === form.campaignId) ?? null;
   const workspaceId = selectedCampaign?.workspace_id ?? item?.workspace_id ?? null;
   const socialAccounts = useSocialAccountConnections(workspaceId, {
@@ -723,12 +820,7 @@ function ContentEditor({
     item?.campaign_id ?? null,
     item?.id ?? null,
   );
-  const transitionStatus = useTransitionMarketingContentStatus(
-    workspaceId,
-    item?.campaign_id ?? null,
-    item?.id ?? null,
-  );
-  const isEditable = mode === "create" || canEdit;
+  const isEditable = (mode === "create" || canEdit) && !schedulingBusy;
   const artistOptions = selectedCampaign
     ? [
         ...(selectedCampaign.primary_artist ? [selectedCampaign.primary_artist] : []),
@@ -752,17 +844,15 @@ function ContentEditor({
   );
   const ownerOptions = selectedCampaign?.members ?? [];
   const duplicateChannels = duplicateChannelTargets(form.channels);
-  const mutationError =
-    create.error ?? update.error ?? submitApproval.error ?? archive.error ?? transitionStatus.error;
+  const mutationError = create.error ?? update.error ?? submitApproval.error ?? archive.error;
   const isMutating =
     create.isMutating ||
     update.isMutating ||
     submitApproval.isMutating ||
     archive.isMutating ||
-    transitionStatus.isMutating;
+    schedulingBusy;
   const approvalState = item?.approval_state?.state ?? item?.status;
   const isCurrentlyApproved = item ? approvedRevisionIsCurrent(item) : false;
-  const scheduleEligible = item ? canScheduleApprovedRevision(item) : false;
   const isDraftSurface = surface === "drafts";
   const accountConnections = socialAccounts.data?.social_account_connections ?? [];
 
@@ -836,7 +926,7 @@ function ContentEditor({
 
   async function submitForReview() {
     setClientError(null);
-    if (!item) {
+    if (!item || dirty) {
       return;
     }
     try {
@@ -844,19 +934,6 @@ function ContentEditor({
       onSaved(null);
     } catch {
       // The mutation state renders API denial and invalid transition messages.
-    }
-  }
-
-  async function scheduleApproved() {
-    setClientError(null);
-    if (!item) {
-      return;
-    }
-    try {
-      const saved = await transitionStatus.mutate({ status: "scheduled" });
-      onSaved(saved);
-    } catch {
-      // The mutation state renders exact-revision approval failures.
     }
   }
 
@@ -894,12 +971,12 @@ function ContentEditor({
           <p className="text-sm text-slate-500">
             {isDraftSurface
               ? "Author channel-specific draft copy, assets, placements, and optional planned times before approval."
-              : "Schedule for calendar by setting a planned publish time. LabelOS will not automatically publish posts yet."}
+              : "Plan channel times, complete approval, then activate each approved channel schedule."}
           </p>
           {item ? (
             <p className="mt-1 text-xs font-medium text-slate-500">
-              Current status: {humanize(item.status)} - Approval: {approvalStateLabel(item)} -
-              Revision {item.content_revision}
+              Current status: {item.status === "scheduled" ? "Planned" : humanize(item.status)} -
+              Approval: {approvalStateLabel(item)} - Revision {item.content_revision}
             </p>
           ) : null}
         </div>
@@ -1020,12 +1097,22 @@ function ContentEditor({
             aria-label="Planned publish time"
             className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950"
             disabled={!isEditable}
-            onChange={(event) => setField({ scheduledAt: event.target.value })}
+            onChange={(event) => setField({ scheduledAt: event.target.value, scheduleChoice: "" })}
+            step="any"
             type="datetime-local"
             value={form.scheduledAt}
           />
-          <span className="text-xs font-normal text-slate-500">Calendar timezone: {timeZone}</span>
+          <span className="text-xs font-normal text-slate-500">
+            Planning timezone: {form.scheduleTimezone}. Calendar display timezone: {timeZone}.
+          </span>
         </label>
+        <ScheduleFeedback
+          localTime={form.scheduledAt}
+          timeZone={form.scheduleTimezone}
+          choice={form.scheduleChoice}
+          disabled={!isEditable}
+          onChoice={(scheduleChoice) => setField({ scheduleChoice })}
+        />
         <label className="grid gap-1 text-sm font-medium text-slate-700 md:col-span-2">
           <span>Core Copy / Caption</span>
           <textarea
@@ -1055,7 +1142,7 @@ function ContentEditor({
             onClick={() =>
               setForm((current) => ({
                 ...current,
-                channels: [...current.channels, emptyChannelRow(current.channels.length)],
+                channels: [...current.channels, emptyChannelRow(current.channels.length, timeZone)],
               }))
             }
             size="sm"
@@ -1070,11 +1157,29 @@ function ContentEditor({
             Duplicate channel and placement targets are not allowed.
           </p>
         ) : null}
+        {form.channels.length === 0 && (
+          <p className="text-sm text-slate-600">
+            No channel targets. Add a channel to configure content, destination, and schedule.
+          </p>
+        )}
         {form.channels.map((channel, index) => (
-          <div className="grid gap-3 rounded-md border border-slate-200 p-3" key={channel.id}>
+          <fieldset
+            className="grid min-w-0 gap-3 rounded-md border border-slate-200 p-3"
+            key={channel.id}
+          >
+            <legend className="px-1 text-sm font-semibold text-slate-700">
+              Target {index + 1}: {humanize(channel.channel)}
+              {channel.placement ? ` / ${channel.placement}` : ""}
+            </legend>
             {(() => {
+              const effectiveArtist = form.artistId || selectedCampaign?.primary_artist?.id;
               const providerAccounts = accountConnections.filter(
-                (connection) => connection.provider === channel.channel,
+                (connection) =>
+                  connection.provider === channel.channel &&
+                  connection.workspace_id === workspaceId &&
+                  (!effectiveArtist ||
+                    !connection.artist_association ||
+                    connection.artist_association.artist_id === effectiveArtist),
               );
               const selectedAccount =
                 accountConnections.find(
@@ -1085,7 +1190,7 @@ function ContentEditor({
                 : null;
               return (
                 <>
-                  <div className="grid gap-3 md:grid-cols-[1fr_1fr_1fr_auto]">
+                  <div className="grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-4 [&_input]:min-w-0 [&_select]:min-w-0">
                     <label className="grid gap-1 text-sm font-medium text-slate-700">
                       <span>Channel</span>
                       <select
@@ -1126,12 +1231,68 @@ function ContentEditor({
                         className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950"
                         disabled={!isEditable}
                         onChange={(event) =>
-                          setChannel(channel.id, { scheduledAt: event.target.value })
+                          setChannel(channel.id, {
+                            scheduledAt: event.target.value,
+                            scheduleChoice: "",
+                          })
                         }
+                        step="any"
                         type="datetime-local"
                         value={channel.scheduledAt}
                       />
                     </label>
+                    <label className="grid gap-1 text-sm font-medium text-slate-700">
+                      <span>Channel authoring timezone</span>
+                      <input
+                        aria-label="Channel authoring timezone"
+                        className="h-10 rounded-md border border-slate-300 bg-white px-3"
+                        disabled={!isEditable}
+                        placeholder="America/Los_Angeles"
+                        value={channel.scheduleTimezone}
+                        onChange={(event) =>
+                          setChannel(channel.id, {
+                            scheduleTimezone: event.target.value,
+                            scheduleChoice: "",
+                          })
+                        }
+                      />
+                      {channel.legacyInstant && !channel.scheduleTimezone && (
+                        <span>
+                          Legacy planning time shown in {timeZone}. Confirm an IANA timezone to
+                          author a schedule.
+                        </span>
+                      )}
+                    </label>
+                    <ScheduleFeedback
+                      localTime={channel.scheduledAt}
+                      timeZone={channel.scheduleTimezone}
+                      choice={channel.scheduleChoice}
+                      disabled={!isEditable}
+                      onChoice={(scheduleChoice) => setChannel(channel.id, { scheduleChoice })}
+                    />
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      disabled={!isEditable || isMutating}
+                      onClick={() => {
+                        try {
+                          const zone = channel.scheduleTimezone || timeZone;
+                          const now = scheduleFromInstant(new Date().toISOString(), zone);
+                          setChannel(channel.id, {
+                            scheduledAt: now.localTime,
+                            scheduleTimezone: zone,
+                            scheduleChoice: now.choice,
+                          });
+                          setPublishNowNotice(
+                            "Publish Now prepared a channel time edit. Save changes, submit for approval, complete review, then activate the approved schedule. If the delivery window passes during review, choose a new time and obtain reapproval.",
+                          );
+                        } catch (error) {
+                          setClientError((error as Error).message);
+                        }
+                      }}
+                    >
+                      Publish Now
+                    </Button>
                     <Button
                       className="self-end"
                       disabled={!isEditable || form.channels.length === 1}
@@ -1151,23 +1312,56 @@ function ContentEditor({
                   <label className="grid gap-1 text-sm font-medium text-slate-700">
                     <span>Destination account</span>
                     <select
+                      aria-label="Destination account"
                       className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950"
-                      disabled={!isEditable || !channel.channel}
+                      disabled={
+                        !isEditable ||
+                        !channel.channel ||
+                        socialAccounts.isLoading ||
+                        Boolean(socialAccounts.error)
+                      }
                       onChange={(event) =>
                         setChannel(channel.id, { socialAccountConnectionId: event.target.value })
                       }
                       value={channel.socialAccountConnectionId}
                     >
                       <option value="">{humanize(channel.channel)} - No account selected</option>
+                      {channel.socialAccountConnectionId &&
+                        !providerAccounts.some(
+                          (account) => account.id === channel.socialAccountConnectionId,
+                        ) && (
+                          <option value={channel.socialAccountConnectionId} disabled>
+                            Selected account unavailable or incompatible — choose another
+                          </option>
+                        )}
                       {providerAccounts.map((connection) => (
                         <option key={connection.id} value={connection.id}>
                           {accountConnectionLabel(connection)}
                         </option>
                       ))}
                     </select>
+                    {socialAccounts.isLoading && (
+                      <span role="status">Loading destination accounts...</span>
+                    )}
+                    {!socialAccounts.isLoading &&
+                      !socialAccounts.error &&
+                      providerAccounts.length === 0 && (
+                        <span>
+                          No compatible accounts. Connect an account for this channel and artist in
+                          Accounts.
+                        </span>
+                      )}
                     {socialAccounts.error ? (
                       <span className="text-xs font-normal text-amber-700">
-                        Account destinations could not be loaded.
+                        {socialAccounts.error.message}
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="secondary"
+                          onClick={() => void socialAccounts.reload().catch(() => undefined)}
+                        >
+                          Retry accounts
+                        </Button>
                       </span>
                     ) : null}
                     {accountWarning ? (
@@ -1198,24 +1392,62 @@ function ContentEditor({
                     />
                   </label>
                   <p className="text-xs text-slate-500">Target {index + 1}</p>
+                  {item && item.channels.find((saved) => saved.id === channel.persistedId) && (
+                    <ChannelScheduling
+                      key={`${item.workspace_id}:${channel.persistedId}`}
+                      item={item}
+                      channel={item.channels.find((saved) => saved.id === channel.persistedId)!}
+                      canSchedule={canSchedule}
+                      dirty={dirty}
+                      busy={isMutating}
+                      onBusy={setSchedulingBusy}
+                      onReloadContent={onReloadContent}
+                    />
+                  )}
                 </>
               );
             })()}
-          </div>
+          </fieldset>
         ))}
       </div>
 
+      {publishNowNotice && (
+        <p role="status" className="text-sm text-amber-800">
+          {publishNowNotice}
+        </p>
+      )}
+      {dirty && item && (
+        <p className="text-sm text-amber-800">
+          Save changes before submitting this revision for approval.
+        </p>
+      )}
+      {!item && (
+        <p className="text-sm text-slate-600">
+          Save this draft to inspect approval readiness and activate channel schedules after
+          approval.
+        </p>
+      )}
       <div className="flex flex-wrap items-center gap-2">
         <Button disabled={!isEditable || isMutating} onClick={saveDraft} type="button">
           {mode === "create" ? "Save draft" : "Save changes"}
         </Button>
         {item?.status === "draft" && approvalState !== "changes_requested" && canSubmitForReview ? (
-          <Button disabled={isMutating} onClick={submitForReview} type="button" variant="secondary">
+          <Button
+            disabled={isMutating || dirty}
+            onClick={submitForReview}
+            type="button"
+            variant="secondary"
+          >
             Submit for approval
           </Button>
         ) : null}
         {item?.status === "draft" && approvalState === "changes_requested" && canSubmitForReview ? (
-          <Button disabled={isMutating} onClick={submitForReview} type="button" variant="secondary">
+          <Button
+            disabled={isMutating || dirty}
+            onClick={submitForReview}
+            type="button"
+            variant="secondary"
+          >
             Resubmit for approval
           </Button>
         ) : null}
@@ -1228,20 +1460,6 @@ function ContentEditor({
           >
             Open Approval Review
           </Button>
-        ) : null}
-        {item?.status === "approved" && canEdit ? (
-          <Button
-            disabled={isMutating || !scheduleEligible}
-            onClick={scheduleApproved}
-            type="button"
-          >
-            Schedule
-          </Button>
-        ) : null}
-        {item?.status === "approved" && canEdit && !scheduleEligible ? (
-          <span className="text-sm text-amber-700">
-            Scheduling is blocked until approval matches the current revision.
-          </span>
         ) : null}
         {item && isDraftSurface && canArchive && item.status === "draft" ? (
           <Button disabled={isMutating} onClick={archiveContent} type="button" variant="secondary">
@@ -1386,6 +1604,7 @@ function ContentEditorDetail({
       onArchived={onArchived}
       onOpenApprovalReview={onOpenApprovalReview}
       onSaved={onSaved}
+      onReloadContent={() => void detail.reload().catch(() => undefined)}
       surface={surface}
       timeZone={timeZone}
     />
@@ -1471,6 +1690,9 @@ function MonthCalendar({
                       >
                         {approvalStateLabel(instance.item)}
                       </Badge>
+                      {instance.item.channels.map((channel) => (
+                        <SchedulingJobState key={channel.id} job={channel.scheduling_job} />
+                      ))}
                       {instance.hasMultipleChannelTimes ? (
                         <Badge title={formatCalendarDateTime(instance.scheduledAt, timeZone)}>
                           Multi-time
@@ -1544,6 +1766,9 @@ function CalendarList({
               <p className="mt-1 text-sm text-slate-500">
                 {humanize(instance.item.content_type)} - {channelSummary(instance.item)}
               </p>
+              {instance.item.channels.map((channel) => (
+                <SchedulingJobState key={channel.id} job={channel.scheduling_job} />
+              ))}
               <div className="mt-2 flex flex-wrap gap-1">
                 {instance.item.channels.length ? (
                   instance.item.channels.map((channel) => {

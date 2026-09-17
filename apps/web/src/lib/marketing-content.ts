@@ -38,12 +38,49 @@ export type MarketingContentDestinationReadiness = {
   account: MarketingContentDestinationAccount | null;
 };
 
+export type SchedulingEligibility = {
+  eligible: boolean;
+  content_revision: number;
+  approval_request_id: string | null;
+  scheduled_for: string | null;
+  schedule_timezone: string | null;
+  destination_resolution: {
+    id: string;
+    usable: boolean;
+    supports_automatic_publication: boolean;
+    requires_assisted_publication: boolean;
+    unavailable_reasons: string[];
+  } | null;
+  automatic_handoff_eligible: boolean;
+  manual_handoff_required: boolean;
+  execution_mode: "disabled" | "automatic" | "manual";
+  reason_codes: string[];
+  explanations: string[];
+};
+
+export type SchedulingJobProjection = {
+  job_id: string;
+  status: "pending" | "claimed" | "handed_off" | "blocked" | "cancelled" | "superseded";
+  active: boolean;
+  intent_matches: boolean;
+  scheduled_for: string;
+  schedule_timezone: string;
+  blocked_reason_code: string | null;
+  transition_version: number;
+  correlation_id: string;
+};
+
 export type MarketingContentItemChannel = {
+  scheduling_job?: SchedulingJobProjection | null;
   id: string;
   marketing_content_item_id: string;
   channel: string;
   placement: string | null;
   social_account_connection_id: string | null;
+  schedule_generation?: number;
+  schedule_timezone?: string | null;
+  schedule_local_time?: string | null;
+  schedule_offset_seconds?: number | null;
   scheduled_at: string | null;
   published_at: string | null;
   external_post_id: string | null;
@@ -52,6 +89,7 @@ export type MarketingContentItemChannel = {
   asset_refs: unknown[];
   metadata: Record<string, unknown>;
   destination_readiness?: MarketingContentDestinationReadiness;
+  scheduling_eligibility?: SchedulingEligibility;
   created_at: string;
   updated_at: string;
 };
@@ -137,6 +175,10 @@ export type MarketingContentChannelCreate = {
   channel: string;
   placement?: string | null;
   social_account_connection_id?: string | null;
+  schedule_timezone?: string | null;
+  schedule_local_time?: string | null;
+  schedule_offset_seconds?: number | null;
+  schedule_disambiguation?: "earlier" | "later" | null;
   scheduled_at?: string | null;
   copy_text_override?: string | null;
   asset_refs?: unknown[] | null;
@@ -154,8 +196,12 @@ export type MarketingContentItemCreate = {
   channels?: MarketingContentChannelCreate[];
 };
 
-export type MarketingContentItemUpdate = Partial<MarketingContentItemCreate> & {
-  channels?: MarketingContentChannelCreate[] | null;
+export type MarketingContentChannelReplacement = MarketingContentChannelCreate & {
+  id?: string | null;
+};
+
+export type MarketingContentItemUpdate = Partial<Omit<MarketingContentItemCreate, "channels">> & {
+  channels?: MarketingContentChannelReplacement[] | null;
 };
 
 export type MarketingContentStatusTransition = {
