@@ -2,7 +2,7 @@
 
 The authenticated host supplies workspace scope and Scheduling's locked controls.
 Acceptance uses Scheduling's composer; execution consumes an explicit accepted ID.
-Production receiver/provider factories remain disabled. No public API is added.
+The host supplies an explicit provider registry. No public API is added.
 """
 
 import hashlib

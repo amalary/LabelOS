@@ -207,7 +207,7 @@ class ProviderResolutionError(ValueError):
 
 
 class ProviderRegistry:
-    """Immutable explicit canonical-key registrations; empty in production.
+    """Immutable explicit canonical-key registrations; empty by default.
 
     No aliases, guessed platform mapping, fallback adapter or plugin loading.
     Resolve the provider from the locked canonical destination, never user input.

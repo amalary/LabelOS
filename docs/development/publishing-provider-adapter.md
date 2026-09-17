@@ -1,5 +1,9 @@
 # Publishing Provider Adapter Contract (Stage 4)
 
+Stage 5 adds an explicit YouTube implementation and registry factory; see
+[YouTube publishing adapter](youtube-publishing-adapter.md). The Stage 4 behavior
+below remains the default when no registry is supplied.
+
 Publishing Delivery now routes through an explicit `ProviderRegistry` to a
 `PublishingProviderAdapter`. External platform behavior belongs entirely to that
 adapter. No real adapter, SDK, network client, endpoint, worker, or production
