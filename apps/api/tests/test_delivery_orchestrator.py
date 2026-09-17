@@ -20,6 +20,12 @@ from labelos_database.models import (
 from sqlalchemy import func, select, update
 
 from labelos_api.publishing import contracts as domain
+from labelos_api.publishing.providers import (
+    ProviderCapabilities,
+    ProviderOutcome,
+    ProviderRegistry,
+    ProviderResult,
+)
 from labelos_api.repositories.publishing import (
     PublicationConflict,
     PublicationRepository,
@@ -114,8 +120,7 @@ def test_creation_replay_context_and_disabled_provider(sessions):
             sessions, workspace_id=scope, publication_id=identifier
         )
         assert (
-            result.status == "pending"
-            and result.reason_code == "provider_execution_disabled"
+            result.status == "pending" and result.reason_code == "unsupported_provider"
         )
         async with sessions.begin() as session:
             assert await count(session, PublicationAttempt) == 0
@@ -356,14 +361,21 @@ def test_acceptance_rollback_has_no_detached_publication(
 
 class TestProvider:
     __test__ = False
-    enabled = True
+    capabilities = ProviderCapabilities()
+
+    def validate(self, request):
+        return None
+
+    async def reconcile(self, request):
+        return ProviderResult(outcome=ProviderOutcome.unsupported)
 
     def __init__(self, sessions, outcome="published"):
         self.sessions = sessions
         self.outcome = outcome
         self.calls = 0
 
-    async def deliver(self, context, attempt):
+    async def publish(self, request):
+        context, attempt = request, request.attempt
         self.calls += 1
         # A different session can lock/read the committed start during provider I/O.
         async with self.sessions.begin() as session:
@@ -374,20 +386,10 @@ class TestProvider:
             assert row.attempts[-1].id == attempt.id
         if self.outcome == "exception":
             raise RuntimeError("SECRET_PROVIDER_PAYLOAD")
-        return domain.PublicationEvidence(
-            workspace_id=context.workspace_id,
-            publication_id=context.publication_id,
-            attempt_id=attempt.id,
-            destination_id=context.destination_id,
-            outcome=domain.DeliveryOutcome(self.outcome),
-            source=domain.EvidenceSource.provider_response,
-            observed_at=datetime.now(UTC),
+        return ProviderResult(
+            outcome=ProviderOutcome(self.outcome),
             external_post_id="post-one" if self.outcome == "published" else None,
-            reason=(
-                domain.PublicationFailureReason.temporary_unavailability
-                if self.outcome != "published"
-                else None
-            ),
+            confirmed_absent=self.outcome != "published",
         )
 
 
@@ -402,7 +404,7 @@ def test_success_replay_and_concurrent_execution_cannot_start_again(sessions):
                     sessions,
                     workspace_id=request.snapshot.workspace_id,
                     publication_id=identifier,
-                    provider=provider,
+                    registry=ProviderRegistry({"instagram": provider}),
                 )
             except DeliveryIneligible:
                 return None
@@ -442,14 +444,18 @@ def test_explicit_retry_preserves_intent_and_unknown_requires_reconciliation(
             sessions,
             workspace_id=scope,
             publication_id=identifier,
-            provider=TestProvider(sessions, "retryable_failure"),
+            registry=ProviderRegistry(
+                {"instagram": TestProvider(sessions, "retryable_failure")}
+            ),
         )
         assert result.status == "retryable_failure"
         result = await orchestrator.execute(
             sessions,
             workspace_id=scope,
             publication_id=identifier,
-            provider=TestProvider(sessions, "exception"),
+            registry=ProviderRegistry(
+                {"instagram": TestProvider(sessions, "exception")}
+            ),
         )
         assert result.status == "manual_action_required"
         with pytest.raises(DeliveryIneligible):
@@ -457,7 +463,7 @@ def test_explicit_retry_preserves_intent_and_unknown_requires_reconciliation(
                 sessions,
                 workspace_id=scope,
                 publication_id=identifier,
-                provider=TestProvider(sessions),
+                registry=ProviderRegistry({"instagram": TestProvider(sessions)}),
             )
         async with sessions.begin() as session:
             row = await PublicationRepository(session, scope).get(identifier)
@@ -508,8 +514,8 @@ def test_execution_failure_boundaries_never_blindly_redeliver(
             return row
 
         class InterruptedProvider(TestProvider):
-            async def deliver(self, context, attempt):
-                await super().deliver(context, attempt)
+            async def publish(self, request):
+                await super().publish(request)
                 raise asyncio.CancelledError()
 
         provider = (
@@ -526,7 +532,7 @@ def test_execution_failure_boundaries_never_blindly_redeliver(
                 sessions,
                 workspace_id=scope,
                 publication_id=identifier,
-                provider=provider,
+                registry=ProviderRegistry({"instagram": provider}),
             )
         monkeypatch.setattr(PublicationRepository, "append", original)
         async with sessions.begin() as session:
@@ -552,7 +558,7 @@ def test_execution_failure_boundaries_never_blindly_redeliver(
                     sessions,
                     workspace_id=scope,
                     publication_id=identifier,
-                    provider=provider,
+                    registry=ProviderRegistry({"instagram": provider}),
                 )
             await orchestrator.record_evidence(
                 sessions,

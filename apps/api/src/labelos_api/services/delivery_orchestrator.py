@@ -18,8 +18,16 @@ from labelos_api.publishing import contracts as domain
 from labelos_api.publishing.execution import (
     DeliveryContext,
     DeliveryResult,
-    DisabledPublicationProvider,
-    PublicationProvider,
+)
+from labelos_api.publishing.providers import (
+    ProviderOutcome,
+    ProviderRegistry,
+    ProviderResolutionError,
+    ProviderResult,
+    publication_request,
+    result_evidence,
+    validate_preflight,
+    validate_result,
 )
 from labelos_api.repositories.publishing import (
     PublicationConflict,
@@ -286,7 +294,7 @@ class DeliveryOrchestrator:
         *,
         workspace_id: UUID,
         publication_id: UUID,
-        provider: PublicationProvider | None = None,
+        registry: ProviderRegistry | None = None,
     ) -> DeliveryResult:
         """One explicit execution, with an unavailable production default.
 
@@ -294,7 +302,7 @@ class DeliveryOrchestrator:
         Unknown start/outcome commits propagate and require scoped readback. There
         is no automatic retry or provider call on an ambiguous start commit.
         """
-        adapter = provider if provider is not None else DisabledPublicationProvider()
+        registry = registry if registry is not None else ProviderRegistry()
         async with sessions.begin() as session:
             context = await self.prepare_execution(
                 SchedulingRepository(session, workspace_id, lateness_window_seconds=0),
@@ -303,11 +311,19 @@ class DeliveryOrchestrator:
             repo = PublicationRepository(session, workspace_id)
             row = await repo.get(publication_id)
             assert row is not None
-            if not adapter.enabled:
+            try:
+                adapter = registry.resolve(context.provider)
+            except ProviderResolutionError:
                 return DeliveryResult(
                     publication_id=row.id,
                     status=row.status,
-                    reason_code="provider_execution_disabled",
+                    reason_code="unsupported_provider",
+                )
+            if not adapter.capabilities.publish:
+                return DeliveryResult(
+                    publication_id=row.id,
+                    status=row.status,
+                    reason_code="unsupported_capability",
                 )
             attempt = domain.PublicationAttempt(
                 id=uuid4(),
@@ -316,6 +332,23 @@ class DeliveryOrchestrator:
                 number=len(row.attempts) + 1,
                 started_at=datetime.now(UTC),
             )
+            request = publication_request(context, attempt)
+            # Local validation only: adapters must not resolve credentials or do I/O.
+            try:
+                rejection = validate_preflight(adapter.validate(request))
+            except Exception:
+                return DeliveryResult(
+                    publication_id=row.id,
+                    status=row.status,
+                    reason_code="invalid_adapter_validation",
+                )
+            if rejection is not None:
+                return DeliveryResult(
+                    publication_id=row.id,
+                    status=row.status,
+                    reason_code=rejection.outcome.value,
+                    retry_after_seconds=rejection.retry_after_seconds,
+                )
             row = await repo.append(
                 row.id,
                 expected_version=context.transition_version,
@@ -333,19 +366,14 @@ class DeliveryOrchestrator:
             )
             version = row.transition_version
         # No database session/locks or Scheduling lease spans this call.
+        source = domain.EvidenceSource.provider_response
         try:
-            evidence = await adapter.deliver(context, attempt)
+            result = validate_result(await adapter.publish(request))
         except Exception:
-            evidence = domain.PublicationEvidence(
-                workspace_id=workspace_id,
-                publication_id=publication_id,
-                attempt_id=attempt.id,
-                destination_id=context.destination_id,
-                outcome=domain.DeliveryOutcome.unknown,
-                source=domain.EvidenceSource.execution_interrupted,
-                observed_at=datetime.now(UTC),
-                reason=domain.PublicationFailureReason.outcome_unknown,
-            )
+            # Includes malformed results. Never guess whether an external write ran.
+            result = ProviderResult(outcome=ProviderOutcome.ambiguous)
+            source = domain.EvidenceSource.execution_interrupted
+        evidence = result_evidence(request, result, source=source)
         await self.record_evidence(
             sessions,
             workspace_id=workspace_id,
@@ -361,6 +389,110 @@ class DeliveryOrchestrator:
                 domain.DeliveryOutcome.permanent_failure: "permanent_failure",
                 domain.DeliveryOutcome.unknown: "manual_action_required",
             }[evidence.outcome],
+            reason_code=result.outcome.value,
+            retry_after_seconds=result.retry_after_seconds,
+        )
+
+    async def reconcile(
+        self,
+        sessions: async_sessionmaker[AsyncSession],
+        *,
+        workspace_id: UUID,
+        publication_id: UUID,
+        registry: ProviderRegistry | None = None,
+    ) -> DeliveryResult:
+        """Observe the existing attempt; never validate authoring or republish.
+
+        Explicit trusted invocation only. No polling, credential resolution or
+        provider handle storage in the core. Adapters must support readback using
+        the stable request/attempt identity to advertise reconcile capability.
+        """
+        registry = registry if registry is not None else ProviderRegistry()
+        async with sessions.begin() as session:
+            row = await PublicationRepository(session, workspace_id).get(
+                publication_id, lock=True
+            )
+            if row is None:
+                raise DeliveryIneligible("publication_missing")
+            # An in-flight publish may not have sent its write yet. A concurrent
+            # lookup saying "absent" must not authorize another attempt. Recovery
+            # hosts first establish interruption through record_evidence.
+            if row.status != "manual_action_required":
+                raise DeliveryIneligible("publication_not_reconcilable")
+            if not row.attempts or not row.destination_identity:
+                raise DeliveryIneligible("publication_not_reconcilable")
+            try:
+                adapter = registry.resolve(row.provider)
+            except ProviderResolutionError:
+                return DeliveryResult(
+                    publication_id=row.id,
+                    status=row.status,
+                    reason_code="unsupported_provider",
+                )
+            if not adapter.capabilities.reconcile:
+                return DeliveryResult(
+                    publication_id=row.id,
+                    status=row.status,
+                    reason_code="unsupported_capability",
+                )
+            context = DeliveryContext(
+                workspace_id=workspace_id,
+                publication_id=row.id,
+                scheduling_job_id=row.scheduling_job_id,
+                destination_id=row.social_account_connection_id,
+                provider=row.provider,
+                destination_identity=row.destination_identity,
+                canonical_envelope=row.canonical_envelope,
+                transition_version=row.transition_version,
+            )
+            latest = row.attempts[-1]
+            request = publication_request(
+                context,
+                domain.PublicationAttempt(
+                    id=latest.id,
+                    workspace_id=workspace_id,
+                    publication_id=row.id,
+                    number=latest.number,
+                    started_at=latest.started_at,
+                ),
+            )
+            status, version = row.status, row.transition_version
+        try:
+            result = validate_result(await adapter.reconcile(request))
+        except Exception:
+            result = ProviderResult(outcome=ProviderOutcome.ambiguous)
+        # Unsupported lookup is not evidence about the original publication.
+        if result.outcome == ProviderOutcome.unsupported:
+            return DeliveryResult(
+                publication_id=publication_id,
+                status=status,
+                reason_code="unsupported_capability",
+            )
+        evidence = result_evidence(
+            request, result, source=domain.EvidenceSource.reconciliation
+        )
+        if not (
+            status == "manual_action_required"
+            and evidence.outcome == domain.DeliveryOutcome.unknown
+        ):
+            await self.record_evidence(
+                sessions,
+                workspace_id=workspace_id,
+                publication_id=publication_id,
+                expected_version=version,
+                evidence=evidence,
+            )
+            status = {
+                domain.DeliveryOutcome.published: "published",
+                domain.DeliveryOutcome.retryable_failure: "retryable_failure",
+                domain.DeliveryOutcome.permanent_failure: "permanent_failure",
+                domain.DeliveryOutcome.unknown: "manual_action_required",
+            }[evidence.outcome]
+        return DeliveryResult(
+            publication_id=publication_id,
+            status=status,
+            reason_code=result.outcome.value,
+            retry_after_seconds=result.retry_after_seconds,
         )
 
     async def record_evidence(

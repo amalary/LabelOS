@@ -1,5 +1,12 @@
 # Publishing Delivery Orchestrator (Stage 3)
 
+Stage 4 replaces the original provider seam with the
+[Provider Adapter Contract](publishing-provider-adapter.md): typed requests/results,
+an empty-by-default registry, local validation, and explicit reconciliation. The
+Stage 3 provider-seam description below records the original design; current
+execution takes `registry=...` and unknown providers return `unsupported_provider`
+without starting an attempt. Production delivery remains unavailable.
+
 `DeliveryOrchestrator` is an internal application service. It builds on the
 [Stage 1 domain](publishing-domain-contract.md),
 [Stage 2 repository](publishing-database-foundation.md), and existing
