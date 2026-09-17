@@ -67,6 +67,7 @@ class Publication(Base):
     authorized_content_revision: Mapped[int]
     schedule_generation: Mapped[int]
     provider: Mapped[str] = mapped_column(String(80))
+    destination_identity: Mapped[str | None] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(
         String(32), default="pending", server_default="pending"
     )

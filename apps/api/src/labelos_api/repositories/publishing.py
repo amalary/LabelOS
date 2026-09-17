@@ -3,8 +3,8 @@
 Mutations require PostgreSQL READ COMMITTED. SQLite tests install explicit-BEGIN
 driver hooks; legacy SQLite savepoint behavior is not a production guarantee.
 
-Not a delivery receiver or worker: scheduling acceptance stays fail-closed. Stage 3
-must call this repository inside the existing handoff port/session contract.
+Not a delivery receiver or worker. The orchestrator calls creation inside the
+existing handoff port/session contract; repository creation is not authorization.
 """
 
 from datetime import datetime
@@ -140,7 +140,11 @@ class PublicationRepository:
         return await self.get(identifier) if identifier else None
 
     async def create(
-        self, request: DeliveryAcceptanceRequest, *, created_at: datetime
+        self,
+        request: DeliveryAcceptanceRequest,
+        *,
+        created_at: datetime,
+        destination_identity: str | None = None,
     ) -> Publication:
         """Retain a validated envelope; duplicate requests return the original row.
 
@@ -148,6 +152,11 @@ class PublicationRepository:
         Locks source job before inbox, matching the existing Scheduling lock order.
         """
         validate_request(request)
+        if destination_identity is not None and (
+            len(destination_identity) != 64
+            or any(c not in "0123456789abcdef" for c in destination_identity)
+        ):
+            raise PublicationConflict("invalid_destination_identity")
         if (
             request.snapshot.workspace_id != self.workspace_id
             or request.idempotency_key
@@ -211,6 +220,7 @@ class PublicationRepository:
             authorized_content_revision=intent.content_revision,
             schedule_generation=intent.schedule_generation,
             provider=provider,
+            destination_identity=destination_identity,
             receipt_id=uuid4(),
             idempotency_key=request.idempotency_key,
             payload_schema_version=request.payload_schema_version,

@@ -16,6 +16,7 @@ IMMUTABLE = (
     "authorized_content_revision",
     "schedule_generation",
     "provider",
+    "destination_identity",
     "receipt_id",
     "idempotency_key",
     "payload_schema_version",

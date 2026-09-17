@@ -478,9 +478,11 @@ def test_migration_round_trip(postgres_test_engine):
             str(Path(__file__).resolve().parents[3] / "packages/database/alembic.ini")
         )
     )
-    assert scripts.get_heads() == ["202609162200"]
+    assert scripts.get_heads() == ["202609162300"]
     revision = scripts.get_revision("head")
-    assert revision.down_revision == "202609152100"
+    assert revision.down_revision == "202609162200"
+    foundation = scripts.get_revision("202609162200")
+    assert foundation.down_revision == "202609152100"
 
     def check(connection):
         with Operations.context(MigrationContext.configure(connection)):
@@ -488,9 +490,13 @@ def test_migration_round_trip(postgres_test_engine):
                 rev.module.upgrade()
             for operation in (revision.module.downgrade, revision.module.upgrade):
                 operation()
-                assert inspect(connection).has_table("publications") == (
-                    operation == revision.module.upgrade
-                )
+                assert (
+                    "destination_identity"
+                    in {
+                        c["name"]
+                        for c in inspect(connection).get_columns("publications")
+                    }
+                ) == (operation == revision.module.upgrade)
             for name in (
                 "publications",
                 "publication_attempts",
@@ -543,8 +549,10 @@ def test_migration_round_trip(postgres_test_engine):
             assert before and before[0].external_post_id == "unchanged"
             with Operations.context(MigrationContext.configure(connection)):
                 revision.module.downgrade()
+                foundation.module.downgrade()
                 assert connection.execute(probe).all() == before
                 assert not inspect(connection).has_table("publications")
+                foundation.module.upgrade()
                 revision.module.upgrade()
                 assert connection.execute(probe).all() == before
                 assert (
@@ -674,8 +682,27 @@ def test_frozen_migration_guards_match_metadata():
         )
     )
     revision = scripts.get_revision("202609162200")
+    identity_revision = scripts.get_revision("202609162300")
     for dialect in ("sqlite", "postgresql"):
-        assert revision.module.guard_statements(dialect) == guard_statements(dialect)
+        old = revision.module.guard_statements(dialect)
+        current = guard_statements(dialect)
+        distinct = "IS DISTINCT FROM" if dialect == "postgresql" else "IS NOT"
+        assert old == [
+            sql.replace(
+                f" OR OLD.destination_identity {distinct} NEW.destination_identity", ""
+            )
+            for sql in current
+        ]
+        if dialect == "postgresql":
+            update_guard = next(
+                s
+                for s in current
+                if s.startswith("CREATE FUNCTION publications_update_guard")
+            )
+            assert (
+                update_guard.replace("CREATE FUNCTION", "CREATE OR REPLACE FUNCTION", 1)
+                == identity_revision.module.NEW_GUARD
+            )
 
 
 @pytest.mark.parametrize(

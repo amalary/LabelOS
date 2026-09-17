@@ -1,5 +1,9 @@
 # Publishing Delivery database foundation (Stage 2)
 
+Stage 3 now supplies the internal [Delivery Orchestrator](delivery-orchestrator.md),
+including atomic acceptance and an immutable destination identity binding. The
+following describes the Stage 2 baseline; deployment remains disabled.
+
 Stage 1's domain and state machine are unchanged. Storage lives in
 `labelos_database.publishing_models` (re-exported by `models` and the database
 package); the workspace-scoped repository is `labelos_api.repositories.publishing`.
