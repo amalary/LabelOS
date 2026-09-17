@@ -17,6 +17,7 @@ from uuid import UUID
 
 from labelos_api.publishing import contracts as domain
 from labelos_api.publishing.execution import DeliveryContext
+from labelos_api.publishing.retries import FailureCategory as Category
 
 
 class AdapterContractError(ValueError):
@@ -120,6 +121,33 @@ _FAILURES = frozenset(
 )
 
 
+_CATEGORIES = {
+    ProviderOutcome.published: {None},
+    ProviderOutcome.accepted: {Category.ambiguous_outcome},
+    ProviderOutcome.ambiguous: {Category.ambiguous_outcome},
+    ProviderOutcome.retryable_failure: {
+        Category.provider_unavailable,
+        Category.transient_network,
+        Category.internal_failure,
+    },
+    ProviderOutcome.rate_limited: {Category.rate_limited},
+    ProviderOutcome.authorization_required: {
+        Category.authentication,
+        Category.authorization,
+    },
+    ProviderOutcome.permanent_failure: {
+        Category.permanent_rejection,
+        Category.invalid_content_media,
+    },
+    ProviderOutcome.unsupported: {Category.unsupported_operation},
+}
+_DEFAULT_CATEGORY = {
+    ProviderOutcome.retryable_failure: Category.provider_unavailable,
+    ProviderOutcome.authorization_required: Category.authentication,
+    ProviderOutcome.permanent_failure: Category.permanent_rejection,
+}
+
+
 @dataclass(frozen=True, kw_only=True)
 class ProviderResult:
     """No raw response, exception message, arbitrary metadata or credentials.
@@ -139,8 +167,14 @@ class ProviderResult:
     external_post_id: str | None = field(default=None, repr=False)
     confirmed_absent: bool = False
     retry_after_seconds: int | None = None
+    failure_category: Category | None = None
 
     def __post_init__(self) -> None:
+        if self.failure_category is None and isinstance(self.outcome, ProviderOutcome):
+            category = _DEFAULT_CATEGORY.get(self.outcome)
+            if category is None:
+                category = next(iter(_CATEGORIES[self.outcome]))
+            object.__setattr__(self, "failure_category", category)
         validate_result(self)
 
 
@@ -152,6 +186,11 @@ def validate_result(value: object) -> ProviderResult:
         not isinstance(value.outcome, ProviderOutcome)
         or type(value.confirmed_absent) is not bool
         or value.confirmed_absent != (value.outcome in _FAILURES)
+    ):
+        raise AdapterContractError()
+    if value.failure_category not in _CATEGORIES[value.outcome] or (
+        value.failure_category is not None
+        and not isinstance(value.failure_category, Category)
     ):
         raise AdapterContractError()
     if value.outcome == ProviderOutcome.published:
@@ -247,6 +286,7 @@ def result_evidence(
     result: ProviderResult,
     *,
     source: domain.EvidenceSource = domain.EvidenceSource.provider_response,
+    observed_at: datetime | None = None,
 ) -> domain.PublicationEvidence:
     """Bind evidence in the core: adapters cannot choose another tenant/attempt."""
     validate_result(result)
@@ -273,7 +313,7 @@ def result_evidence(
             domain.PublicationFailureReason.invalid_content,
         ),
         ProviderOutcome.authorization_required: (
-            domain.DeliveryOutcome.permanent_failure,
+            domain.DeliveryOutcome.retryable_failure,
             domain.PublicationFailureReason.authorization_required,
         ),
         ProviderOutcome.unsupported: (
@@ -288,7 +328,9 @@ def result_evidence(
         destination_id=request.destination_id,
         outcome=outcome,
         source=source,
-        observed_at=datetime.now(UTC),
+        observed_at=observed_at or datetime.now(UTC),
+        failure_category=result.failure_category,
+        retry_after_seconds=result.retry_after_seconds,
         external_post_id=result.external_post_id,
         reason=reason,
     )

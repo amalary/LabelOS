@@ -41,7 +41,7 @@ JOB_SCOPE = (
 Index(
     "uq_scheduling_jobs_publication_scope",
     *(Base.metadata.tables["scheduling_jobs"].c[c] for c in JOB_SCOPE),
-    unique=True
+    unique=True,
 )
 Index(
     "uq_social_accounts_publication_provider",
@@ -49,7 +49,7 @@ Index(
         Base.metadata.tables["social_account_connections"].c[c]
         for c in ("id", "organization_id", "provider")
     ),
-    unique=True
+    unique=True,
 )
 
 
@@ -71,6 +71,11 @@ class Publication(Base):
     status: Mapped[str] = mapped_column(
         String(32), default="pending", server_default="pending"
     )
+    failure_category: Mapped[str | None] = mapped_column(String(40))
+    retry_disposition: Mapped[str | None] = mapped_column(String(32))
+    next_retry_at: Mapped[datetime | None] = mapped_column(SchedulingUTCDateTime())
+    retry_deadline_at: Mapped[datetime | None] = mapped_column(SchedulingUTCDateTime())
+    retry_policy_version: Mapped[int | None] = mapped_column(Integer)
     transition_version: Mapped[int] = mapped_column(default=0, server_default="0")
     receipt_id: Mapped[UUID]
     idempotency_key: Mapped[str] = mapped_column(String(160))
@@ -161,6 +166,7 @@ class Publication(Base):
             "created_at",
             "id",
         ),
+        Index("ix_publications_retry_due", "workspace_id", "next_retry_at", "id"),
         Index("ix_publications_content", "workspace_id", "marketing_content_item_id"),
         Index("ix_publications_destination", "social_account_connection_id"),
         Index(
@@ -213,7 +219,10 @@ class PublicationAttempt(Base):
 
     @property
     def retry_eligible(self):
-        return self.outcome == "retryable_failure"
+        entry = self.latest_observation
+        return bool(
+            entry and entry.retry_disposition in ("automatic", "provider_delay")
+        )
 
     __table_args__ = (
         ForeignKeyConstraint(
@@ -255,6 +264,12 @@ class PublicationTransition(Base):
     source: Mapped[str | None] = mapped_column(String(32))
     failure_reason: Mapped[str | None] = mapped_column(String(40))
     external_post_id: Mapped[str | None] = mapped_column(String(512))
+    failure_category: Mapped[str | None] = mapped_column(String(40))
+    retry_disposition: Mapped[str | None] = mapped_column(String(32))
+    next_retry_at: Mapped[datetime | None] = mapped_column(SchedulingUTCDateTime())
+    retry_deadline_at: Mapped[datetime | None] = mapped_column(SchedulingUTCDateTime())
+    retry_policy_version: Mapped[int | None] = mapped_column(Integer)
+    retry_after_seconds: Mapped[int | None] = mapped_column(Integer)
     # No free-form provider metadata. This bounded integer is the only response diagnostic.
     http_status: Mapped[int | None] = mapped_column(Integer)
     __table_args__ = (
@@ -329,6 +344,39 @@ class PublicationTransition(Base):
         ),
     )
 
+
+for _table in (
+    Base.metadata.tables["publications"],
+    Base.metadata.tables["publication_transitions"],
+):
+    for _name, _sql in (
+        (
+            "retry_category",
+            "failure_category IS NULL OR failure_category IN ('transient_network', 'provider_unavailable', 'rate_limited', 'authentication', 'authorization', 'invalid_content_media', 'unsupported_operation', 'ambiguous_outcome', 'permanent_rejection', 'internal_failure')",
+        ),
+        (
+            "retry_disposition",
+            "retry_disposition IS NULL OR retry_disposition IN ('automatic', 'provider_delay', 'blocked_reconnection', 'reconciliation_required', 'permanent', 'manual_action', 'exhausted')",
+        ),
+        ("retry_policy", "retry_policy_version IS NULL OR retry_policy_version = 1"),
+        (
+            "retry_schedule",
+            "(next_retry_at IS NULL AND (retry_disposition IS NULL OR retry_disposition NOT IN ('automatic', 'provider_delay'))) OR (next_retry_at IS NOT NULL AND retry_disposition IS NOT NULL AND retry_disposition IN ('automatic', 'provider_delay') AND retry_deadline_at IS NOT NULL AND next_retry_at < retry_deadline_at AND failure_category IS NOT NULL AND failure_category IN ('transient_network', 'provider_unavailable', 'rate_limited') AND retry_policy_version IS NOT NULL AND retry_policy_version = 1)",
+        ),
+    ):
+        _table.append_constraint(CheckConstraint(_sql, name=_name))
+Base.metadata.tables["publications"].append_constraint(
+    CheckConstraint(
+        "next_retry_at IS NULL OR (status = 'retryable_failure' AND next_retry_at >= updated_at)",
+        name="retry_state",
+    )
+)
+Base.metadata.tables["publication_transitions"].append_constraint(
+    CheckConstraint(
+        "retry_after_seconds IS NULL OR (retry_after_seconds >= 0 AND retry_after_seconds <= 604800 AND outcome = 'retryable_failure')",
+        name="retry_hint",
+    )
+)
 
 register_publishing_guards(
     Publication.__table__, PublicationAttempt.__table__, PublicationTransition.__table__

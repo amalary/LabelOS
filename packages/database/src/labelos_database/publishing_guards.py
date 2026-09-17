@@ -39,7 +39,7 @@ def guard_statements(dialect):
         "publication_attempts": {
             "UPDATE": "1 = 1",
             "DELETE": "1 = 1",
-            "INSERT": "NOT EXISTS (SELECT 1 FROM publications p WHERE p.id = NEW.publication_id AND p.workspace_id = NEW.workspace_id AND p.status IN ('pending', 'retryable_failure') AND NEW.started_at >= p.updated_at) OR NEW.number != (SELECT count(*) + 1 FROM publication_attempts a WHERE a.publication_id = NEW.publication_id AND a.workspace_id = NEW.workspace_id) OR (NEW.number > 1 AND NOT EXISTS (SELECT 1 FROM publication_transitions t JOIN publication_attempts a ON a.id = t.attempt_id WHERE a.publication_id = NEW.publication_id AND a.workspace_id = NEW.workspace_id AND a.number = NEW.number - 1 AND t.outcome = 'retryable_failure' AND t.version = (SELECT max(x.version) FROM publication_transitions x WHERE x.publication_id = NEW.publication_id AND x.workspace_id = NEW.workspace_id)))",
+            "INSERT": "NOT EXISTS (SELECT 1 FROM publications p WHERE p.id = NEW.publication_id AND p.workspace_id = NEW.workspace_id AND p.status IN ('pending', 'retryable_failure') AND NEW.started_at >= p.updated_at AND (p.status = 'pending' OR (p.retry_policy_version = 1 AND p.retry_disposition IN ('automatic', 'provider_delay') AND p.next_retry_at <= NEW.started_at AND p.retry_deadline_at > NEW.started_at AND NEW.number <= 5))) OR NEW.number != (SELECT count(*) + 1 FROM publication_attempts a WHERE a.publication_id = NEW.publication_id AND a.workspace_id = NEW.workspace_id) OR (NEW.number > 1 AND NOT EXISTS (SELECT 1 FROM publication_transitions t JOIN publication_attempts a ON a.id = t.attempt_id WHERE a.publication_id = NEW.publication_id AND a.workspace_id = NEW.workspace_id AND a.number = NEW.number - 1 AND t.outcome = 'retryable_failure' AND t.version = (SELECT max(x.version) FROM publication_transitions x WHERE x.publication_id = NEW.publication_id AND x.workspace_id = NEW.workspace_id)))",
         },
         "publication_transitions": {
             "UPDATE": "1 = 1",
@@ -89,6 +89,11 @@ def guard_statements(dialect):
                   WHERE publication_id = p.id AND workspace_id = p.workspace_id
                   AND version = p.transition_version;
                 IF t.id IS NULL OR t.to_status != p.status OR t.occurred_at != p.updated_at
+                  OR p.failure_category IS DISTINCT FROM t.failure_category
+                  OR p.retry_disposition IS DISTINCT FROM t.retry_disposition
+                  OR p.next_retry_at IS DISTINCT FROM t.next_retry_at
+                  OR p.retry_deadline_at IS DISTINCT FROM t.retry_deadline_at
+                  OR p.retry_policy_version IS DISTINCT FROM t.retry_policy_version
                   OR (p.status = 'published' AND
                     (p.external_post_id IS DISTINCT FROM t.external_post_id
                      OR p.published_at IS DISTINCT FROM t.observed_at)) THEN

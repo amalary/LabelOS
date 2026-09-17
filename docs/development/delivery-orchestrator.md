@@ -1,5 +1,8 @@
 # Publishing Delivery Orchestrator (Stage 3)
 
+Stage 8 adds durable failure classification and retry eligibility; see
+[publishing retries](publishing-retries.md) for the current execution policy.
+
 Stage 7 adds [durable command identities and crash recovery](publishing-idempotency.md).
 Execution without an ID is now the initial command only; intentional retries need
 a new retained execution UUID and the observed failure version.

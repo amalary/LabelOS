@@ -455,6 +455,9 @@ def test_explicit_retry_preserves_intent_and_unknown_requires_reconciliation(
             ),
         )
         assert result.status == "retryable_failure"
+        async with sessions() as session:
+            waiting = await PublicationRepository(session, scope).get(identifier)
+        orchestrator.clock = lambda: waiting.next_retry_at
         result = await orchestrator.execute(
             sessions,
             workspace_id=scope,
@@ -483,7 +486,7 @@ def test_explicit_retry_preserves_intent_and_unknown_requires_reconciliation(
                 destination_id=request.destination_id,
                 outcome=domain.DeliveryOutcome.published,
                 source=domain.EvidenceSource.reconciliation,
-                observed_at=datetime.now(UTC),
+                observed_at=max(datetime.now(UTC), row.updated_at),
                 external_post_id="post-one",
             )
         await orchestrator.record_evidence(
@@ -557,7 +560,7 @@ def test_execution_failure_boundaries_never_blindly_redeliver(
                     destination_id=request.destination_id,
                     outcome=domain.DeliveryOutcome.unknown,
                     source=domain.EvidenceSource.execution_interrupted,
-                    observed_at=datetime.now(UTC),
+                    observed_at=max(datetime.now(UTC), row.updated_at),
                     reason=domain.PublicationFailureReason.outcome_unknown,
                 )
         if failure != "start":

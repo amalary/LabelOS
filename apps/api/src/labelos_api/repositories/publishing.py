@@ -8,6 +8,7 @@ existing handoff port/session contract; repository creation is not authorization
 """
 
 from datetime import datetime
+from random import random
 from uuid import UUID, uuid4
 
 from labelos_database.models import (
@@ -24,6 +25,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from labelos_api.publishing import contracts as domain
+from labelos_api.publishing.retries import (
+    MAX_ATTEMPTS,
+    POLICY_VERSION,
+    FailureCategory,
+    retry_decision,
+)
 from labelos_api.realtime.events import realtime_channel
 from labelos_api.repositories.scheduling import snapshot_for
 from labelos_api.scheduling.contracts import DeliveryAcceptanceRequest
@@ -60,6 +67,12 @@ def aggregate(row: Publication) -> domain.Publication:
                 source=domain.EvidenceSource(entry.source),
                 observed_at=entry.observed_at,
                 external_post_id=entry.external_post_id,
+                failure_category=(
+                    FailureCategory(entry.failure_category)
+                    if entry.failure_category
+                    else None
+                ),
+                retry_after_seconds=entry.retry_after_seconds,
                 reason=(
                     domain.PublicationFailureReason(entry.failure_reason)
                     if entry.failure_reason
@@ -129,6 +142,43 @@ class PublicationRepository:
         if lock:
             query = query.with_for_update()
         return await self.session.scalar(query)
+
+    async def due_retries(
+        self, *, now: datetime, limit: int = 100
+    ) -> list[tuple[UUID, int]]:
+        """Read-only candidates; execute rechecks eligibility under existing locks."""
+        if type(limit) is not int or not 1 <= limit <= 1000:
+            raise ValueError("invalid_retry_batch_size")
+        rows = await self.session.execute(
+            select(Publication.id, Publication.transition_version)
+            .where(
+                Publication.workspace_id == self.workspace_id,
+                Publication.status == "retryable_failure",
+                Publication.retry_disposition.in_(("automatic", "provider_delay")),
+                Publication.retry_policy_version == POLICY_VERSION,
+                Publication.next_retry_at <= now,
+                Publication.retry_deadline_at > now,
+            )
+            .order_by(Publication.next_retry_at, Publication.id)
+            .limit(limit)
+        )
+        return [(row.id, row.transition_version) for row in rows]
+
+    @staticmethod
+    def require_retry_eligible(row: Publication, now: datetime) -> None:
+        if row.status != "retryable_failure":
+            return
+        if (
+            row.retry_policy_version != POLICY_VERSION
+            or row.retry_disposition not in ("automatic", "provider_delay")
+            or row.next_retry_at is None
+            or row.retry_deadline_at is None
+        ):
+            raise PublicationConflict("retry_not_automatic")
+        if len(row.attempts) >= MAX_ATTEMPTS or now >= row.retry_deadline_at:
+            raise PublicationConflict("retry_budget_exhausted")
+        if now < row.next_retry_at:
+            raise PublicationConflict("retry_not_due")
 
     async def get_by_job(self, job_id: UUID) -> Publication | None:
         identifier = await self.session.scalar(
@@ -310,6 +360,8 @@ class PublicationRepository:
             row = await self.get(publication_id, lock=True)
             if row is None or row.transition_version != expected_version:
                 raise PublicationConflict("publication_version_conflict")
+            if entry.attempt:
+                self.require_retry_eligible(row, entry.attempt.started_at)
             before = aggregate(row)
             after = before.transition(workspace_id=self.workspace_id, entry=entry)
             if entry.attempt:
@@ -326,7 +378,64 @@ class PublicationRepository:
                 )
                 await self.session.flush()
             evidence = entry.evidence
+            retry_values = dict(
+                failure_category=None,
+                retry_disposition=None,
+                next_retry_at=None,
+                retry_deadline_at=None,
+                retry_policy_version=None,
+            )
+            if evidence and evidence.outcome != domain.DeliveryOutcome.published:
+                category = evidence.failure_category
+                if evidence.outcome == domain.DeliveryOutcome.unknown:
+                    category = FailureCategory.ambiguous_outcome
+                if category is None:
+                    assert evidence.reason is not None
+                    reason = domain.PublicationFailureReason
+                    category = {
+                        reason.rate_limited: FailureCategory.rate_limited,
+                        reason.authorization_required: FailureCategory.authentication,
+                        reason.invalid_content: FailureCategory.invalid_content_media,
+                        reason.destination_unavailable: (
+                            FailureCategory.unsupported_operation
+                        ),
+                    }.get(
+                        evidence.reason,
+                        (
+                            FailureCategory.provider_unavailable
+                            if evidence.outcome
+                            == domain.DeliveryOutcome.retryable_failure
+                            else FailureCategory.permanent_rejection
+                        ),
+                    )
+                if (
+                    evidence.outcome == domain.DeliveryOutcome.permanent_failure
+                    and evidence.failure_category is None
+                    and category
+                    not in {
+                        FailureCategory.invalid_content_media,
+                        FailureCategory.unsupported_operation,
+                        FailureCategory.permanent_rejection,
+                    }
+                ):
+                    category = FailureCategory.permanent_rejection
+                decision = retry_decision(
+                    category,
+                    attempt_number=len(before.attempts),
+                    first_started_at=before.attempts[0].started_at,
+                    observed_at=entry.occurred_at,
+                    retry_after_seconds=evidence.retry_after_seconds,
+                    jitter=random(),
+                )
+                retry_values = dict(
+                    failure_category=category.value,
+                    retry_disposition=decision.disposition.value,
+                    next_retry_at=decision.next_retry_at,
+                    retry_deadline_at=decision.deadline_at,
+                    retry_policy_version=decision.policy_version,
+                )
             values = dict(
+                **retry_values,
                 status=after.state.value,
                 transition_version=expected_version + 1,
                 updated_at=entry.occurred_at,
@@ -395,6 +504,10 @@ class PublicationRepository:
                     ),
                     external_post_id=evidence.external_post_id if evidence else None,
                     http_status=http_status,
+                    **retry_values,
+                    retry_after_seconds=(
+                        evidence.retry_after_seconds if evidence else None
+                    ),
                 )
             )
             await self.session.flush()
@@ -421,6 +534,11 @@ class PublicationRepository:
                     "channelId": str(row.marketing_content_item_channel_id),
                     "status": row.status,
                     "transitionVersion": row.transition_version,
+                    "failureCategory": row.failure_category,
+                    "retryDisposition": row.retry_disposition,
+                    "nextRetryAt": (
+                        row.next_retry_at.isoformat() if row.next_retry_at else None
+                    ),
                     "correlationId": str(row.correlation_id),
                 },
             )

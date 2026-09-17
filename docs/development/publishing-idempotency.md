@@ -1,5 +1,8 @@
 # Publishing idempotency and duplicate protection (Stage 7)
 
+Stage 8 adds durable failure classification and retry eligibility; see
+[publishing retries](publishing-retries.md) for the current execution policy.
+
 LabelOS provides one durable Publication and one serialized attempt history for
 each accepted publication intent. It does **not** provide exactly-once external
 publication. SQL commits and provider writes cannot be one atomic transaction.

@@ -140,7 +140,7 @@ def test_registry_exact_resolution_and_no_fallback_or_mutable_configuration():
         (Outcome.ambiguous, "unknown", "outcome_unknown"),
         (Outcome.retryable_failure, "retryable_failure", "temporary_unavailability"),
         (Outcome.permanent_failure, "permanent_failure", "invalid_content"),
-        (Outcome.authorization_required, "permanent_failure", "authorization_required"),
+        (Outcome.authorization_required, "retryable_failure", "authorization_required"),
         (Outcome.rate_limited, "retryable_failure", "rate_limited"),
         (Outcome.unsupported, "permanent_failure", "destination_unavailable"),
     ],
@@ -269,7 +269,7 @@ def test_orchestrator_persists_normalized_results(sessions, monkeypatch, outcome
                 Outcome.retryable_failure: "retryable_failure",
                 Outcome.rate_limited: "retryable_failure",
                 Outcome.permanent_failure: "permanent_failure",
-                Outcome.authorization_required: "permanent_failure",
+                Outcome.authorization_required: "retryable_failure",
                 Outcome.unsupported: "permanent_failure",
             }[outcome]
         )
@@ -312,8 +312,8 @@ def test_invalid_adapter_output_and_exceptions_block_retry(
         ("missing", "unsupported_provider"),
         ("disabled", "unsupported_capability"),
         ("rejected", "permanent_failure"),
-        ("invalid", "invalid_adapter_validation"),
-        ("exception", "invalid_adapter_validation"),
+        ("invalid", "retryable_failure"),
+        ("exception", "retryable_failure"),
     ],
 )
 def test_resolution_and_preflight_fail_without_attempt(
@@ -339,7 +339,13 @@ def test_resolution_and_preflight_fail_without_attempt(
         )
         assert delivery.reason_code == reason
         row = await stored(sessions, scope, identifier)
-        assert row.status == "pending" and not row.attempts and not row.transitions
+        if mode in {"missing", "disabled"}:
+            assert row.status == "pending" and not row.attempts and not row.transitions
+        else:
+            assert len(row.attempts) == 1 and len(row.transitions) == 2
+            assert row.retry_disposition == (
+                "permanent" if mode == "rejected" else "manual_action"
+            )
         assert not adapter.publications
 
     asyncio.run(run())
@@ -432,6 +438,8 @@ def test_rate_limit_hint_and_reconciled_nonpublication_allow_only_explicit_retry
         service = DeliveryOrchestrator()
         await service.execute(sessions, **kwargs)
         delivery = await service.reconcile(sessions, **kwargs)
+        row = await stored(sessions, scope, identifier)
+        service.clock = lambda: row.next_retry_at
         assert delivery.retry_after_seconds == 60
         assert delivery.status == "retryable_failure"
         assert len(adapter.publications) == 1

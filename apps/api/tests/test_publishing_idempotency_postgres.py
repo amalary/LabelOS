@@ -219,6 +219,9 @@ def test_simultaneous_retry_commands_are_version_guarded(sessions):
         with pytest.raises(DeliveryIneligible, match="retry_version_required"):
             await service.execute(sessions, **args, execution_id=uuid4())
 
+        waiting = await stored(sessions, scope, identifier)
+        service.clock = lambda: waiting.next_retry_at
+
         async def retry():
             try:
                 return await service.execute(
@@ -379,5 +382,30 @@ def test_execution_identity_cannot_be_reused_across_publications(sessions, monke
         monkeypatch.setattr(PublicationRepository, "require_unused_execution", original)
         assert not provider2.calls
         assert not (await stored(sessions, scope, second)).attempts
+
+    asyncio.run(run())
+
+
+def test_concurrent_due_sweeps_consume_one_durable_command(sessions):
+    async def run():
+        scope, identifier = await setup(sessions)
+        service = DeliveryOrchestrator()
+        provider = Provider(ProviderOutcome.retryable_failure)
+        await service.execute(sessions, **command(scope, identifier, provider))
+        waiting = await stored(sessions, scope, identifier)
+        service.clock = lambda: waiting.next_retry_at
+        provider.outcome = ProviderOutcome.published
+        registry = ProviderRegistry({"instagram": provider})
+        results = await asyncio.gather(
+            *[
+                service.retry_due(sessions, workspace_id=scope, registry=registry)
+                for _ in range(2)
+            ]
+        )
+        assert sum(len(batch) for batch in results) == 1
+        assert len(provider.calls) == 2
+        row = await stored(sessions, scope, identifier)
+        assert row.status == "published" and len(row.attempts) == 2
+        assert row.next_retry_at is None
 
     asyncio.run(run())

@@ -10,6 +10,8 @@ from datetime import datetime, timedelta
 from enum import StrEnum
 from uuid import UUID
 
+from labelos_api.publishing.retries import MAX_PROVIDER_DELAY_SECONDS, FailureCategory
+
 
 class PublicationState(StrEnum):
     pending = "pending"
@@ -215,6 +217,8 @@ class PublicationEvidence:
     observed_at: datetime
     external_post_id: str | None = field(default=None, repr=False)
     reason: PublicationFailureReason | None = None
+    failure_category: FailureCategory | None = None
+    retry_after_seconds: int | None = None
 
     def __post_init__(self) -> None:
         for identifier in (
@@ -225,6 +229,43 @@ class PublicationEvidence:
         ):
             _uuid(identifier)
         _utc(self.observed_at)
+        if self.failure_category is not None and not isinstance(
+            self.failure_category, FailureCategory
+        ):
+            raise PublicationInvariantError("Invalid failure category")
+        if (
+            self.outcome == DeliveryOutcome.published
+            and self.failure_category is not None
+        ):
+            raise PublicationInvariantError("Success cannot have a failure category")
+        if self.failure_category is not None:
+            allowed = {
+                DeliveryOutcome.published: set(),
+                DeliveryOutcome.unknown: {FailureCategory.ambiguous_outcome},
+                DeliveryOutcome.retryable_failure: {
+                    FailureCategory.transient_network,
+                    FailureCategory.provider_unavailable,
+                    FailureCategory.rate_limited,
+                    FailureCategory.authentication,
+                    FailureCategory.authorization,
+                    FailureCategory.internal_failure,
+                },
+                DeliveryOutcome.permanent_failure: {
+                    FailureCategory.invalid_content_media,
+                    FailureCategory.unsupported_operation,
+                    FailureCategory.permanent_rejection,
+                },
+            }
+            if self.failure_category not in allowed.get(self.outcome, set()):
+                raise PublicationInvariantError(
+                    "Failure category does not match evidence"
+                )
+        if self.retry_after_seconds is not None and (
+            type(self.retry_after_seconds) is not int
+            or not 0 <= self.retry_after_seconds <= MAX_PROVIDER_DELAY_SECONDS
+            or self.outcome != DeliveryOutcome.retryable_failure
+        ):
+            raise PublicationInvariantError("Invalid provider retry delay")
         if not isinstance(self.outcome, DeliveryOutcome) or not isinstance(
             self.source, EvidenceSource
         ):

@@ -1,4 +1,4 @@
-"""Delivery application boundary; no polling, due selection, leases or retry timers.
+"""Delivery application boundary with bounded durable retry selection; no timers.
 
 The authenticated host supplies workspace scope and Scheduling's locked controls.
 Acceptance uses Scheduling's composer; execution consumes an explicit accepted ID.
@@ -29,6 +29,7 @@ from labelos_api.publishing.providers import (
     validate_preflight,
     validate_result,
 )
+from labelos_api.publishing.retries import FailureCategory
 from labelos_api.repositories.publishing import (
     PublicationConflict,
     PublicationRepository,
@@ -157,6 +158,54 @@ class _AcceptanceReceiver:
 
 
 class DeliveryOrchestrator:
+    def __init__(self, *, clock=None):
+        self.clock = clock or (lambda: datetime.now(UTC))
+
+    async def retry_due(self, sessions, *, workspace_id, registry, limit=100):
+        """One bounded sweep; no sleep, loop, lease takeover or ambiguous replay.
+
+        Durable failure version determines the command identity across restarts.
+        Each execution reloads cancellation/content/credentials and locks normally.
+        Scheduling/worker hosts decide when to invoke the next sweep.
+        """
+        async with sessions() as session:
+            candidates = await PublicationRepository(session, workspace_id).due_retries(
+                now=self.clock(), limit=limit
+            )
+        results = []
+        for identifier, version in candidates:
+            try:
+                results.append(
+                    await self.execute(
+                        sessions,
+                        workspace_id=workspace_id,
+                        publication_id=identifier,
+                        registry=registry,
+                        expected_version=version,
+                        execution_id=uuid5(
+                            identifier, f"labelos:publication:retry:v1:{version}"
+                        ),
+                    )
+                )
+            except (DeliveryIneligible, PublicationConflict):
+                # Execution, cancellation or a source change may win after selection.
+                continue
+        return results
+
+    async def cancel_waiting(
+        self, sessions, *, workspace_id, publication_id, expected_version
+    ):
+        async with sessions.begin() as session:
+            await PublicationRepository(session, workspace_id).append(
+                publication_id,
+                expected_version=expected_version,
+                operation_id=uuid4(),
+                entry=domain.PublicationTransition(
+                    operation=domain.PublicationOperation.cancel,
+                    occurred_at=self.clock(),
+                ),
+            )
+
     async def accept_execution(
         self,
         repository: SchedulingRepository,
@@ -349,6 +398,10 @@ class DeliveryOrchestrator:
             ):
                 raise DeliveryIneligible("retry_version_required")
             try:
+                repo.require_retry_eligible(row, self.clock())
+            except PublicationConflict as exc:
+                raise DeliveryIneligible(str(exc)) from exc
+            try:
                 adapter = registry.resolve(context.provider)
             except ProviderResolutionError:
                 return DeliveryResult(
@@ -367,24 +420,19 @@ class DeliveryOrchestrator:
                 workspace_id=workspace_id,
                 publication_id=row.id,
                 number=len(row.attempts) + 1,
-                started_at=datetime.now(UTC),
+                started_at=self.clock(),
             )
             request = publication_request(context, attempt)
             # Local validation only: adapters must not resolve credentials or do I/O.
             try:
                 rejection = validate_preflight(adapter.validate(request))
             except Exception:
-                return DeliveryResult(
-                    publication_id=row.id,
-                    status=row.status,
-                    reason_code="invalid_adapter_validation",
-                )
-            if rejection is not None:
-                return DeliveryResult(
-                    publication_id=row.id,
-                    status=row.status,
-                    reason_code=rejection.outcome.value,
-                    retry_after_seconds=rejection.retry_after_seconds,
+                # Validation is local and cannot publish. Persist a manual-action
+                # internal failure instead of repeatedly running broken validation.
+                rejection = ProviderResult(
+                    outcome=ProviderOutcome.retryable_failure,
+                    confirmed_absent=True,
+                    failure_category=FailureCategory.internal_failure,
                 )
             row = await repo.append(
                 row.id,
@@ -405,12 +453,14 @@ class DeliveryOrchestrator:
         # No database session/locks or Scheduling lease spans this call.
         source = domain.EvidenceSource.provider_response
         try:
-            result = validate_result(await adapter.publish(request))
+            result = rejection or validate_result(await adapter.publish(request))
         except Exception:
             # Includes malformed results. Never guess whether an external write ran.
             result = ProviderResult(outcome=ProviderOutcome.ambiguous)
             source = domain.EvidenceSource.execution_interrupted
-        evidence = result_evidence(request, result, source=source)
+        evidence = result_evidence(
+            request, result, source=source, observed_at=self.clock()
+        )
         await self.record_evidence(
             sessions,
             workspace_id=workspace_id,
@@ -458,7 +508,7 @@ class DeliveryOrchestrator:
                 return DeliveryResult(publication_id=row.id, status=row.status)
             if row.status not in ("processing", "retrying"):
                 raise DeliveryIneligible("publication_not_recoverable")
-            now = datetime.now(UTC)
+            now = self.clock()
             row = await repo.append(
                 row.id,
                 expected_version=expected_version,
@@ -560,7 +610,10 @@ class DeliveryOrchestrator:
                 reason_code="unsupported_capability",
             )
         evidence = result_evidence(
-            request, result, source=domain.EvidenceSource.reconciliation
+            request,
+            result,
+            source=domain.EvidenceSource.reconciliation,
+            observed_at=self.clock(),
         )
         if not (
             status == "manual_action_required"
@@ -614,7 +667,7 @@ class DeliveryOrchestrator:
                 operation_id=uuid4(),
                 entry=domain.PublicationTransition(
                     operation=operation,
-                    occurred_at=datetime.now(UTC),
+                    occurred_at=self.clock(),
                     evidence=evidence,
                 ),
             )

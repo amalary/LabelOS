@@ -8,6 +8,9 @@ No upload URLs, tokens, raw errors or response metadata cross this boundary.
 import hashlib
 import json
 import re
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
+from math import ceil
 from uuid import uuid4
 
 import httpx
@@ -20,6 +23,7 @@ from labelos_api.publishing.providers import (
     ProviderResult,
     PublicationRequest,
 )
+from labelos_api.publishing.retries import FailureCategory as Category
 from labelos_api.scheduling.payload import MAX_ASSET_BYTES
 from labelos_api.services.social_account_execution import (
     ExecutionCredentialError,
@@ -43,8 +47,12 @@ _REQUIRED_SCOPES = frozenset(
 )
 
 
-def _failure(outcome: ProviderOutcome) -> ProviderResult:
-    return ProviderResult(outcome=outcome, confirmed_absent=True)
+def _failure(
+    outcome: ProviderOutcome, category: Category | None = None
+) -> ProviderResult:
+    return ProviderResult(
+        outcome=outcome, confirmed_absent=True, failure_category=category
+    )
 
 
 class YouTubePublishingAdapter:
@@ -88,14 +96,18 @@ class YouTubePublishingAdapter:
             or len(description.encode("utf-8")) > 5000
             or len(request.media) != 1
         ):
-            return _failure(ProviderOutcome.permanent_failure)
+            return _failure(
+                ProviderOutcome.permanent_failure, Category.invalid_content_media
+            )
         media = request.media[0]
         if (
             not re.fullmatch(r"video/[a-z0-9][a-z0-9.+-]{0,63}", media.media_type)
             or not 0 < len(media.data) <= MAX_ASSET_BYTES
             or hashlib.sha256(media.data).hexdigest() != media.sha256
         ):
-            return _failure(ProviderOutcome.permanent_failure)
+            return _failure(
+                ProviderOutcome.permanent_failure, Category.invalid_content_media
+            )
         return None
 
     async def _connection(self, request: PublicationRequest):
@@ -187,12 +199,30 @@ class YouTubePublishingAdapter:
                 Code.third_party_service_unavailable,
             }:
                 return _failure(ProviderOutcome.retryable_failure)
-            return _failure(ProviderOutcome.authorization_required)
-        except (httpx.HTTPError, ValueError, SQLAlchemyError):
+            return _failure(
+                ProviderOutcome.authorization_required,
+                (
+                    Category.authorization
+                    if exc.code == Code.insufficient_scope
+                    else Category.authentication
+                ),
+            )
+        except (httpx.HTTPError, ValueError, SQLAlchemyError) as exc:
             # A timeout/invalid response after sending media cannot prove absence.
             if write_started:
                 return ProviderResult(outcome=ProviderOutcome.ambiguous)
-            return _failure(ProviderOutcome.retryable_failure)
+            return _failure(
+                ProviderOutcome.retryable_failure,
+                (
+                    Category.transient_network
+                    if isinstance(exc, httpx.HTTPError)
+                    else (
+                        Category.internal_failure
+                        if isinstance(exc, SQLAlchemyError)
+                        else Category.provider_unavailable
+                    )
+                ),
+            )
 
     async def _observe_http(self, connection, response, result):
         # Only normalized, authoritative authentication failures affect health.
@@ -278,6 +308,7 @@ def _http_failure(response: httpx.Response, *, write_started: bool) -> ProviderR
     # Only structured Google rejections establish noncreation after upload starts.
     reasons = _error_reasons(response)
     outcome = None
+    category = None
     if response.status_code in {400, 403, 429} and reasons & {
         "quotaExceeded",
         "dailyLimitExceeded",
@@ -306,25 +337,53 @@ def _http_failure(response: httpx.Response, *, write_started: bool) -> ProviderR
         "invalidFilename",
     }:
         outcome = ProviderOutcome.permanent_failure
-    if outcome is not None:
-        hint = response.headers.get("Retry-After", "")
-        return ProviderResult(
-            outcome=outcome,
-            confirmed_absent=True,
-            retry_after_seconds=(
-                int(hint)
-                if outcome == ProviderOutcome.rate_limited
-                and hint.isascii()
-                and hint.isdigit()
-                and len(hint) <= 6
-                and int(hint) <= 604800
-                else None
-            ),
+        category = Category.invalid_content_media
+    if outcome is None:
+        if write_started:
+            return ProviderResult(outcome=ProviderOutcome.ambiguous)
+        if response.status_code in {401, 403}:
+            outcome = ProviderOutcome.authorization_required
+        elif response.status_code == 429:
+            outcome = ProviderOutcome.rate_limited
+        elif response.status_code >= 500:
+            outcome = ProviderOutcome.retryable_failure
+        else:
+            outcome = ProviderOutcome.permanent_failure
+    if outcome == ProviderOutcome.authorization_required:
+        category = (
+            Category.authorization
+            if "insufficientPermissions" in reasons
+            or (
+                response.status_code == 403
+                and not reasons & {"authError", "unauthorized"}
+            )
+            else Category.authentication
         )
-    if write_started:
-        return ProviderResult(outcome=ProviderOutcome.ambiguous)
-    if response.status_code in {401, 403}:
-        return _failure(ProviderOutcome.authorization_required)
-    if response.status_code == 429:
-        return _failure(ProviderOutcome.rate_limited)
-    return _failure(ProviderOutcome.retryable_failure)
+    return ProviderResult(
+        outcome=outcome,
+        confirmed_absent=True,
+        failure_category=category,
+        retry_after_seconds=(
+            parse_retry_after(response.headers.get("Retry-After"))
+            if outcome
+            in {ProviderOutcome.rate_limited, ProviderOutcome.retryable_failure}
+            else None
+        ),
+    )
+
+
+def parse_retry_after(value: str | None, *, now: datetime | None = None) -> int | None:
+    """Accept bounded delta seconds or an aware HTTP date; never store raw headers."""
+    if not value or len(value) > 128 or not value.isascii():
+        return None
+    try:
+        if value.isdigit():
+            delay = int(value)
+        else:
+            target = parsedate_to_datetime(value)
+            if target.utcoffset() is None:
+                return None
+            delay = max(0, ceil((target - (now or datetime.now(UTC))).total_seconds()))
+        return delay if 0 <= delay <= 604800 else None
+    except (ValueError, TypeError, OverflowError):
+        return None

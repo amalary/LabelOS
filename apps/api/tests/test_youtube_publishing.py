@@ -34,6 +34,7 @@ from labelos_api.publishing.providers import (
     publication_request,
 )
 from labelos_api.publishing.registry import publishing_provider_registry
+from labelos_api.publishing.retries import FailureCategory
 from labelos_api.publishing.youtube import YouTubePublishingAdapter
 from labelos_api.repositories.publishing import PublicationRepository
 from labelos_api.repositories.scheduling import snapshot_for
@@ -262,7 +263,15 @@ def context_for(row):
 
 
 async def execute(sessions, adapter, request, **command):
-    return await DeliveryOrchestrator().execute(
+    service = DeliveryOrchestrator()
+    if command.get("expected_version") is not None:
+        async with sessions() as session:
+            row = await PublicationRepository(session, request.workspace_id).get(
+                request.publication_id
+            )
+            if row.next_retry_at:
+                service.clock = lambda: row.next_retry_at
+    return await service.execute(
         sessions,
         workspace_id=request.workspace_id,
         publication_id=request.publication_id,
@@ -506,6 +515,10 @@ def test_refresh_failures_never_upload(sessions, monkeypatch, failure):
             if failure == "store_unavailable"
             else Outcome.authorization_required
         )
+        if failure == "revoked":
+            assert result.failure_category == FailureCategory.authentication
+        if failure == "scope_reduced":
+            assert result.failure_category == FailureCategory.authorization
         assert not network.uploads
 
     asyncio.run(run())
@@ -689,6 +702,8 @@ def test_identity_errors_prove_no_upload(sessions, monkeypatch, response, outcom
         adapter, request, network, _, _ = await setup(sessions, monkeypatch)
         network.identity_response = response
         result = await adapter.publish(request)
+        if isinstance(response, httpx.ReadTimeout):
+            assert result.failure_category == FailureCategory.transient_network
         assert result.outcome == outcome
         assert result.confirmed_absent
         assert not network.uploads

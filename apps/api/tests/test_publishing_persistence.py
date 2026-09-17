@@ -104,19 +104,20 @@ async def seed(session, *, persist=True):
 
 
 def start_entry(row):
+    now = row.next_retry_at or row.updated_at + timedelta(seconds=1)
     return domain.PublicationTransition(
         operation=(
             domain.PublicationOperation.start
             if not row.attempts
             else domain.PublicationOperation.retry
         ),
-        occurred_at=row.updated_at + timedelta(seconds=1),
+        occurred_at=now,
         attempt=domain.PublicationAttempt(
             id=uuid4(),
             workspace_id=row.workspace_id,
             publication_id=row.id,
             number=len(row.attempts) + 1,
-            started_at=row.updated_at + timedelta(seconds=1),
+            started_at=now,
         ),
     )
 
@@ -478,9 +479,10 @@ def test_migration_round_trip(postgres_test_engine):
             str(Path(__file__).resolve().parents[3] / "packages/database/alembic.ini")
         )
     )
-    assert scripts.get_heads() == ["202609162300"]
+    assert scripts.get_heads() == ["202609170100"]
     revision = scripts.get_revision("head")
-    assert revision.down_revision == "202609162200"
+    assert revision.down_revision == "202609162300"
+    identity = scripts.get_revision("202609162300")
     foundation = scripts.get_revision("202609162200")
     assert foundation.down_revision == "202609152100"
 
@@ -491,7 +493,7 @@ def test_migration_round_trip(postgres_test_engine):
             for operation in (revision.module.downgrade, revision.module.upgrade):
                 operation()
                 assert (
-                    "destination_identity"
+                    "next_retry_at"
                     in {
                         c["name"]
                         for c in inspect(connection).get_columns("publications")
@@ -549,10 +551,12 @@ def test_migration_round_trip(postgres_test_engine):
             assert before and before[0].external_post_id == "unchanged"
             with Operations.context(MigrationContext.configure(connection)):
                 revision.module.downgrade()
+                identity.module.downgrade()
                 foundation.module.downgrade()
                 assert connection.execute(probe).all() == before
                 assert not inspect(connection).has_table("publications")
                 foundation.module.upgrade()
+                identity.module.upgrade()
                 revision.module.upgrade()
                 assert connection.execute(probe).all() == before
                 assert (
@@ -681,28 +685,20 @@ def test_frozen_migration_guards_match_metadata():
             str(Path(__file__).resolve().parents[3] / "packages/database/alembic.ini")
         )
     )
-    revision = scripts.get_revision("202609162200")
-    identity_revision = scripts.get_revision("202609162300")
-    for dialect in ("sqlite", "postgresql"):
-        old = revision.module.guard_statements(dialect)
-        current = guard_statements(dialect)
-        distinct = "IS DISTINCT FROM" if dialect == "postgresql" else "IS NOT"
-        assert old == [
-            sql.replace(
-                f" OR OLD.destination_identity {distinct} NEW.destination_identity", ""
-            )
-            for sql in current
-        ]
-        if dialect == "postgresql":
-            update_guard = next(
-                s
-                for s in current
-                if s.startswith("CREATE FUNCTION publications_update_guard")
-            )
-            assert (
-                update_guard.replace("CREATE FUNCTION", "CREATE OR REPLACE FUNCTION", 1)
-                == identity_revision.module.NEW_GUARD
-            )
+    retry = scripts.get_revision("202609170100")
+    current = guard_statements("postgresql")
+    for statement in retry.module.NEW_FUNCTIONS:
+        assert (
+            statement.replace("CREATE OR REPLACE FUNCTION", "CREATE FUNCTION", 1)
+            in current
+        )
+    identity = scripts.get_revision("202609162300")
+    assert (
+        identity.module.NEW_GUARD.replace(
+            "CREATE OR REPLACE FUNCTION", "CREATE FUNCTION", 1
+        )
+        in current
+    )
 
 
 @pytest.mark.parametrize(

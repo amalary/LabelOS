@@ -1,5 +1,8 @@
 # Publishing Provider Adapter Contract (Stage 4)
 
+Stage 8 adds durable failure classification and retry eligibility; see
+[publishing retries](publishing-retries.md) for the current execution policy.
+
 Stage 5 adds an explicit YouTube implementation and registry factory; see
 [YouTube publishing adapter](youtube-publishing-adapter.md). The Stage 4 behavior
 below remains the default when no registry is supplied.
