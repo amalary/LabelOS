@@ -1,5 +1,9 @@
 # Publishing Stage 8: retry engine and failure classification
 
+Production execution now uses the independent
+[Stage 9 Publishing worker](publishing-worker.md), which adds database-clock leases,
+fencing, heartbeats and conservative recovery around this retry policy.
+
 Stage 8 adds normalized failure categories, durable eligibility, and a bounded
 `DeliveryOrchestrator.retry_due()` sweep. HTTP codes and provider error bodies are
 interpreted only by adapters. A retry always creates a new `PublicationAttempt`

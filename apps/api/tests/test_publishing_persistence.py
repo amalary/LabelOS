@@ -19,6 +19,7 @@ from labelos_database.models import (
     Organization,
     Publication,
     PublicationAttempt,
+    PublicationLease,
     PublicationTransition,
     RealtimeEvent,
     SchedulingJob,
@@ -479,8 +480,10 @@ def test_migration_round_trip(postgres_test_engine):
             str(Path(__file__).resolve().parents[3] / "packages/database/alembic.ini")
         )
     )
-    assert scripts.get_heads() == ["202609170100"]
-    revision = scripts.get_revision("head")
+    assert scripts.get_heads() == ["202609170200"]
+    leases = scripts.get_revision("head")
+    assert leases.down_revision == "202609170100"
+    revision = scripts.get_revision("202609170100")
     assert revision.down_revision == "202609162300"
     identity = scripts.get_revision("202609162300")
     foundation = scripts.get_revision("202609162200")
@@ -490,6 +493,7 @@ def test_migration_round_trip(postgres_test_engine):
         with Operations.context(MigrationContext.configure(connection)):
             for rev in reversed(list(scripts.walk_revisions())):
                 rev.module.upgrade()
+            leases.module.downgrade()
             for operation in (revision.module.downgrade, revision.module.upgrade):
                 operation()
                 assert (
@@ -499,7 +503,9 @@ def test_migration_round_trip(postgres_test_engine):
                         for c in inspect(connection).get_columns("publications")
                     }
                 ) == (operation == revision.module.upgrade)
+            leases.module.upgrade()
             for name in (
+                "publication_leases",
                 "publications",
                 "publication_attempts",
                 "publication_transitions",
@@ -518,6 +524,7 @@ def test_migration_round_trip(postgres_test_engine):
 
             def include_object(obj, name, kind, reflected, compare_to):
                 return kind != "table" or name in {
+                    "publication_leases",
                     "publications",
                     "publication_attempts",
                     "publication_transitions",
@@ -550,6 +557,20 @@ def test_migration_round_trip(postgres_test_engine):
             before = connection.execute(probe).all()
             assert before and before[0].external_post_id == "unchanged"
             with Operations.context(MigrationContext.configure(connection)):
+                # Ownership storage can be backfilled without changing the journal.
+                publication_before = connection.execute(select(Publication)).all()
+                leases.module.downgrade()
+                leases.module.upgrade()
+                assert (
+                    connection.execute(select(Publication)).all() == publication_before
+                )
+                backfilled = connection.execute(
+                    select(PublicationLease.__table__)
+                ).one()
+                assert backfilled.publication_id == row.id
+                assert backfilled.fencing_token == 0
+                assert backfilled.owner_id is None
+                leases.module.downgrade()
                 revision.module.downgrade()
                 identity.module.downgrade()
                 foundation.module.downgrade()
@@ -558,6 +579,7 @@ def test_migration_round_trip(postgres_test_engine):
                 foundation.module.upgrade()
                 identity.module.upgrade()
                 revision.module.upgrade()
+                leases.module.upgrade()
                 assert connection.execute(probe).all() == before
                 assert (
                     connection.scalar(select(func.count()).select_from(Publication))

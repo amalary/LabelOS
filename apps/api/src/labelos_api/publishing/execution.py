@@ -5,6 +5,16 @@ from uuid import UUID
 
 
 @dataclass(frozen=True, kw_only=True)
+class PublicationClaim:
+    workspace_id: UUID
+    publication_id: UUID
+    owner_id: UUID
+    fencing_token: int
+    transition_version: int
+    recovering: bool = False
+
+
+@dataclass(frozen=True, kw_only=True)
 class DeliveryContext:
     workspace_id: UUID
     publication_id: UUID

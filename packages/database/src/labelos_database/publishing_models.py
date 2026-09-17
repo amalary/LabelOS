@@ -4,6 +4,7 @@ from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     ForeignKey,
     ForeignKeyConstraint,
@@ -178,6 +179,35 @@ class Publication(Base):
             postgresql_where=external_post_id.is_not(None),
             sqlite_where=external_post_id.is_not(None),
         ),
+    )
+
+
+class PublicationLease(Base):
+    """Execution ownership, separate from the immutable publication journal."""
+
+    __tablename__ = "publication_leases"
+    publication_id: Mapped[UUID] = mapped_column(primary_key=True)
+    workspace_id: Mapped[UUID]
+    fencing_token: Mapped[int] = mapped_column(default=0, server_default="0")
+    owner_id: Mapped[UUID | None]
+    expires_at: Mapped[datetime | None] = mapped_column(SchedulingUTCDateTime())
+    interrupted: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false"
+    )
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["publication_id", "workspace_id"],
+            ["publications.id", "publications.workspace_id"],
+            name="fk_publication_leases_scope",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint("fencing_token >= 0", name="fence"),
+        CheckConstraint(
+            "(owner_id IS NULL AND expires_at IS NULL) OR "
+            "(owner_id IS NOT NULL AND expires_at IS NOT NULL AND fencing_token > 0)",
+            name="ownership",
+        ),
+        Index("ix_publication_leases_expiry", "workspace_id", "expires_at"),
     )
 
 

@@ -14,6 +14,7 @@ from uuid import UUID, uuid4
 from labelos_database.models import (
     Publication,
     PublicationAttempt,
+    PublicationLease,
     PublicationTransition,
     RealtimeEvent,
     SchedulingJob,
@@ -25,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from labelos_api.publishing import contracts as domain
+from labelos_api.publishing.execution import PublicationClaim
 from labelos_api.publishing.retries import (
     MAX_ATTEMPTS,
     POLICY_VERSION,
@@ -32,6 +34,10 @@ from labelos_api.publishing.retries import (
     retry_decision,
 )
 from labelos_api.realtime.events import realtime_channel
+from labelos_api.repositories.publication_leases import (
+    PublicationLeaseLost,
+    require_ownership,
+)
 from labelos_api.repositories.scheduling import snapshot_for
 from labelos_api.scheduling.contracts import DeliveryAcceptanceRequest
 from labelos_api.scheduling.payload import canonical_json, envelope, validate_request
@@ -308,6 +314,9 @@ class PublicationRepository:
         async with self.session.begin_nested():
             self.session.add(row)
             await self.session.flush()
+            self.session.add(
+                PublicationLease(publication_id=row.id, workspace_id=self.workspace_id)
+            )
             self._outbox(row, row.receipt_id)
             await self.session.flush()
         result = await self.get(row.id)
@@ -325,6 +334,7 @@ class PublicationRepository:
         execution_id: UUID | None = None,
         http_status: int | None = None,
         provider_url: str | None = None,
+        claim: PublicationClaim | None = None,
     ) -> Publication:
         """Append a validated fact and project state with stale-write rejection.
 
@@ -360,6 +370,27 @@ class PublicationRepository:
             row = await self.get(publication_id, lock=True)
             if row is None or row.transition_version != expected_version:
                 raise PublicationConflict("publication_version_conflict")
+            cancelling = entry.operation == domain.PublicationOperation.cancel
+            lease = (
+                await self.session.get(PublicationLease, row.id, populate_existing=True)
+                if cancelling
+                else await require_ownership(self.session, row, claim)
+            )
+            if (
+                lease is not None
+                and lease.interrupted
+                and (
+                    entry.attempt
+                    or (
+                        entry.evidence
+                        and entry.evidence.outcome
+                        == domain.DeliveryOutcome.retryable_failure
+                    )
+                )
+            ):
+                raise PublicationLeaseLost(
+                    "interrupted_executor_requires_manual_resolution"
+                )
             if entry.attempt:
                 self.require_retry_eligible(row, entry.attempt.started_at)
             before = aggregate(row)
@@ -514,6 +545,17 @@ class PublicationRepository:
             await self.session.refresh(row)
             self._outbox(row, operation_id)
             await self.session.flush()
+            if cancelling and lease is not None:
+                lease.fencing_token += 1
+                lease.owner_id = lease.expires_at = None
+                await self.session.flush()
+            elif claim is not None:
+                # Recheck wall time after all writes; failure rolls back the savepoint.
+                lease = await require_ownership(self.session, row, claim)
+                assert lease is not None
+                if entry.evidence is not None:
+                    lease.owner_id = lease.expires_at = None
+                    await self.session.flush()
         result = await self.get(publication_id)
         if result is None:
             raise PublicationConflict("publication_missing")

@@ -18,6 +18,7 @@ from labelos_api.publishing import contracts as domain
 from labelos_api.publishing.execution import (
     DeliveryContext,
     DeliveryResult,
+    PublicationClaim,
 )
 from labelos_api.publishing.providers import (
     ProviderOutcome,
@@ -30,6 +31,7 @@ from labelos_api.publishing.providers import (
     validate_result,
 )
 from labelos_api.publishing.retries import FailureCategory
+from labelos_api.repositories.publication_leases import database_now, require_ownership
 from labelos_api.repositories.publishing import (
     PublicationConflict,
     PublicationRepository,
@@ -346,6 +348,7 @@ class DeliveryOrchestrator:
         registry: ProviderRegistry | None = None,
         execution_id: UUID | None = None,
         expected_version: int | None = None,
+        claim: PublicationClaim | None = None,
     ) -> DeliveryResult:
         """One explicit execution, with an unavailable production default.
 
@@ -388,6 +391,7 @@ class DeliveryOrchestrator:
                 raise DeliveryIneligible(str(exc)) from exc
             row = await repo.get(publication_id)
             assert row is not None
+            await require_ownership(session, row, claim)
             if (
                 expected_version is not None
                 and expected_version != row.transition_version
@@ -398,7 +402,9 @@ class DeliveryOrchestrator:
             ):
                 raise DeliveryIneligible("retry_version_required")
             try:
-                repo.require_retry_eligible(row, self.clock())
+                repo.require_retry_eligible(
+                    row, await database_now(session) if claim else self.clock()
+                )
             except PublicationConflict as exc:
                 raise DeliveryIneligible(str(exc)) from exc
             try:
@@ -420,7 +426,7 @@ class DeliveryOrchestrator:
                 workspace_id=workspace_id,
                 publication_id=row.id,
                 number=len(row.attempts) + 1,
-                started_at=self.clock(),
+                started_at=await database_now(session) if claim else self.clock(),
             )
             request = publication_request(context, attempt)
             # Local validation only: adapters must not resolve credentials or do I/O.
@@ -439,6 +445,7 @@ class DeliveryOrchestrator:
                 expected_version=context.transition_version,
                 operation_id=uuid4(),
                 execution_id=execution_id,
+                claim=claim,
                 entry=domain.PublicationTransition(
                     operation=(
                         domain.PublicationOperation.start
@@ -458,8 +465,12 @@ class DeliveryOrchestrator:
             # Includes malformed results. Never guess whether an external write ran.
             result = ProviderResult(outcome=ProviderOutcome.ambiguous)
             source = domain.EvidenceSource.execution_interrupted
+        observed_at = self.clock()
+        if claim is not None:
+            async with sessions() as session:
+                observed_at = await database_now(session)
         evidence = result_evidence(
-            request, result, source=source, observed_at=self.clock()
+            request, result, source=source, observed_at=observed_at
         )
         await self.record_evidence(
             sessions,
@@ -467,6 +478,7 @@ class DeliveryOrchestrator:
             publication_id=publication_id,
             expected_version=version,
             evidence=evidence,
+            claim=claim,
         )
         return DeliveryResult(
             publication_id=publication_id,
@@ -488,12 +500,13 @@ class DeliveryOrchestrator:
         publication_id: UUID,
         execution_id: UUID,
         expected_version: int,
+        claim: PublicationClaim | None = None,
     ) -> DeliveryResult:
         """Quarantine a stopped executor's committed attempt, without provider I/O.
 
-        Trusted recovery hosts MUST establish that the original executor cannot
-        resume before calling this method. Age, a queue lease expiry, or a network
-        timeout is not proof. This is not a lease takeover or retry authorization.
+        Without a Publishing claim, trusted hosts MUST establish that the original
+        executor cannot resume. Fenced worker recovery retains an interrupted
+        marker that forbids absence-based automatic retries even after readback.
         Provider requests may still be settling: reconciliation must prove final
         noncreation before it can permit a new execution.
         """
@@ -502,17 +515,19 @@ class DeliveryOrchestrator:
             row = await repo.get(publication_id, lock=True)
             if row is None:
                 raise DeliveryIneligible("publication_missing")
+            await require_ownership(session, row, claim)
             if not row.attempts or row.attempts[-1].execution_id != execution_id:
                 raise PublicationConflict("publication_execution_conflict")
             if row.status in ("published", "manual_action_required"):
                 return DeliveryResult(publication_id=row.id, status=row.status)
             if row.status not in ("processing", "retrying"):
                 raise DeliveryIneligible("publication_not_recoverable")
-            now = self.clock()
+            now = await database_now(session) if claim else self.clock()
             row = await repo.append(
                 row.id,
                 expected_version=expected_version,
                 operation_id=uuid5(execution_id, "labelos:publication:interrupted:v1"),
+                claim=claim,
                 entry=domain.PublicationTransition(
                     operation=domain.PublicationOperation.require_manual_action,
                     occurred_at=now,
@@ -647,6 +662,7 @@ class DeliveryOrchestrator:
         publication_id: UUID,
         expected_version: int,
         evidence: domain.PublicationEvidence,
+        claim: PublicationClaim | None = None,
     ) -> None:
         """Trusted provider/reconciliation input; stale results cannot advance state.
 
@@ -665,9 +681,10 @@ class DeliveryOrchestrator:
                 publication_id,
                 expected_version=expected_version,
                 operation_id=uuid4(),
+                claim=claim,
                 entry=domain.PublicationTransition(
                     operation=operation,
-                    occurred_at=self.clock(),
+                    occurred_at=await database_now(session) if claim else self.clock(),
                     evidence=evidence,
                 ),
             )
