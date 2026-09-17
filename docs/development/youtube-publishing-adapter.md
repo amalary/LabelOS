@@ -1,5 +1,9 @@
 # YouTube publishing adapter (Stage 5)
 
+Stage 7 adds [command replay protection and recovery rules](publishing-idempotency.md).
+An explicit retry now requires a new retained execution UUID and the observed
+retryable failure version. Unknown YouTube outcomes remain blocked.
+
 `publishing/youtube.py` implements the Stage 4 provider protocol using the official
 YouTube Data API v3. `publishing/registry.py` supplies explicit production adapter
 composition. No second OAuth flow, secret store, schema, public endpoint, worker,

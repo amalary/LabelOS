@@ -435,7 +435,11 @@ def test_rate_limit_hint_and_reconciled_nonpublication_allow_only_explicit_retry
         assert delivery.retry_after_seconds == 60
         assert delivery.status == "retryable_failure"
         assert len(adapter.publications) == 1
-        assert (await service.execute(sessions, **kwargs)).status == "published"
+        assert (
+            await service.execute(
+                sessions, **kwargs, execution_id=uuid4(), expected_version=3
+            )
+        ).status == "published"
         first, retry = adapter.publications
         assert first.idempotency_key == retry.idempotency_key
         assert first.attempt.id != retry.attempt.id

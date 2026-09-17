@@ -55,11 +55,17 @@ def sessions(repository_sessions):  # noqa: F811
     return repository_sessions
 
 
-async def prepared(sessions):
-    request, fence = await scheduling_prepared(sessions)
+async def prepared(sessions, *, workspace=None):
+    request, fence = await scheduling_prepared(sessions, workspace=workspace)
     async with sessions.begin() as session:
         await session.execute(
-            update(SocialAccountConnection).values(external_account_id="account-one")
+            update(SocialAccountConnection)
+            .where(SocialAccountConnection.id == request.destination_id)
+            .values(
+                external_account_id=(
+                    f"account-{request.destination_id}" if workspace else "account-one"
+                )
+            )
         )
     return request, fence
 
@@ -75,8 +81,8 @@ async def accept(session, request, fence, **kwargs):
     )
 
 
-async def accepted(sessions):
-    request, fence = await prepared(sessions)
+async def accepted(sessions, *, workspace=None):
+    request, fence = await prepared(sessions, workspace=workspace)
     async with sessions.begin() as session:
         result = await accept(session, request, fence)
         assert isinstance(result, DurableAccepted)
@@ -453,6 +459,8 @@ def test_explicit_retry_preserves_intent_and_unknown_requires_reconciliation(
             sessions,
             workspace_id=scope,
             publication_id=identifier,
+            execution_id=uuid4(),
+            expected_version=2,
             registry=ProviderRegistry(
                 {"instagram": TestProvider(sessions, "exception")}
             ),

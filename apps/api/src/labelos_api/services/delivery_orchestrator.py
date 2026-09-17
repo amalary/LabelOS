@@ -8,7 +8,7 @@ The host supplies an explicit provider registry. No public API is added.
 import hashlib
 import json
 from datetime import UTC, datetime
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid5
 
 from labelos_database.models import SchedulingJob, SocialAccountConnection
 from sqlalchemy import select
@@ -295,22 +295,59 @@ class DeliveryOrchestrator:
         workspace_id: UUID,
         publication_id: UUID,
         registry: ProviderRegistry | None = None,
+        execution_id: UUID | None = None,
+        expected_version: int | None = None,
     ) -> DeliveryResult:
         """One explicit execution, with an unavailable production default.
 
         Start commits before adapter I/O; evidence/history/outbox commit afterwards.
         Unknown start/outcome commits propagate and require scoped readback. There
         is no automatic retry or provider call on an ambiguous start commit.
+
+        A queue must retain execution_id across redelivery. Without one, this is
+        the deterministic initial command, never an implicit retry. A deliberate
+        retry needs a new durable command ID and the observed failure version.
         """
+        explicit_execution_id = execution_id is not None
+        execution_id = (
+            uuid5(publication_id, "labelos:publication:initial:v1")
+            if execution_id is None
+            else execution_id
+        )
+        if not isinstance(execution_id, UUID) or execution_id.int == 0:
+            raise DeliveryIneligible("invalid_execution_id")
+        if expected_version is not None and (
+            type(expected_version) is not int or expected_version < 0
+        ):
+            raise DeliveryIneligible("invalid_expected_version")
         registry = registry if registry is not None else ProviderRegistry()
         async with sessions.begin() as session:
+            repo = PublicationRepository(session, workspace_id)
+            try:
+                await repo.require_unused_execution(execution_id, publication_id)
+            except PublicationConflict as exc:
+                raise DeliveryIneligible(str(exc)) from exc
             context = await self.prepare_execution(
                 SchedulingRepository(session, workspace_id, lateness_window_seconds=0),
                 publication_id,
             )
-            repo = PublicationRepository(session, workspace_id)
+            # Preparation locks source -> job -> destination -> publication. Do
+            # not take a publication lock before it (would invert lock order).
+            try:
+                await repo.require_unused_execution(execution_id, publication_id)
+            except PublicationConflict as exc:
+                raise DeliveryIneligible(str(exc)) from exc
             row = await repo.get(publication_id)
             assert row is not None
+            if (
+                expected_version is not None
+                and expected_version != row.transition_version
+            ):
+                raise DeliveryIneligible("publication_version_conflict")
+            if row.status == "retryable_failure" and (
+                expected_version is None or not explicit_execution_id
+            ):
+                raise DeliveryIneligible("retry_version_required")
             try:
                 adapter = registry.resolve(context.provider)
             except ProviderResolutionError:
@@ -353,7 +390,7 @@ class DeliveryOrchestrator:
                 row.id,
                 expected_version=context.transition_version,
                 operation_id=uuid4(),
-                execution_id=uuid4(),
+                execution_id=execution_id,
                 entry=domain.PublicationTransition(
                     operation=(
                         domain.PublicationOperation.start
@@ -392,6 +429,60 @@ class DeliveryOrchestrator:
             reason_code=result.outcome.value,
             retry_after_seconds=result.retry_after_seconds,
         )
+
+    async def recover_interrupted(
+        self,
+        sessions: async_sessionmaker[AsyncSession],
+        *,
+        workspace_id: UUID,
+        publication_id: UUID,
+        execution_id: UUID,
+        expected_version: int,
+    ) -> DeliveryResult:
+        """Quarantine a stopped executor's committed attempt, without provider I/O.
+
+        Trusted recovery hosts MUST establish that the original executor cannot
+        resume before calling this method. Age, a queue lease expiry, or a network
+        timeout is not proof. This is not a lease takeover or retry authorization.
+        Provider requests may still be settling: reconciliation must prove final
+        noncreation before it can permit a new execution.
+        """
+        async with sessions.begin() as session:
+            repo = PublicationRepository(session, workspace_id)
+            row = await repo.get(publication_id, lock=True)
+            if row is None:
+                raise DeliveryIneligible("publication_missing")
+            if not row.attempts or row.attempts[-1].execution_id != execution_id:
+                raise PublicationConflict("publication_execution_conflict")
+            if row.status in ("published", "manual_action_required"):
+                return DeliveryResult(publication_id=row.id, status=row.status)
+            if row.status not in ("processing", "retrying"):
+                raise DeliveryIneligible("publication_not_recoverable")
+            now = datetime.now(UTC)
+            row = await repo.append(
+                row.id,
+                expected_version=expected_version,
+                operation_id=uuid5(execution_id, "labelos:publication:interrupted:v1"),
+                entry=domain.PublicationTransition(
+                    operation=domain.PublicationOperation.require_manual_action,
+                    occurred_at=now,
+                    evidence=domain.PublicationEvidence(
+                        workspace_id=workspace_id,
+                        publication_id=row.id,
+                        attempt_id=row.attempts[-1].id,
+                        destination_id=row.social_account_connection_id,
+                        outcome=domain.DeliveryOutcome.unknown,
+                        source=domain.EvidenceSource.execution_interrupted,
+                        observed_at=now,
+                        reason=domain.PublicationFailureReason.outcome_unknown,
+                    ),
+                ),
+            )
+            return DeliveryResult(
+                publication_id=row.id,
+                status=row.status,
+                reason_code="reconciliation_required",
+            )
 
     async def reconcile(
         self,

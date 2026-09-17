@@ -1,5 +1,9 @@
 # Publishing Delivery Orchestrator (Stage 3)
 
+Stage 7 adds [durable command identities and crash recovery](publishing-idempotency.md).
+Execution without an ID is now the initial command only; intentional retries need
+a new retained execution UUID and the observed failure version.
+
 Stage 4 replaces the original provider seam with the
 [Provider Adapter Contract](publishing-provider-adapter.md): typed requests/results,
 an empty-by-default registry, local validation, and explicit reconciliation. The

@@ -1,5 +1,9 @@
 # Publishing Delivery database foundation (Stage 2)
 
+Stage 7 [uses these constraints for command deduplication](publishing-idempotency.md)
+without a new migration. Attempt execution IDs now identify retained delivery
+commands, rather than fresh per-invocation correlations.
+
 Stage 3 now supplies the internal [Delivery Orchestrator](delivery-orchestrator.md),
 including atomic acceptance and an immutable destination identity binding. The
 following describes the Stage 2 baseline; deployment remains disabled.

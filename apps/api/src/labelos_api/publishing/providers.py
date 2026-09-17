@@ -124,7 +124,10 @@ _FAILURES = frozenset(
 class ProviderResult:
     """No raw response, exception message, arbitrary metadata or credentials.
 
-    Failures require authoritative nonpublication. unsupported describes only the
+    Failures require authoritative FINAL nonpublication: the original request
+    cannot later create a resource. A transient lookup miss, eventual-consistency
+    gap, expired receipt, or still-running request is not confirmed_absent.
+    unsupported describes only the
     requested operation and makes no claim about an earlier publication.
     If a request might have had a
     side effect, return ambiguous instead. accepted means unfinished external work,

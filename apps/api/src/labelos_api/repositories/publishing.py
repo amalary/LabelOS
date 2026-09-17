@@ -139,6 +139,28 @@ class PublicationRepository:
         )
         return await self.get(identifier) if identifier else None
 
+    async def require_unused_execution(
+        self, execution_id: UUID, publication_id: UUID
+    ) -> None:
+        """Reject consumed commands, including commands whose attempt failed.
+
+        Call again under the prepared publication lock before starting. The
+        workspace/execution unique constraint also rejects cross-publication
+        races at flush/commit, before any external call.
+        """
+        existing = await self.session.scalar(
+            select(PublicationAttempt.publication_id).where(
+                PublicationAttempt.workspace_id == self.workspace_id,
+                PublicationAttempt.execution_id == execution_id,
+            )
+        )
+        if existing is not None:
+            raise PublicationConflict(
+                "execution_already_started"
+                if existing == publication_id
+                else "execution_identity_conflict"
+            )
+
     async def create(
         self,
         request: DeliveryAcceptanceRequest,
@@ -185,6 +207,7 @@ class PublicationRepository:
             if (
                 existing.payload_fingerprint != request.payload_fingerprint
                 or existing.canonical_envelope != canonical
+                or existing.destination_identity != destination_identity
             ):
                 raise PublicationConflict("publication_payload_conflict")
             return existing

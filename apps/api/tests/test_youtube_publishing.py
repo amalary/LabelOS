@@ -261,11 +261,12 @@ def context_for(row):
     )
 
 
-async def execute(sessions, adapter, request):
+async def execute(sessions, adapter, request, **command):
     return await DeliveryOrchestrator().execute(
         sessions,
         workspace_id=request.workspace_id,
         publication_id=request.publication_id,
+        **command,
         registry=ProviderRegistry({"youtube": adapter}),
     )
 
@@ -608,7 +609,11 @@ def test_explicit_retry_only_after_confirmed_rejection(sessions, monkeypatch):
         network.upload_response = api_error(403, "quotaExceeded")
         assert (await execute(sessions, adapter, request)).status == "retryable_failure"
         network.upload_response = httpx.Response(200, json=success())
-        assert (await execute(sessions, adapter, request)).status == "published"
+        assert (
+            await execute(
+                sessions, adapter, request, execution_id=uuid4(), expected_version=2
+            )
+        ).status == "published"
         async with sessions() as session:
             row = await PublicationRepository(session, request.workspace_id).get(
                 request.publication_id
@@ -1070,7 +1075,11 @@ def test_stage6_backend_recovery_clears_health(sessions, monkeypatch):
         store.fail_operations.add("get")
         assert (await execute(sessions, adapter, request)).status == "retryable_failure"
         store.fail_operations.clear()
-        assert (await execute(sessions, adapter, request)).status == "published"
+        assert (
+            await execute(
+                sessions, adapter, request, execution_id=uuid4(), expected_version=2
+            )
+        ).status == "published"
         async with sessions() as session:
             row = await session.get(SocialAccountConnection, request.destination_id)
             assert row.status == "limited"
@@ -1162,7 +1171,11 @@ def test_stage6_real_delivery_preparation_and_backend_recovery(
         assert (await execute(sessions, adapter, request)).status == "retryable_failure"
         assert not network.calls
         store.fail_operations.clear()
-        assert (await execute(sessions, adapter, request)).status == "published"
+        assert (
+            await execute(
+                sessions, adapter, request, execution_id=uuid4(), expected_version=2
+            )
+        ).status == "published"
         assert len(network.uploads) == 1
 
     asyncio.run(run())
