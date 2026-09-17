@@ -18,6 +18,7 @@ import {
 } from "../social-account-connections";
 import { clearCampaignCalendarCache, useCampaignCalendar } from "../campaign-calendar";
 import { activityEventTypes, refetchEventTypes } from "./events";
+import { subscribeSchedulingUpdates } from "../scheduling";
 import {
   shouldInvalidateProfileRealtimeCacheKey,
   useOrganizationRealtime,
@@ -235,6 +236,24 @@ function marketingContentRealtimeEvent(type: string, status: string) {
 }
 
 describe("useOrganizationRealtime", () => {
+  it("refreshes publication inspectors only for delivery events in the active workspace", () => {
+    const listener = vi.fn();
+    const unsubscribe = subscribeSchedulingUpdates(listener);
+    try {
+      render(<RealtimeProbe />);
+      const source = FakeEventSource.instances[0]!;
+      act(() => {
+        source.emit("message", realtimeEvent("marketing.publication.changed", "org_02"));
+        source.emit("message", realtimeEvent("marketing.publication.changed"));
+        source.emit("message", realtimeEvent("marketing.publication.changed"));
+      });
+      expect(listener).toHaveBeenCalledExactlyOnceWith("org_01", "content_01");
+      expect(navigation.refresh).not.toHaveBeenCalled();
+    } finally {
+      unsubscribe();
+    }
+  });
+
   beforeEach(() => {
     clearApprovalCache();
     clearAnalyticsCache();

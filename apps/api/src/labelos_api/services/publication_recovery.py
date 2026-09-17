@@ -11,7 +11,7 @@ from labelos_database.models import (
     RealtimeEvent,
     SocialAccountConnection,
 )
-from labelos_database.publishing import PublicResourceURL
+from labelos_database.publishing import REASONS, PublicResourceURL
 from sqlalchemy import select
 
 from labelos_api.publishing.recovery import (
@@ -267,9 +267,60 @@ class PublicationRecoveryService:
             row.failure_category
         )
         completion = latest_action(row) if state == "manually_completed" else None
+        # Project only normalized journal evidence. Never include provider responses,
+        # execution credentials, the canonical envelope, or arbitrary metadata.
+        failures = [t for t in row.transitions if t.failure_reason in REASONS]
+        attempts = []
+        for attempt in row.attempts:
+            observations = [t for t in attempt.observations if t.outcome]
+            latest = observations[-1] if observations else None
+            attempts.append(
+                {
+                    "id": attempt.id,
+                    "number": attempt.number,
+                    "started_at": attempt.started_at,
+                    "completed_at": attempt.completed_at,
+                    "outcome": attempt.outcome,
+                    "failure_reason": (
+                        latest.failure_reason
+                        if latest and latest.failure_reason in REASONS
+                        else None
+                    ),
+                    "external_post_id": latest.external_post_id if latest else None,
+                    "observations": [
+                        {
+                            "version": t.version,
+                            "observed_at": t.observed_at,
+                            "outcome": t.outcome,
+                            "source": t.source,
+                            "failure_reason": (
+                                t.failure_reason
+                                if t.failure_reason in REASONS
+                                else None
+                            ),
+                        }
+                        for t in observations
+                    ],
+                }
+            )
         return {
             "id": row.id,
             "workspace_id": row.workspace_id,
+            "content_item_id": row.marketing_content_item_id,
+            "channel_id": row.marketing_content_item_channel_id,
+            "artist_profile_id": envelope.get("artist_profile_id"),
+            "scheduling_job_id": row.scheduling_job_id,
+            "schedule_generation": row.schedule_generation,
+            "origin": "scheduled",
+            "created_at": row.created_at,
+            "started_at": row.attempts[0].started_at if row.attempts else None,
+            "published_at": row.published_at,
+            "last_failed_at": failures[-1].observed_at if failures else None,
+            "latest_failure_reason": failures[-1].failure_reason if failures else None,
+            "manual_completed_at": completion.occurred_at if completion else None,
+            "next_retry_at": row.next_retry_at,
+            "attempt_count": len(attempts),
+            "attempts": attempts,
             "delivery_status": row.status,
             "resolution": state,
             "completion_source": (
