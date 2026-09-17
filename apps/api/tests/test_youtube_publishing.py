@@ -13,7 +13,12 @@ from uuid import uuid4
 import httpx
 import pytest
 from labelos_database.models import (
+    MarketingContentItem,
+    Publication,
+    PublicationAttempt,
+    PublicationTransition,
     RealtimeEvent,
+    SchedulingJob,
     SocialAccountConnection,
 )
 from sqlalchemy import select, update
@@ -33,6 +38,7 @@ from labelos_api.publishing.youtube import YouTubePublishingAdapter
 from labelos_api.repositories.publishing import PublicationRepository
 from labelos_api.repositories.scheduling import snapshot_for
 from labelos_api.scheduling.payload import canonical_json, prepare_request
+from labelos_api.services import social_account_service as accounts
 from labelos_api.services.credential_store import (
     CredentialPayload,
     InMemoryCredentialStore,
@@ -41,6 +47,7 @@ from labelos_api.services.delivery_orchestrator import (
     DeliveryIneligible,
     DeliveryOrchestrator,
 )
+from labelos_api.social_accounts.providers import SocialAccountProviderErrorCode as Code
 from labelos_api.social_accounts.providers import (
     SocialAccountProviderRegistry,
     YouTubeDirectProviderConfig,
@@ -734,6 +741,489 @@ def test_oversize_and_multiple_assets_fail_before_credentials(sessions, monkeypa
         ]:
             result = await adapter.publish(replace(request, media=assets))
             assert result.outcome == Outcome.permanent_failure
+        assert not network.calls
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "condition,status,code,outcome",
+    [
+        (
+            "missing_reference",
+            "reconnect_required",
+            "credential_missing",
+            Outcome.authorization_required,
+        ),
+        (
+            "missing_secret",
+            "reconnect_required",
+            "credential_missing",
+            Outcome.authorization_required,
+        ),
+        (
+            "invalid_reference",
+            "reconnect_required",
+            "credential_missing",
+            Outcome.authorization_required,
+        ),
+        ("backend_down", "limited", "provider_unavailable", Outcome.retryable_failure),
+        (
+            "no_refresh",
+            "reconnect_required",
+            "credential_expired",
+            Outcome.authorization_required,
+        ),
+        (
+            "revoked",
+            "reconnect_required",
+            "credential_revoked",
+            Outcome.authorization_required,
+        ),
+        (
+            "refresh_denied",
+            "reconnect_required",
+            "refresh_failed",
+            Outcome.authorization_required,
+        ),
+        (
+            "refresh_timeout",
+            "limited",
+            "provider_unavailable",
+            Outcome.retryable_failure,
+        ),
+        ("refresh_503", "limited", "provider_unavailable", Outcome.retryable_failure),
+        ("refresh_rate_limit", "limited", "rate_limited", Outcome.rate_limited),
+        (
+            "refresh_malformed",
+            "limited",
+            "provider_unavailable",
+            Outcome.retryable_failure,
+        ),
+        ("replace_down", "limited", "provider_unavailable", Outcome.retryable_failure),
+        (
+            "missing_scope",
+            "limited",
+            "insufficient_scope",
+            Outcome.authorization_required,
+        ),
+        (
+            "reduced_scope",
+            "limited",
+            "insufficient_scope",
+            Outcome.authorization_required,
+        ),
+        (
+            "empty_scope",
+            "limited",
+            "insufficient_scope",
+            Outcome.authorization_required,
+        ),
+        (
+            "identity_401",
+            "reconnect_required",
+            "authorization_failed",
+            Outcome.authorization_required,
+        ),
+        (
+            "upload_401",
+            "reconnect_required",
+            "authorization_failed",
+            Outcome.authorization_required,
+        ),
+        (
+            "upload_scope",
+            "limited",
+            "insufficient_scope",
+            Outcome.authorization_required,
+        ),
+    ],
+)
+def test_stage6_health_and_secret_safe_persistence(
+    sessions, monkeypatch, caplog, condition, status, code, outcome
+):
+    async def run():
+        expired = condition in {
+            "no_refresh",
+            "revoked",
+            "refresh_denied",
+            "refresh_timeout",
+            "refresh_503",
+            "refresh_rate_limit",
+            "refresh_malformed",
+            "replace_down",
+            "reduced_scope",
+            "empty_scope",
+        }
+        adapter, request, network, store, _ = await setup(
+            sessions,
+            monkeypatch,
+            expired=expired,
+            values={"refresh_token": ""} if condition == "no_refresh" else {},
+            connection_values=(
+                {"credential_ref": None} if condition == "missing_reference" else {}
+            ),
+        )
+        connection = await adapter._connection(request)
+        ref = connection.credential_ref
+        if condition == "missing_secret":
+            await store.delete(ref)
+        elif condition == "invalid_reference":
+            from labelos_api.services.credential_store import (
+                InvalidCredentialReferenceError,
+            )
+
+            async def invalid(_):
+                raise InvalidCredentialReferenceError()
+
+            monkeypatch.setattr(store, "get", invalid)
+        elif condition in {"backend_down", "replace_down"}:
+            store.fail_operations.add(
+                "get" if condition == "backend_down" else "replace"
+            )
+        elif condition == "missing_scope":
+            values = (await store.get(ref)).expose()
+            await store.replace(ref, CredentialPayload({**values, "scope": ""}))
+        elif condition in {"revoked", "refresh_denied"}:
+            network.refresh_response = httpx.Response(
+                400,
+                json={
+                    "error": (
+                        "invalid_grant" if condition == "revoked" else "invalid_client"
+                    ),
+                    "error_description": RAW,
+                },
+            )
+        elif condition == "refresh_timeout":
+            network.refresh_response = httpx.ReadTimeout(RAW)
+        elif condition in {"refresh_503", "refresh_rate_limit"}:
+            network.refresh_response = httpx.Response(
+                503 if condition == "refresh_503" else 429
+            )
+        elif condition == "refresh_malformed":
+            network.refresh_response = httpx.Response(200, content=RAW.encode())
+        elif condition in {"reduced_scope", "empty_scope"}:
+            network.refresh_response = httpx.Response(
+                200,
+                json={
+                    "access_token": "NEW_ACCESS",
+                    "expires_in": 3600,
+                    "scope": (
+                        OAuthProvider.SCOPE_YOUTUBE_READONLY
+                        if condition == "reduced_scope"
+                        else ""
+                    ),
+                },
+            )
+        elif condition == "identity_401":
+            network.identity_response = api_error(401, "authError")
+        elif condition in {"upload_401", "upload_scope"}:
+            network.upload_response = api_error(
+                401 if condition == "upload_401" else 403,
+                "authError" if condition == "upload_401" else "insufficientPermissions",
+            )
+        result = await execute(sessions, adapter, request)
+        assert result.reason_code == outcome.value
+        assert len(network.uploads) == (1 if condition.startswith("upload_") else 0)
+        async with sessions() as session:
+            row = await session.get(SocialAccountConnection, request.destination_id)
+            assert row.status == status
+            assert row.last_error_code == code
+            assert row.last_health_checked_at is not None
+            if code == "insufficient_scope":
+                assert "content_publish" not in row.capabilities
+            assert row.external_account_id == CHANNEL
+            assert row.credential_ref == ref
+            stored = repr(result) + caplog.text
+            for model in (
+                Publication,
+                PublicationAttempt,
+                PublicationTransition,
+                RealtimeEvent,
+            ):
+                records = (await session.execute(select(model.__table__))).all()
+                stored += repr(records)
+            stored += repr([row.last_error_message, row.provider_metadata])
+            for secret in (
+                ACCESS,
+                REFRESH,
+                RAW,
+                "NEW_ACCESS",
+                "CLIENT_SECRET_SENTINEL",
+                ref,
+            ):
+                if secret:
+                    assert secret not in stored
+            assert not any(
+                "credential" in column.name or "token" in column.name
+                for model in (Publication, PublicationAttempt, PublicationTransition)
+                for column in model.__table__.columns
+            )
+
+    caplog.set_level(logging.INFO)
+    caplog.set_level(logging.DEBUG, logger="labelos_api")
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"status": "disconnected"},
+        {"status": "pending"},
+        {"status": "error"},
+        {"status": "reconnect_required"},
+        {"capabilities": []},
+        {"last_error_code": "credential_revoked"},
+    ],
+)
+def test_stage6_disabled_connections_never_read_secrets(sessions, monkeypatch, change):
+    async def run():
+        adapter, request, network, store, _ = await setup(
+            sessions,
+            monkeypatch,
+            connection_values=change,
+        )
+
+        async def forbidden(_):
+            pytest.fail("unusable connection accessed credential backend")
+
+        monkeypatch.setattr(store, "get", forbidden)
+        assert (
+            await adapter.publish(request)
+        ).outcome == Outcome.authorization_required
+        assert not network.calls
+        async with sessions() as session:
+            row = await session.get(SocialAccountConnection, request.destination_id)
+            assert row.last_health_checked_at is None
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"status": "disconnected"},
+        {"external_account_id": "replacement"},
+        {"credential_ref": "memory://replacement"},
+        {"capabilities": []},
+    ],
+)
+@pytest.mark.parametrize(
+    "observation", [None, Code.credential_revoked, Code.insufficient_scope]
+)
+def test_stage6_stale_health_does_not_overwrite_connection(
+    sessions, monkeypatch, change, observation
+):
+    async def run():
+        adapter, request, _, _, _ = await setup(sessions, monkeypatch)
+        snapshot = await adapter._connection(request)
+        async with sessions.begin() as session:
+            await session.execute(
+                update(SocialAccountConnection)
+                .where(
+                    SocialAccountConnection.id == request.destination_id,
+                )
+                .values(**change)
+            )
+        await adapter._accounts.observe(snapshot, observation)
+        async with sessions() as session:
+            row = await session.get(SocialAccountConnection, request.destination_id)
+            for key, value in change.items():
+                assert getattr(row, key) == value
+            assert row.last_health_checked_at is None
+            assert row.last_error_code is None
+
+    asyncio.run(run())
+
+
+def test_stage6_workspace_attack_cannot_access_or_change_health(sessions, monkeypatch):
+    async def run():
+        adapter, request, network, store, _ = await setup(sessions, monkeypatch)
+        snapshot = await adapter._connection(request)
+
+        async def forbidden(_):
+            pytest.fail("cross-workspace request read credentials")
+
+        monkeypatch.setattr(store, "get", forbidden)
+        foreign = uuid4()
+        assert (
+            await adapter.publish(replace(request, workspace_id=foreign))
+        ).outcome == Outcome.authorization_required
+        async with sessions() as session:
+            assert not await accounts.record_execution_health(
+                session,
+                expected=replace(snapshot, workspace_id=foreign),
+                error_code=Code.credential_revoked,
+            )
+        assert not network.calls
+        async with sessions() as session:
+            row = await session.get(SocialAccountConnection, request.destination_id)
+            assert row.status == "limited"
+            assert row.last_health_checked_at is None
+
+    asyncio.run(run())
+
+
+def test_stage6_backend_recovery_clears_health(sessions, monkeypatch):
+    async def run():
+        adapter, request, _, store, _ = await setup(sessions, monkeypatch)
+        store.fail_operations.add("get")
+        assert (await execute(sessions, adapter, request)).status == "retryable_failure"
+        store.fail_operations.clear()
+        assert (await execute(sessions, adapter, request)).status == "published"
+        async with sessions() as session:
+            row = await session.get(SocialAccountConnection, request.destination_id)
+            assert row.status == "limited"
+            assert row.last_error_code is None
+            assert row.last_error_message is None
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "response", [api_error(401, "authError"), httpx.Response(200, json=success())]
+)
+def test_stage6_health_storage_failure_preserves_delivery_evidence(
+    sessions, monkeypatch, response
+):
+    async def run():
+        from sqlalchemy.exc import OperationalError
+
+        adapter, request, network, _, _ = await setup(sessions, monkeypatch)
+        network.upload_response = response
+
+        async def unavailable(*args, **kwargs):
+            raise OperationalError(RAW, {}, Exception(ACCESS))
+
+        monkeypatch.setattr(accounts, "record_execution_health", unavailable)
+        result = await execute(sessions, adapter, request)
+        assert result.reason_code == (
+            "published" if response.status_code == 200 else "authorization_required"
+        )
+        assert len(network.uploads) == 1
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("expired", [False, True])
+def test_stage6_real_delivery_preparation_and_backend_recovery(
+    sessions, monkeypatch, expired
+):
+    async def run():
+        from labelos_database.models import MarketingContentItemChannel
+        from labelos_database.scheduling import SchedulingUTCDateTime
+
+        # SQLite drops timezone information from the legacy channel timestamp.
+        # Match PostgreSQL's UTC read semantics without replacing business checks.
+        monkeypatch.setattr(
+            MarketingContentItemChannel.__table__.c.scheduled_at,
+            "type",
+            SchedulingUTCDateTime(),
+        )
+        prepare_execution = DeliveryOrchestrator.prepare_execution
+        adapter, request, network, store, _ = await setup(
+            sessions,
+            monkeypatch,
+            expired=expired,
+        )
+        monkeypatch.setattr(
+            DeliveryOrchestrator, "prepare_execution", prepare_execution
+        )
+        # Seed a durably accepted Scheduling source. Execution preparation,
+        # source authorization, credential checks and evidence persistence are real.
+        # This SQLite test does not claim to validate PostgreSQL lock semantics.
+        async with sessions.begin() as session:
+            publication = await PublicationRepository(
+                session, request.workspace_id
+            ).get(request.publication_id)
+            await session.execute(
+                update(MarketingContentItem)
+                .where(
+                    MarketingContentItem.id == publication.marketing_content_item_id,
+                )
+                .values(
+                    status="approved",
+                    approved_revision=1,
+                    approval_request_id=publication.approval_request_id,
+                )
+            )
+            await session.execute(
+                update(SchedulingJob)
+                .where(
+                    SchedulingJob.id == publication.scheduling_job_id,
+                )
+                .values(
+                    status="handed_off",
+                    handed_off_at=datetime.now(UTC),
+                    handoff_receipt_id=publication.receipt_id,
+                )
+            )
+        store.fail_operations.add("get")
+        assert (await execute(sessions, adapter, request)).status == "retryable_failure"
+        assert not network.calls
+        store.fail_operations.clear()
+        assert (await execute(sessions, adapter, request)).status == "published"
+        assert len(network.uploads) == 1
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("expiry", [None, datetime.now(UTC) + timedelta(seconds=30)])
+def test_stage6_unknown_or_near_expiry_refreshes(sessions, monkeypatch, expiry):
+    async def run():
+        adapter, request, network, _, _ = await setup(
+            sessions,
+            monkeypatch,
+            connection_values={"token_expires_at": expiry},
+        )
+        assert (await adapter.publish(request)).outcome == Outcome.published
+        assert network.calls[0].url.path == "/token"
+        assert len(network.uploads) == 1
+
+    asyncio.run(run())
+
+
+def test_stage6_revocation_observed_during_reconnect_is_stale(sessions, monkeypatch):
+    async def run():
+        adapter, request, network, _, _ = await setup(
+            sessions, monkeypatch, expired=True
+        )
+
+        async def reconnect():
+            async with sessions.begin() as session:
+                await session.execute(
+                    update(SocialAccountConnection)
+                    .where(
+                        SocialAccountConnection.id == request.destination_id,
+                    )
+                    .values(credential_ref="memory://replacement")
+                )
+
+        network.on_refresh = reconnect
+        network.refresh_response = httpx.Response(400, json={"error": "invalid_grant"})
+        assert (
+            await adapter.publish(request)
+        ).outcome == Outcome.authorization_required
+        assert not network.uploads
+        async with sessions() as session:
+            connection = await session.get(
+                SocialAccountConnection, request.destination_id
+            )
+            assert connection.status == "limited"
+            assert connection.credential_ref == "memory://replacement"
+            assert connection.last_error_code is None
+
+    asyncio.run(run())
+
+
+def test_stage6_ephemeral_credentials_exclude_refresh_material(sessions, monkeypatch):
+    async def run():
+        adapter, request, network, _, _ = await setup(sessions, monkeypatch)
+        connection = await adapter._connection(request)
+        _, credential = await adapter._accounts.credentials(connection)
+        assert credential.expose() == {"access_token": ACCESS}
+        for secret in (ACCESS, REFRESH, connection.credential_ref, CHANNEL):
+            assert secret not in repr(connection) + repr(credential)
         assert not network.calls
 
     asyncio.run(run())

@@ -234,6 +234,12 @@ def evaluate_channel_eligibility(
                 workspace_id=workspace_id,
                 provider=channel.channel,
                 artist_id=effective_artist_id,
+                desired_capability=(
+                    "content_publish"
+                    if execution_mode == SchedulingExecutionMode.automatic
+                    and "content_publish" in (connection.capabilities or [])
+                    else None
+                ),
             )
             if any(
                 _DESTINATION_REASONS[reason] == "destination_mismatch"

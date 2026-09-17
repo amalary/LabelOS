@@ -40,8 +40,9 @@ playlist changes, thumbnails, updates and deletions are not supported here.
 4. Expired, unknown-expiry, or nearly expired credentials refresh through
    `YouTubeDirectSocialAccountConnectionProvider.refresh_credentials`. That existing
    implementation handles the Google token endpoint, refresh-token preservation,
-   and credential replacement. A short conditional SQL update persists expiry and
-   scope-derived capabilities only if the connection version/reference still match.
+   and credential replacement. Stage 6 delegates readiness and guarded expiry,
+   capability and health persistence to the canonical Social Accounts execution
+   service. The publishing adapter no longer directly updates connection SQL.
    No management API authorization is bypassed or relaxed.
 5. `channels.list(part=id,mine=true)` verifies the exact upload access token against
    the retained channel. Cached connection metadata is insufficient. The connection
@@ -104,8 +105,8 @@ inspection; the Stage 3 interrupted-attempt recovery rules still apply.
 - `external_post_id` in Publication, normalized evidence/transition, and the attempt
   observation: the authoritative YouTube video ID.
 - Existing destination ID/fingerprint and normalized lifecycle/failure reason.
-- Connection refresh updates only its existing credential reference's contents,
-  SQL expiry, and scope-derived capabilities.
+- Connection refresh uses its existing credential reference's contents, SQL expiry,
+  scope-derived capabilities and canonical connection health/events.
 
 No raw provider metadata, response bodies, error messages, token values, authorization
 headers, credential copies, or upload URLs are logged or added to publishing SQL or
@@ -133,8 +134,10 @@ await orchestrator.execute(
 
 Only a configured direct YouTube OAuth adapter with a credential store registers.
 Assisted connections and other providers do not get fallback publishing support.
-Omitting a registry continues to fail closed. Stage 6 can integrate this factory
-with its trusted execution host; this stage does not enable an unattended worker.
+Omitting a registry continues to fail closed. See the
+[Stage 6 connection-health integration](publishing-connection-health.md) for current
+credential readiness, canonical health transitions and Stage 7 boundaries. This
+integration does not enable an unattended worker.
 
 Production rollout still requires configured OAuth/upload consent, Google project
 verification where applicable, a real media smoke test, and an operator procedure

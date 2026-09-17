@@ -8,13 +8,10 @@ No upload URLs, tokens, raw errors or response metadata cross this boundary.
 import hashlib
 import json
 import re
-from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import httpx
-from labelos_database.models import SocialAccountConnection
-from sqlalchemy import select, update
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from labelos_api.publishing.providers import (
@@ -23,15 +20,16 @@ from labelos_api.publishing.providers import (
     ProviderResult,
     PublicationRequest,
 )
-from labelos_api.scheduling.payload import MAX_ASSET_BYTES, canonical_json
-from labelos_api.services.credential_store import (
-    CredentialNotFoundError,
-    CredentialStoreError,
-    InvalidCredentialReferenceError,
+from labelos_api.scheduling.payload import MAX_ASSET_BYTES
+from labelos_api.services.social_account_execution import (
+    ExecutionCredentialError,
+    SocialAccountExecution,
+)
+from labelos_api.services.social_account_service import ExecutionConnectionError
+from labelos_api.social_accounts.providers import (
+    SocialAccountProviderErrorCode as Code,
 )
 from labelos_api.social_accounts.providers import (
-    SocialAccountProviderError,
-    SocialAccountProviderErrorCode,
     YouTubeDirectSocialAccountConnectionProvider,
 )
 
@@ -47,20 +45,6 @@ _REQUIRED_SCOPES = frozenset(
 
 def _failure(outcome: ProviderOutcome) -> ProviderResult:
     return ProviderResult(outcome=outcome, confirmed_absent=True)
-
-
-class _NotReady(Exception):
-    def __init__(self, outcome: ProviderOutcome):
-        super().__init__("youtube_connection_not_ready")
-        self.outcome = outcome
-
-
-@dataclass(frozen=True, repr=False)
-class _Connection:
-    credential_ref: str
-    external_account_id: str
-    token_expires_at: datetime | None
-    updated_at: datetime
 
 
 class YouTubePublishingAdapter:
@@ -79,6 +63,12 @@ class YouTubePublishingAdapter:
         self._connection_provider = connection_provider
         self._store = connection_provider.credential_store
         self._http_client = http_client
+        self._accounts = SocialAccountExecution(
+            sessions=sessions,
+            provider=connection_provider,
+            credential_store=self._store,
+            required_scopes=_REQUIRED_SCOPES,
+        )
 
     def validate(self, request: PublicationRequest) -> ProviderResult | None:
         if (
@@ -108,90 +98,12 @@ class YouTubePublishingAdapter:
             return _failure(ProviderOutcome.permanent_failure)
         return None
 
-    async def _connection(self, request: PublicationRequest) -> _Connection:
-        # Deliberately select only connection fields, without relationship loads.
-        # Close the transaction before any credential-store or provider I/O.
-        async with self._sessions() as session:
-            row = (
-                await session.execute(
-                    select(
-                        SocialAccountConnection.provider,
-                        SocialAccountConnection.connection_method,
-                        SocialAccountConnection.status,
-                        SocialAccountConnection.capabilities,
-                        SocialAccountConnection.credential_ref,
-                        SocialAccountConnection.external_account_id,
-                        SocialAccountConnection.token_expires_at,
-                        SocialAccountConnection.updated_at,
-                    ).where(
-                        SocialAccountConnection.organization_id == request.workspace_id,
-                        SocialAccountConnection.id == request.destination_id,
-                    )
-                )
-            ).one_or_none()
-        if (
-            row is None
-            or row.provider != "youtube"
-            or row.connection_method != "direct_api"
-            or row.status not in {"connected", "limited"}
-            or "content_publish" not in (row.capabilities or [])
-            or not row.credential_ref
-            or not row.external_account_id
-            or hashlib.sha256(
-                canonical_json([row.provider, row.external_account_id])
-            ).hexdigest()
-            != request.destination_identity
-        ):
-            raise _NotReady(ProviderOutcome.authorization_required)
-        return _Connection(
-            row.credential_ref,
-            row.external_account_id,
-            row.token_expires_at,
-            row.updated_at,
+    async def _connection(self, request: PublicationRequest):
+        return await self._accounts.connection(
+            workspace_id=request.workspace_id,
+            destination_id=request.destination_id,
+            destination_identity=request.destination_identity,
         )
-
-    async def _credentials(self, connection: _Connection) -> dict:
-        values = (await self._store.get(connection.credential_ref)).expose()
-        scope = values.get("scope")
-        if (
-            not isinstance(scope, str)
-            or not _REQUIRED_SCOPES.issubset(scope.split())
-            or str(values.get("token_type", "Bearer")).lower() != "bearer"
-        ):
-            raise _NotReady(ProviderOutcome.authorization_required)
-        return values
-
-    async def _refresh(
-        self, request: PublicationRequest, connection: _Connection
-    ) -> _Connection:
-        # Use the existing token endpoint, refresh semantics and secret replacement.
-        refreshed = await self._connection_provider.refresh_credentials(
-            credential_ref=connection.credential_ref
-        )
-        if refreshed.credential_ref != connection.credential_ref:
-            raise _NotReady(ProviderOutcome.authorization_required)
-        async with self._sessions.begin() as session:
-            updated = await session.scalar(
-                update(SocialAccountConnection)
-                .where(
-                    SocialAccountConnection.organization_id == request.workspace_id,
-                    SocialAccountConnection.id == request.destination_id,
-                    SocialAccountConnection.updated_at == connection.updated_at,
-                    SocialAccountConnection.credential_ref == connection.credential_ref,
-                    SocialAccountConnection.external_account_id
-                    == connection.external_account_id,
-                )
-                .values(
-                    token_expires_at=refreshed.token_expires_at,
-                    capabilities=self._connection_provider.capabilities_for_scopes(
-                        refreshed.granted_scopes
-                    ),
-                )
-                .returning(SocialAccountConnection.id)
-            )
-            if updated is None:
-                raise _NotReady(ProviderOutcome.authorization_required)
-        return await self._connection(request)
 
     async def publish(self, request: PublicationRequest) -> ProviderResult:
         rejection = self.validate(request)
@@ -200,16 +112,11 @@ class YouTubePublishingAdapter:
         write_started = False
         try:
             connection = await self._connection(request)
-            values = await self._credentials(connection)
-            expiry = connection.token_expires_at
-            if expiry is not None and expiry.tzinfo is None:
-                expiry = expiry.replace(tzinfo=UTC)
-            if expiry is None or expiry <= datetime.now(UTC) + timedelta(seconds=60):
-                connection = await self._refresh(request, connection)
-                values = await self._credentials(connection)
-            token = values.get("access_token")
-            if not isinstance(token, str) or not token.strip():
+            connection, credentials = await self._accounts.credentials(connection)
+            # Check again after refresh/store I/O before using the token externally.
+            if await self._connection(request) != connection:
                 return _failure(ProviderOutcome.authorization_required)
+            token = credentials.expose()["access_token"]
             headers = {"Authorization": f"Bearer {token}"}
             # Bind this exact access token to the retained channel, never cached
             # provider_metadata (the connection provider can return cached identity).
@@ -220,7 +127,9 @@ class YouTubePublishingAdapter:
                 params={"part": "id", "mine": "true", "maxResults": "2"},
             )
             if identity.status_code != 200:
-                return _http_failure(identity, write_started=False)
+                result = _http_failure(identity, write_started=False)
+                await self._observe_http(connection, identity, result)
+                return result
             body = _json_object(identity)
             items = body.get("items")
             if (
@@ -230,6 +139,7 @@ class YouTubePublishingAdapter:
                 or items[0].get("id") != connection.external_account_id
                 or body.get("nextPageToken")
             ):
+                await self._accounts.observe(connection, Code.authorization_failed)
                 return _failure(ProviderOutcome.authorization_required)
             # Detect reconnect/disconnect/replacement during credential I/O.
             if await self._connection(request) != connection:
@@ -244,7 +154,9 @@ class YouTubePublishingAdapter:
                 content=content,
             )
             if response.status_code not in {200, 201}:
-                return _http_failure(response, write_started=True)
+                result = _http_failure(response, write_started=True)
+                await self._observe_http(connection, response, result)
+                return result
             body = _json_object(response)
             video_id = body.get("id")
             snippet = body.get("snippet")
@@ -261,27 +173,37 @@ class YouTubePublishingAdapter:
                 or status.get("privacyStatus") not in ("public", "private", "unlisted")
             ):
                 return ProviderResult(outcome=ProviderOutcome.ambiguous)
+            await self._accounts.observe(connection, None)
             return ProviderResult(
                 outcome=ProviderOutcome.published, external_post_id=video_id
             )
-        except _NotReady as exc:
-            return _failure(exc.outcome)
-        except (CredentialNotFoundError, InvalidCredentialReferenceError):
+        except ExecutionConnectionError:
             return _failure(ProviderOutcome.authorization_required)
-        except SocialAccountProviderError as exc:
-            if exc.code == SocialAccountProviderErrorCode.rate_limited:
+        except ExecutionCredentialError as exc:
+            if exc.code == Code.rate_limited:
                 return _failure(ProviderOutcome.rate_limited)
             if exc.code in {
-                SocialAccountProviderErrorCode.provider_unavailable,
-                SocialAccountProviderErrorCode.malformed_provider_response,
+                Code.provider_unavailable,
+                Code.third_party_service_unavailable,
             }:
                 return _failure(ProviderOutcome.retryable_failure)
             return _failure(ProviderOutcome.authorization_required)
-        except (CredentialStoreError, httpx.HTTPError, ValueError):
+        except (httpx.HTTPError, ValueError, SQLAlchemyError):
             # A timeout/invalid response after sending media cannot prove absence.
             if write_started:
                 return ProviderResult(outcome=ProviderOutcome.ambiguous)
             return _failure(ProviderOutcome.retryable_failure)
+
+    async def _observe_http(self, connection, response, result):
+        # Only normalized, authoritative authentication failures affect health.
+        # Unknown post-write errors retain ambiguous delivery evidence.
+        if result.outcome == ProviderOutcome.authorization_required:
+            code = (
+                Code.insufficient_scope
+                if "insufficientPermissions" in _error_reasons(response)
+                else Code.authorization_failed
+            )
+            await self._accounts.observe(connection, code)
 
     async def _request(self, method: str, url: str, **kwargs) -> httpx.Response:
         # No redirects and no transport retries. Use MockTransport in tests.
@@ -339,18 +261,22 @@ def _json_object(response: httpx.Response) -> dict:
     return value
 
 
-def _http_failure(response: httpx.Response, *, write_started: bool) -> ProviderResult:
-    # Only documented, structured Google rejection reasons prove no video was
-    # created by the sole insert request. Never retain Google's message/details.
+def _error_reasons(response: httpx.Response) -> set:
+    # Never retain Google's messages/details, including malformed error bodies.
     try:
         error = _json_object(response).get("error")
-        reasons = (
+        return (
             {entry.get("reason") for entry in error.get("errors", [])}
             if isinstance(error, dict) and error.get("code") == response.status_code
             else set()
         )
     except (ValueError, TypeError, AttributeError):
-        reasons = set()
+        return set()
+
+
+def _http_failure(response: httpx.Response, *, write_started: bool) -> ProviderResult:
+    # Only structured Google rejections establish noncreation after upload starts.
+    reasons = _error_reasons(response)
     outcome = None
     if response.status_code in {400, 403, 429} and reasons & {
         "quotaExceeded",
