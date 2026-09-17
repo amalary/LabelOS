@@ -3777,3 +3777,11 @@ class TeamSetting(Base, TimestampMixin, OrganizationOwnedMixin):
         ),
         Index("ix_team_settings_organization_id", "organization_id"),
     )
+
+
+# Register delivery storage after its canonical scheduling/content dependencies.
+from labelos_database.publishing_models import (  # noqa: E402,F401
+    Publication,
+    PublicationAttempt,
+    PublicationTransition,
+)

@@ -3,6 +3,9 @@
   "extraPaths": ["apps/api/src", "apps/agents/src", "packages/database/src"],
   "include": [
     "apps/api/src/labelos_api/publishing",
+    "apps/api/src/labelos_api/repositories/publishing.py",
+    "packages/database/src/labelos_database/publishing_models.py",
+    "packages/database/src/labelos_database/publishing.py",
     "apps/api/src/labelos_api/api/v1/analytics.py",
     "apps/api/src/labelos_api/repositories/analytics.py",
     "apps/api/src/labelos_api/services/analytics_operations_service.py",
