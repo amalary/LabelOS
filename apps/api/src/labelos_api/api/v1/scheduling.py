@@ -62,7 +62,20 @@ class SchedulingErrorResponse(BaseModel):
     detail: SchedulingErrorDetail
 
 
+class SchedulingValidationError(BaseModel):
+    """The redacted validation detail returned by the exception handler."""
+
+    loc: list[str | int]
+    msg: str
+    type: str
+
+
+class SchedulingValidationErrorResponse(BaseModel):
+    detail: list[SchedulingValidationError]
+
+
 router.responses[409] = {"model": SchedulingErrorResponse}
+router.responses[422] = {"model": SchedulingValidationErrorResponse}
 
 
 class ScheduleActivationRequest(BaseModel):

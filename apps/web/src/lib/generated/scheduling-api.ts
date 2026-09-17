@@ -17,11 +17,6 @@ export type ChannelSchedulingEligibilityResponse = {
 };
 
 // prettier-ignore
-export type HTTPValidationError = {
-  "detail"?: Array<ValidationError>;
-};
-
-// prettier-ignore
 export type ScheduleActivationRequest = {
   "expected_content_revision": number;
   "expected_schedule_generation": number;
@@ -105,10 +100,15 @@ export type SchedulingJobResponse = {
 export type SchedulingJobStatus = "pending" | "claimed" | "blocked" | "cancelled" | "superseded" | "handed_off";
 
 // prettier-ignore
-export type ValidationError = {
+export type SchedulingValidationError = {
   "loc": Array<string | number>;
   "msg": string;
   "type": string;
+};
+
+// prettier-ignore
+export type SchedulingValidationErrorResponse = {
+  "detail": Array<SchedulingValidationError>;
 };
 
 // prettier-ignore
@@ -127,7 +127,7 @@ export type SchedulingApi = {
       responses: {
         200: SchedulingJobResponse;
         409: SchedulingErrorResponse;
-        422: HTTPValidationError;
+        422: SchedulingValidationErrorResponse;
       };
     };
   };
@@ -141,7 +141,7 @@ export type SchedulingApi = {
       responses: {
         200: ChannelSchedulingEligibilityResponse;
         409: SchedulingErrorResponse;
-        422: HTTPValidationError;
+        422: SchedulingValidationErrorResponse;
       };
     };
   };
@@ -165,7 +165,7 @@ export type SchedulingApi = {
       responses: {
         200: SchedulingJobListResponse;
         409: SchedulingErrorResponse;
-        422: HTTPValidationError;
+        422: SchedulingValidationErrorResponse;
       };
     };
   };
@@ -178,7 +178,7 @@ export type SchedulingApi = {
       responses: {
         200: SchedulingJobResponse;
         409: SchedulingErrorResponse;
-        422: HTTPValidationError;
+        422: SchedulingValidationErrorResponse;
       };
     };
   };
@@ -191,7 +191,7 @@ export type SchedulingApi = {
       responses: {
         200: SchedulingBlockedReasonsResponse;
         409: SchedulingErrorResponse;
-        422: HTTPValidationError;
+        422: SchedulingValidationErrorResponse;
       };
     };
   };
@@ -208,7 +208,7 @@ export type SchedulingApi = {
       responses: {
         200: SchedulingJobResponse;
         409: SchedulingErrorResponse;
-        422: HTTPValidationError;
+        422: SchedulingValidationErrorResponse;
       };
     };
   };
@@ -225,7 +225,7 @@ export type SchedulingApi = {
       responses: {
         200: SchedulingHistoryResponse;
         409: SchedulingErrorResponse;
-        422: HTTPValidationError;
+        422: SchedulingValidationErrorResponse;
       };
     };
   };
@@ -242,7 +242,7 @@ export type SchedulingApi = {
       responses: {
         200: SchedulingJobResponse;
         409: SchedulingErrorResponse;
-        422: HTTPValidationError;
+        422: SchedulingValidationErrorResponse;
       };
     };
   };
@@ -259,7 +259,7 @@ export type SchedulingApi = {
       responses: {
         200: SchedulingJobResponse;
         409: SchedulingErrorResponse;
-        422: HTTPValidationError;
+        422: SchedulingValidationErrorResponse;
       };
     };
   };
