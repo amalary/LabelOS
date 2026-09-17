@@ -27,6 +27,12 @@ from sqlalchemy.orm import selectinload
 
 from labelos_api.publishing import contracts as domain
 from labelos_api.publishing.execution import PublicationClaim
+from labelos_api.publishing.recovery import (
+    action_filters,
+    budget_available,
+    manual_reserved,
+    recovery_granted,
+)
 from labelos_api.publishing.retries import (
     MAX_ATTEMPTS,
     POLICY_VERSION,
@@ -142,6 +148,7 @@ class PublicationRepository:
                     PublicationAttempt.observations
                 ),
                 selectinload(Publication.transitions),
+                selectinload(Publication.actions),
             )
             .execution_options(populate_existing=True)
         )
@@ -155,15 +162,14 @@ class PublicationRepository:
         """Read-only candidates; execute rechecks eligibility under existing locks."""
         if type(limit) is not int or not 1 <= limit <= 1000:
             raise ValueError("invalid_retry_batch_size")
+        available, eligible = action_filters(now)
         rows = await self.session.execute(
             select(Publication.id, Publication.transition_version)
             .where(
                 Publication.workspace_id == self.workspace_id,
                 Publication.status == "retryable_failure",
-                Publication.retry_disposition.in_(("automatic", "provider_delay")),
-                Publication.retry_policy_version == POLICY_VERSION,
-                Publication.next_retry_at <= now,
-                Publication.retry_deadline_at > now,
+                available,
+                eligible,
             )
             .order_by(Publication.next_retry_at, Publication.id)
             .limit(limit)
@@ -172,7 +178,13 @@ class PublicationRepository:
 
     @staticmethod
     def require_retry_eligible(row: Publication, now: datetime) -> None:
+        if manual_reserved(row):
+            raise PublicationConflict("manual_delivery_reserved")
         if row.status != "retryable_failure":
+            return
+        if recovery_granted(row, now):
+            if not budget_available(row, now):
+                raise PublicationConflict("retry_budget_exhausted")
             return
         if (
             row.retry_policy_version != POLICY_VERSION
@@ -370,6 +382,8 @@ class PublicationRepository:
             row = await self.get(publication_id, lock=True)
             if row is None or row.transition_version != expected_version:
                 raise PublicationConflict("publication_version_conflict")
+            if manual_reserved(row):
+                raise PublicationConflict("manual_delivery_reserved")
             cancelling = entry.operation == domain.PublicationOperation.cancel
             lease = (
                 await self.session.get(PublicationLease, row.id, populate_existing=True)

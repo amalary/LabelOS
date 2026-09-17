@@ -3782,6 +3782,7 @@ class TeamSetting(Base, TimestampMixin, OrganizationOwnedMixin):
 # Register delivery storage after its canonical scheduling/content dependencies.
 from labelos_database.publishing_models import (  # noqa: E402,F401
     Publication,
+    PublicationAction,
     PublicationAttempt,
     PublicationLease,
     PublicationTransition,

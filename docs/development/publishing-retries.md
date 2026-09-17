@@ -1,5 +1,8 @@
 # Publishing Stage 8: retry engine and failure classification
 
+The [Stage 10 recovery workflow](publishing-recovery.md) now provides authorized
+manual reservation/completion and bounded reconnection/remediation commands.
+
 Production execution now uses the independent
 [Stage 9 Publishing worker](publishing-worker.md), which adds database-clock leases,
 fencing, heartbeats and conservative recovery around this retry policy.

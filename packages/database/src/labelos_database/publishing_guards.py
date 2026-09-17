@@ -47,6 +47,18 @@ def guard_statements(dialect):
             "INSERT": "NOT EXISTS (SELECT 1 FROM publications p WHERE p.id = NEW.publication_id AND p.workspace_id = NEW.workspace_id AND p.transition_version = NEW.version AND p.status = NEW.to_status AND p.updated_at = NEW.occurred_at) OR NEW.version != (SELECT count(*) + 1 FROM publication_transitions t WHERE t.publication_id = NEW.publication_id AND t.workspace_id = NEW.workspace_id) OR (NEW.version = 1 AND NEW.from_status != 'pending') OR (NEW.version > 1 AND NOT EXISTS (SELECT 1 FROM publication_transitions t WHERE t.publication_id = NEW.publication_id AND t.workspace_id = NEW.workspace_id AND t.version = NEW.version - 1 AND t.to_status = NEW.from_status AND t.occurred_at <= NEW.occurred_at)) OR (NEW.attempt_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM publication_attempts a WHERE a.id = NEW.attempt_id AND a.publication_id = NEW.publication_id AND a.workspace_id = NEW.workspace_id AND a.number = (SELECT max(x.number) FROM publication_attempts x WHERE x.publication_id = NEW.publication_id AND x.workspace_id = NEW.workspace_id) AND ((NEW.operation IN ('start', 'retry') AND a.started_at = NEW.occurred_at) OR (NEW.outcome IS NOT NULL AND a.started_at <= NEW.observed_at)))) OR (NEW.observed_at IS NOT NULL AND NEW.version > 1 AND NEW.observed_at < (SELECT t.occurred_at FROM publication_transitions t WHERE t.publication_id = NEW.publication_id AND t.workspace_id = NEW.workspace_id AND t.version = NEW.version - 1))",
         },
     }
+    # Human reservations exclude all future starts. Recovery grants are bound to
+    # one failed transition and retain the original attempt/time budget.
+    reserved = "EXISTS (SELECT 1 FROM publication_actions h WHERE h.publication_id = NEW.publication_id AND h.operation IN ('begin_manual', 'complete_manual') AND h.version = (SELECT max(x.version) FROM publication_actions x WHERE x.publication_id = h.publication_id))"
+    grant = "EXISTS (SELECT 1 FROM publication_actions h WHERE h.publication_id = p.id AND h.publication_version = p.transition_version AND h.operation = 'authorize_retry' AND h.retry_until > NEW.started_at)"
+    condition = checks["publication_attempts"]["INSERT"]
+    condition = condition.replace(
+        "p.retry_policy_version = 1 AND", "(p.retry_policy_version = 1 AND"
+    )
+    condition = condition.replace(
+        "AND NEW.number <= 5)", f" OR {grant}) AND NEW.number <= 5)"
+    )
+    checks["publication_attempts"]["INSERT"] = f"({condition}) OR {reserved}"
     statements = []
     for table, operations in checks.items():
         for operation, condition in operations.items():

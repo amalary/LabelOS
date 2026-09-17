@@ -24,6 +24,7 @@ class DeliveryContext:
     destination_identity: str = field(repr=False)
     canonical_envelope: bytes = field(repr=False)
     transition_version: int
+    readiness_reason: str | None = None
 
 
 @dataclass(frozen=True, kw_only=True)

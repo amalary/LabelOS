@@ -215,7 +215,7 @@ async def setup(
 
     # Only scheduling preparation is substituted; adapter auth, attempts, evidence,
     # transitions and outbox are real. Scheduling authorization has its own suite.
-    async def prepared(self, repository, publication_id):
+    async def prepared(self, repository, publication_id, **kwargs):
         row = await PublicationRepository(
             repository.session, repository.workspace_id
         ).get(publication_id)

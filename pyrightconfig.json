@@ -6,6 +6,8 @@
     "apps/api/src/labelos_api/repositories/publishing.py",
     "apps/api/src/labelos_api/repositories/publication_leases.py",
     "apps/api/src/labelos_api/services/publishing_processor.py",
+    "apps/api/src/labelos_api/services/publication_recovery.py",
+    "apps/api/src/labelos_api/api/v1/publications.py",
     "apps/api/src/labelos_api/publishing_worker.py",
     "apps/api/src/labelos_api/services/delivery_orchestrator.py",
     "packages/database/src/labelos_database/publishing_models.py",

@@ -11,7 +11,7 @@ from labelos_database.models import Publication, PublicationLease
 from sqlalchemy import and_, func, or_, select
 
 from labelos_api.publishing.execution import PublicationClaim
-from labelos_api.publishing.retries import POLICY_VERSION
+from labelos_api.publishing.recovery import action_filters
 
 
 class PublicationLeaseLost(RuntimeError):
@@ -52,12 +52,14 @@ class PublicationLeaseRepository:
         if not timedelta(seconds=1) <= duration <= timedelta(hours=1):
             raise ValueError("invalid_publication_lease_duration")
         now = await database_now(self.session)
+        available, eligible = action_filters(now)
         row = await self.session.scalar(
             select(Publication)
             .join(PublicationLease, PublicationLease.publication_id == Publication.id)
             .where(
                 Publication.workspace_id == self.workspace_id,
                 Publication.id.not_in(exclude),
+                available,
                 or_(
                     PublicationLease.owner_id.is_(None),
                     PublicationLease.expires_at <= now,
@@ -66,12 +68,7 @@ class PublicationLeaseRepository:
                     Publication.status == "pending",
                     and_(
                         Publication.status == "retryable_failure",
-                        Publication.retry_disposition.in_(
-                            ("automatic", "provider_delay")
-                        ),
-                        Publication.retry_policy_version == POLICY_VERSION,
-                        Publication.next_retry_at <= now,
-                        Publication.retry_deadline_at > now,
+                        eligible,
                         PublicationLease.interrupted.is_(False),
                     ),
                     and_(

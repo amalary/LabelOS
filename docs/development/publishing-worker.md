@@ -1,5 +1,9 @@
 # Publishing Stage 9: worker execution and concurrency safety
 
+The [Stage 10 recovery workflow](publishing-recovery.md) adds manual reservations
+that exclude worker claims and durable remediation grants consumed by new attempts.
+Unsupported adapters now record terminal failures instead of remaining pending.
+
 `PublishingProcessor` performs bounded, workspace-scoped sweeps independently of
 Scheduling. It reuses `DeliveryOrchestrator` for source/approval/account checks,
 provider adapters, normalized evidence, durable retries, journal and outbox.

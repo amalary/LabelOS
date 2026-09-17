@@ -430,7 +430,7 @@ def test_due_retry_consumed_once_by_simultaneous_processors(sessions, monkeypatc
     asyncio.run(run())
 
 
-def test_unsupported_pending_work_does_not_starve_later_claims(sessions):
+def test_unsupported_work_becomes_terminal_and_does_not_starve_later_claims(sessions):
     async def run():
         scope, first = await setup(sessions)
         async with sessions() as session:
@@ -441,10 +441,12 @@ def test_unsupported_pending_work_does_not_starve_later_claims(sessions):
         )
         for _ in range(2):
             result = await processor.run()
-            assert result.outcomes["unsupported_provider"] == 1
+            assert result.outcomes["unsupported"] == 1
         for identifier in (first, second):
             lease = await lease_for(sessions, identifier)
             assert lease.fencing_token == 1 and lease.owner_id is None
-            assert not (await stored(sessions, scope, identifier)).attempts
+            row = await stored(sessions, scope, identifier)
+            assert row.status == "permanent_failure" and len(row.attempts) == 1
+        assert (await processor.run()).claimed == 0
 
     asyncio.run(run())

@@ -126,10 +126,10 @@ def test_creation_replay_context_and_disabled_provider(sessions):
             sessions, workspace_id=scope, publication_id=identifier
         )
         assert (
-            result.status == "pending" and result.reason_code == "unsupported_provider"
+            result.status == "permanent_failure" and result.reason_code == "unsupported"
         )
         async with sessions.begin() as session:
-            assert await count(session, PublicationAttempt) == 0
+            assert await count(session, PublicationAttempt) == 1
             events = (
                 await session.scalars(
                     select(RealtimeEvent).where(
@@ -137,7 +137,12 @@ def test_creation_replay_context_and_disabled_provider(sessions):
                     )
                 )
             ).all()
-            assert len(events) == 1 and events[0].payload["status"] == "pending"
+            assert len(events) == 3
+            assert {event.payload["status"] for event in events} == {
+                "pending",
+                "processing",
+                "permanent_failure",
+            }
 
     asyncio.run(run())
 

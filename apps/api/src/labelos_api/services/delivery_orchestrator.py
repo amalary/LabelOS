@@ -7,6 +7,7 @@ The host supplies an explicit provider registry. No public API is added.
 
 import hashlib
 import json
+from contextlib import suppress
 from datetime import UTC, datetime
 from uuid import UUID, uuid4, uuid5
 
@@ -232,7 +233,12 @@ class DeliveryOrchestrator:
         )
 
     async def prepare_execution(
-        self, repository: SchedulingRepository, publication_id: UUID
+        self,
+        repository: SchedulingRepository,
+        publication_id: UUID,
+        *,
+        allow_delivery_blockers: bool = False,
+        allow_terminal: bool = False,
     ) -> DeliveryContext:
         """Reload accepted work under source/job/destination/publication locks.
 
@@ -265,7 +271,11 @@ class DeliveryOrchestrator:
             )
             row = await repo.get(publication_id, lock=True)
             assert row is not None
-            if row.status not in ("pending", "retryable_failure"):
+            if row.status not in (
+                ("pending", "retryable_failure", "permanent_failure")
+                if allow_terminal
+                else ("pending", "retryable_failure")
+            ):
                 raise DeliveryIneligible("publication_not_executable")
             if (
                 row.destination_identity is None
@@ -294,8 +304,17 @@ class DeliveryOrchestrator:
                     execution_enabled=True, delivery_receiver_configured=True
                 ),
             )
-            if not eligibility.eligible:
-                raise DeliveryIneligible(eligibility.reason_codes[0])
+            readiness_reason = None
+            for reason_code in eligibility.reason_codes:
+                if allow_delivery_blockers and reason_code in {
+                    "reconnect_required",
+                    "connection_unavailable",
+                    "manual_delivery_required",
+                    "capability_unavailable",
+                }:
+                    readiness_reason = readiness_reason or reason_code
+                else:
+                    raise DeliveryIneligible(reason_code)
             stored = json.loads(row.canonical_envelope)
             request = DeliveryAcceptanceRequest(
                 snapshot=snapshot_for(job),
@@ -337,6 +356,7 @@ class DeliveryOrchestrator:
             destination_identity=row.destination_identity,
             canonical_envelope=row.canonical_envelope,
             transition_version=row.transition_version,
+            readiness_reason=readiness_reason,
         )
 
     async def execute(
@@ -382,6 +402,7 @@ class DeliveryOrchestrator:
             context = await self.prepare_execution(
                 SchedulingRepository(session, workspace_id, lateness_window_seconds=0),
                 publication_id,
+                allow_delivery_blockers=True,
             )
             # Preparation locks source -> job -> destination -> publication. Do
             # not take a publication lock before it (would invert lock order).
@@ -407,20 +428,24 @@ class DeliveryOrchestrator:
                 )
             except PublicationConflict as exc:
                 raise DeliveryIneligible(str(exc)) from exc
-            try:
+            adapter = None
+            rejection = None
+            with suppress(ProviderResolutionError):
                 adapter = registry.resolve(context.provider)
-            except ProviderResolutionError:
-                return DeliveryResult(
-                    publication_id=row.id,
-                    status=row.status,
-                    reason_code="unsupported_provider",
+            if context.readiness_reason in (
+                "reconnect_required",
+                "connection_unavailable",
+            ):
+                rejection = ProviderResult(
+                    outcome=ProviderOutcome.authorization_required,
+                    confirmed_absent=True,
                 )
-            if not adapter.capabilities.publish:
-                return DeliveryResult(
-                    publication_id=row.id,
-                    status=row.status,
-                    reason_code="unsupported_capability",
-                )
+            elif (
+                context.readiness_reason
+                or adapter is None
+                or not adapter.capabilities.publish
+            ):
+                rejection = ProviderResult(outcome=ProviderOutcome.unsupported)
             attempt = domain.PublicationAttempt(
                 id=uuid4(),
                 workspace_id=workspace_id,
@@ -431,7 +456,8 @@ class DeliveryOrchestrator:
             request = publication_request(context, attempt)
             # Local validation only: adapters must not resolve credentials or do I/O.
             try:
-                rejection = validate_preflight(adapter.validate(request))
+                if rejection is None and adapter is not None:
+                    rejection = validate_preflight(adapter.validate(request))
             except Exception:
                 # Validation is local and cannot publish. Persist a manual-action
                 # internal failure instead of repeatedly running broken validation.
@@ -460,7 +486,11 @@ class DeliveryOrchestrator:
         # No database session/locks or Scheduling lease spans this call.
         source = domain.EvidenceSource.provider_response
         try:
-            result = rejection or validate_result(await adapter.publish(request))
+            if rejection is not None:
+                result = rejection
+            else:
+                assert adapter is not None
+                result = validate_result(await adapter.publish(request))
         except Exception:
             # Includes malformed results. Never guess whether an external write ran.
             result = ProviderResult(outcome=ProviderOutcome.ambiguous)

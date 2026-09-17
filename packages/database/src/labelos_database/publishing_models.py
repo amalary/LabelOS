@@ -18,6 +18,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from labelos_database.base import Base, UUIDPrimaryKey
 from labelos_database.publishing_guards import register_publishing_guards
+from labelos_database.publication_action_guards import register_action_guards
 from labelos_database.publishing import (
     STATES,
     OPERATIONS,
@@ -99,6 +100,9 @@ class Publication(Base):
     transitions: Mapped[list["PublicationTransition"]] = relationship(
         viewonly=True, order_by="PublicationTransition.version", lazy="raise"
     )
+    actions: Mapped[list["PublicationAction"]] = relationship(
+        viewonly=True, order_by="PublicationAction.version", lazy="raise"
+    )
     __table_args__ = (
         ForeignKeyConstraint(
             ["scheduling_job_id", *JOB_SCOPE[1:]],
@@ -178,6 +182,66 @@ class Publication(Base):
             unique=True,
             postgresql_where=external_post_id.is_not(None),
             sqlite_where=external_post_id.is_not(None),
+        ),
+    )
+
+
+class PublicationAction(Base):
+    """Append-only human resolution, separate from authoritative provider facts."""
+
+    __tablename__ = "publication_actions"
+    id: Mapped[UUIDPrimaryKey]
+    workspace_id: Mapped[UUID]
+    publication_id: Mapped[UUID]
+    version: Mapped[int]
+    publication_version: Mapped[int]
+    operation_id: Mapped[UUID]
+    operation: Mapped[str] = mapped_column(String(32))
+    actor_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    reason_code: Mapped[str] = mapped_column(String(40))
+    occurred_at: Mapped[datetime] = mapped_column(SchedulingUTCDateTime())
+    retry_until: Mapped[datetime | None] = mapped_column(SchedulingUTCDateTime())
+    external_post_id: Mapped[str | None] = mapped_column(String(512))
+    provider_url: Mapped[str | None] = mapped_column(PublicResourceURL())
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["publication_id", "workspace_id"],
+            ["publications.id", "publications.workspace_id"],
+            name="fk_publication_actions_scope",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "publication_id", "version", name="uq_publication_actions_version"
+        ),
+        UniqueConstraint(
+            "workspace_id", "operation_id", name="uq_publication_actions_operation"
+        ),
+        CheckConstraint("version > 0 AND publication_version > 0", name="versions"),
+        CheckConstraint(
+            "operation IN ('begin_manual', 'complete_manual', 'authorize_retry')",
+            name="operation",
+        ),
+        CheckConstraint(
+            "(operation = 'authorize_retry' AND retry_until IS NOT NULL AND retry_until > occurred_at) OR (operation != 'authorize_retry' AND retry_until IS NULL)",
+            name="retry_until",
+        ),
+        CheckConstraint(
+            "operation = 'complete_manual' OR (external_post_id IS NULL AND provider_url IS NULL)",
+            name="evidence",
+        ),
+        CheckConstraint(
+            "external_post_id IS NULL OR (length(trim(external_post_id)) > 0 AND length(external_post_id) <= 512)",
+            name="external_id",
+        ),
+        CheckConstraint(
+            "provider_url IS NULL OR (provider_url LIKE 'https://%' AND provider_url NOT LIKE '%?%' AND provider_url NOT LIKE '%#%' AND provider_url NOT LIKE '%@%')",
+            name="public_url",
+        ),
+        Index(
+            "ix_publication_actions_workspace",
+            "workspace_id",
+            "publication_id",
+            "version",
         ),
     )
 
@@ -411,3 +475,4 @@ Base.metadata.tables["publication_transitions"].append_constraint(
 register_publishing_guards(
     Publication.__table__, PublicationAttempt.__table__, PublicationTransition.__table__
 )
+register_action_guards(PublicationAction.__table__)

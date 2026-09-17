@@ -480,8 +480,10 @@ def test_migration_round_trip(postgres_test_engine):
             str(Path(__file__).resolve().parents[3] / "packages/database/alembic.ini")
         )
     )
-    assert scripts.get_heads() == ["202609170200"]
-    leases = scripts.get_revision("head")
+    assert scripts.get_heads() == ["202609170300"]
+    recovery = scripts.get_revision("head")
+    assert recovery.down_revision == "202609170200"
+    leases = scripts.get_revision("202609170200")
     assert leases.down_revision == "202609170100"
     revision = scripts.get_revision("202609170100")
     assert revision.down_revision == "202609162300"
@@ -493,6 +495,7 @@ def test_migration_round_trip(postgres_test_engine):
         with Operations.context(MigrationContext.configure(connection)):
             for rev in reversed(list(scripts.walk_revisions())):
                 rev.module.upgrade()
+            recovery.module.downgrade()
             leases.module.downgrade()
             for operation in (revision.module.downgrade, revision.module.upgrade):
                 operation()
@@ -504,7 +507,9 @@ def test_migration_round_trip(postgres_test_engine):
                     }
                 ) == (operation == revision.module.upgrade)
             leases.module.upgrade()
+            recovery.module.upgrade()
             for name in (
+                "publication_actions",
                 "publication_leases",
                 "publications",
                 "publication_attempts",
@@ -524,6 +529,7 @@ def test_migration_round_trip(postgres_test_engine):
 
             def include_object(obj, name, kind, reflected, compare_to):
                 return kind != "table" or name in {
+                    "publication_actions",
                     "publication_leases",
                     "publications",
                     "publication_attempts",
@@ -559,6 +565,7 @@ def test_migration_round_trip(postgres_test_engine):
             with Operations.context(MigrationContext.configure(connection)):
                 # Ownership storage can be backfilled without changing the journal.
                 publication_before = connection.execute(select(Publication)).all()
+                recovery.module.downgrade()
                 leases.module.downgrade()
                 leases.module.upgrade()
                 assert (
@@ -580,6 +587,7 @@ def test_migration_round_trip(postgres_test_engine):
                 identity.module.upgrade()
                 revision.module.upgrade()
                 leases.module.upgrade()
+                recovery.module.upgrade()
                 assert connection.execute(probe).all() == before
                 assert (
                     connection.scalar(select(func.count()).select_from(Publication))
@@ -710,10 +718,21 @@ def test_frozen_migration_guards_match_metadata():
     retry = scripts.get_revision("202609170100")
     current = guard_statements("postgresql")
     for statement in retry.module.NEW_FUNCTIONS:
+        if "publication_attempts_insert_guard" in statement:
+            continue
         assert (
             statement.replace("CREATE OR REPLACE FUNCTION", "CREATE FUNCTION", 1)
             in current
         )
+    recovery = scripts.get_revision("head")
+    for statement in recovery.module.NEW_ATTEMPT_GUARDS["postgresql"]:
+        assert statement in current
+    from labelos_database.publication_action_guards import action_guard_statements
+
+    for dialect in ("postgresql", "sqlite"):
+        assert recovery.module.action_guard_statements(
+            dialect
+        ) == action_guard_statements(dialect)
     identity = scripts.get_revision("202609162300")
     assert (
         identity.module.NEW_GUARD.replace(

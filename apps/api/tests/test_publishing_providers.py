@@ -221,11 +221,16 @@ async def setup_delivery(sessions, monkeypatch):
         )
         scope, identifier = row.workspace_id, row.id
 
-    async def prepared(self, repository, publication_id):
+    async def prepared(self, repository, publication_id, **kwargs):
         row = await PublicationRepository(
             repository.session, repository.workspace_id
         ).get(publication_id, lock=True)
-        if row is None or row.status not in ("pending", "retryable_failure"):
+        states = (
+            ("pending", "retryable_failure", "permanent_failure")
+            if kwargs.get("allow_terminal")
+            else ("pending", "retryable_failure")
+        )
+        if row is None or row.status not in states:
             raise DeliveryIneligible("publication_not_executable")
         return DeliveryContext(
             workspace_id=row.workspace_id,
@@ -309,14 +314,14 @@ def test_invalid_adapter_output_and_exceptions_block_retry(
 @pytest.mark.parametrize(
     "mode,reason",
     [
-        ("missing", "unsupported_provider"),
-        ("disabled", "unsupported_capability"),
+        ("missing", "unsupported"),
+        ("disabled", "unsupported"),
         ("rejected", "permanent_failure"),
         ("invalid", "retryable_failure"),
         ("exception", "retryable_failure"),
     ],
 )
-def test_resolution_and_preflight_fail_without_attempt(
+def test_resolution_and_preflight_persist_without_provider_io(
     sessions, monkeypatch, mode, reason
 ):
     async def run():
@@ -340,7 +345,9 @@ def test_resolution_and_preflight_fail_without_attempt(
         assert delivery.reason_code == reason
         row = await stored(sessions, scope, identifier)
         if mode in {"missing", "disabled"}:
-            assert row.status == "pending" and not row.attempts and not row.transitions
+            assert row.status == "permanent_failure"
+            assert row.failure_category == "unsupported_operation"
+            assert len(row.attempts) == 1 and len(row.transitions) == 2
         else:
             assert len(row.attempts) == 1 and len(row.transitions) == 2
             assert row.retry_disposition == (
