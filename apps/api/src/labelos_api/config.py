@@ -43,6 +43,11 @@ class Settings(DatabaseSettings):
     scheduling_worker_lease_seconds: int = Field(default=120, ge=1, le=3600)
     scheduling_worker_lateness_seconds: int = Field(default=300, ge=0, le=86400)
     scheduling_worker_timeout_seconds: int = Field(default=30, ge=1, le=300)
+    publishing_execution_enabled: bool = False
+    publishing_worker_workspace_id: UUID | None = None
+    publishing_worker_batch_size: int = Field(default=25, ge=1, le=1000)
+    publishing_worker_lease_seconds: int = Field(default=120, ge=1, le=3600)
+    publishing_worker_timeout_seconds: int = Field(default=300, ge=1, le=3600)
 
     @field_validator("allowed_frontend_origins", mode="before")
     @classmethod
@@ -152,7 +157,8 @@ def get_settings() -> Settings:
     scheduling_settings = {
         name: os.environ[name.upper()]
         for name in Settings.model_fields
-        if name.startswith("scheduling_") and name.upper() in os.environ
+        if name.startswith(("scheduling_", "publishing_"))
+        and name.upper() in os.environ
     }
     return Settings(
         environment=os.getenv("APP_ENV", "local"),

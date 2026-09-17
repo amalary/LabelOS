@@ -1,5 +1,9 @@
 # Scheduling to Delivery acceptance boundary
 
+The [Stage 3 Delivery Orchestrator](delivery-orchestrator.md) now supplies an
+internal transactional receiver through this composer. Production receiver
+selection remains unavailable; the original boundary below remains unchanged.
+
 The internal `services.scheduling_handoff.accept_scheduling_handoff` composition
 boundary implements the acceptance policy in the
 [Scheduling Engine contract](scheduling-engine-contract.md). It is not a worker,

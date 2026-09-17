@@ -297,7 +297,10 @@ export function useOrganizationRealtime(organizationId: string | null): Organiza
           });
         }
 
-        if (event.type.startsWith(schedulingEventPrefix)) {
+        if (
+          event.type.startsWith(schedulingEventPrefix) ||
+          event.type.startsWith("marketing.publication.")
+        ) {
           notifySchedulingUpdate(
             organizationId,
             typeof event.payload.contentItemId === "string" ? event.payload.contentItemId : null,

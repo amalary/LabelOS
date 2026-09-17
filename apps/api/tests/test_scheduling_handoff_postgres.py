@@ -84,9 +84,9 @@ def sessions(repository_sessions):  # noqa: F811
     return repository_sessions
 
 
-async def prepared(sessions):
+async def prepared(sessions, *, workspace=None):
     async with sessions.begin() as session:
-        workspace, _, _ = await seed(session)
+        workspace, _, _ = await seed(session, workspace=workspace)
         await session.execute(
             update(SocialAccountConnection).values(
                 status="connected", capabilities=["content_publish"]

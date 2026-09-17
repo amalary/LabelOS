@@ -69,6 +69,7 @@ import {
 import { useActiveWorkspace, useActiveWorkspaceProfile } from "../../lib/workspace-context";
 import { SchedulingJobState } from "../../components/scheduling-job-state";
 import { ChannelScheduling } from "./channel-scheduling";
+import { PublicationHistory } from "./publication-history";
 
 type MarketingTab = "calendar" | "drafts" | "approvals" | "accounts";
 type CalendarView = "month" | "list";
@@ -1410,6 +1411,14 @@ function ContentEditor({
           </fieldset>
         ))}
       </div>
+
+      {item && (
+        <PublicationHistory
+          item={item}
+          campaignName={campaignName(campaigns, item.campaign_id)}
+          artistName={artistOptions.find((artist) => artist.id === item.artist_id)?.name}
+        />
+      )}
 
       {publishNowNotice && (
         <p role="status" className="text-sm text-amber-800">

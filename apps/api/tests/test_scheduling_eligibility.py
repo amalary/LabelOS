@@ -117,6 +117,28 @@ def test_valid_eligibility_and_exact_authority():
     assert evaluate_channel_eligibility(**values).eligible
 
 
+@pytest.mark.parametrize("status", ["connected", "limited"])
+@pytest.mark.parametrize("code", [None, "provider_unavailable", "rate_limited"])
+def test_publishing_capability_allows_execution_time_health_check(status, code):
+    values = _inputs()
+    values["connection"].status = status
+    values["connection"].last_error_code = code
+    assert evaluate_channel_eligibility(**values).automatic_handoff_eligible
+    values["connection"].capabilities = []
+    assert not evaluate_channel_eligibility(**values).automatic_handoff_eligible
+
+
+@pytest.mark.parametrize("status", ["connected", "limited"])
+@pytest.mark.parametrize(
+    "code", ["credential_revoked", "insufficient_scope", "credential_missing"]
+)
+def test_publishing_health_repair_blocks_eligibility(status, code):
+    values = _inputs()
+    values["connection"].status = status
+    values["connection"].last_error_code = code
+    assert not evaluate_channel_eligibility(**values).automatic_handoff_eligible
+
+
 @pytest.mark.parametrize(
     ("target", "field", "value", "reason"),
     [
@@ -149,12 +171,6 @@ def test_valid_eligibility_and_exact_authority():
         (
             "connection",
             "status",
-            SocialAccountConnectionStatus.limited,
-            "connection_unavailable",
-        ),
-        (
-            "connection",
-            "status",
             SocialAccountConnectionStatus.error,
             "connection_unavailable",
         ),
@@ -173,7 +189,7 @@ def test_valid_eligibility_and_exact_authority():
         (
             "connection",
             "last_error_code",
-            "provider_unavailable",
+            "authorization_failed",
             "connection_unavailable",
         ),
         (

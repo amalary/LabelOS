@@ -16,6 +16,7 @@ _last_event_created_at: datetime | None = None
 
 
 class RealtimeEventType(StrEnum):
+    publication_changed = "marketing.publication.changed"
     organization_updated = "organization.updated"
     profile_created = "profile.created"
     profile_updated = "profile.updated"

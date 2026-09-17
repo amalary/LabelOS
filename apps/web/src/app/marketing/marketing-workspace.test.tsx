@@ -681,7 +681,9 @@ describe("MarketingWorkspace", () => {
                 execution_enabled: false,
                 delivery_receiver_configured: false,
               }
-            : { jobs: [], limit: 100, next_cursor: null },
+            : path.includes("/publications?")
+              ? { publications: [], next_after_id: null }
+              : { jobs: [], limit: 100, next_cursor: null },
         ),
       ),
     );
@@ -1286,6 +1288,8 @@ describe("MarketingWorkspace", () => {
       return detail;
     });
     const requests = vi.fn(async (path: string, init: RequestInit) => {
+      if (path.includes("/publications?"))
+        return Response.json({ publications: [], next_after_id: null });
       if (init.method === "POST") {
         if (path.endsWith("/cancel")) {
           jobs[0] = { ...jobs[0], status: "cancelled" };
@@ -1517,6 +1521,8 @@ describe("MarketingWorkspace", () => {
     });
     let jobs: unknown[] = [];
     const fetchScheduling = vi.fn(async (path: string, init: RequestInit) => {
+      if (path.includes("/publications?"))
+        return Response.json({ publications: [], next_after_id: null });
       if (init.method === "POST") {
         jobs = [
           {
