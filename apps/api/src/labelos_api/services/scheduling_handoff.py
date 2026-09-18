@@ -1,7 +1,7 @@
 """Internal composition boundary, not a public API or worker authentication path.
 
-The future workload boundary must authenticate/scope the worker and lock execution
-controls before calling this function. No production successful receiver is wired.
+The workload boundary authenticates/scopes the worker and locks execution controls
+before calling this function. Publishing's receiver persists in this transaction.
 The caller owns the outer transaction; successful return is durable at its commit.
 """
 

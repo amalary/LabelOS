@@ -1,5 +1,10 @@
 # Publishing Stage 9: worker execution and concurrency safety
 
+The production Scheduling host now supplies pending Publications through
+`DELIVERY_RECEIVER_BACKEND=publishing`. See the
+[composition and rollout guide](scheduling-publishing-composition.md). Publishing
+execution remains separately enabled and scoped; intake does not invoke providers.
+
 The [Stage 10 recovery workflow](publishing-recovery.md) adds manual reservations
 that exclude worker claims and durable remediation grants consumed by new attempts.
 Unsupported adapters now record terminal failures instead of remaining pending.

@@ -15,6 +15,10 @@ from pydantic_core import PydanticCustomError
 from sqlalchemy import select
 
 from labelos_api.auth import CurrentUserContext, SessionDep, get_current_user_context
+from labelos_api.repositories.publication_calendar import (
+    PublishedCalendarFact,
+    list_facts,
+)
 from labelos_api.scheduling.timezones import ScheduleValidationError, utc_instant
 from labelos_api.services import marketing_content_service, scheduling_eligibility
 from labelos_api.services.marketing_content_service import (
@@ -165,6 +169,7 @@ class MarketingContentApprovalStateResponse(BaseModel):
 
 
 class MarketingContentResponse(BaseModel):
+    publications: list[PublishedCalendarFact] = Field(default_factory=list)
     id: UUID
     workspace_id: UUID
     campaign_id: UUID
@@ -509,8 +514,10 @@ def _approval_state(
 def _content_response(
     item: MarketingContentItem,
     readiness: scheduling_eligibility.ContentSchedulingReadiness,
+    publications: list[PublishedCalendarFact] | None = None,
 ) -> MarketingContentResponse:
     return MarketingContentResponse(
+        publications=publications or [],
         id=item.id,
         workspace_id=item.organization_id,
         campaign_id=item.campaign_id,
@@ -551,9 +558,15 @@ async def _list_response(
     readiness = await scheduling_eligibility.evaluate_content_batch(
         session, workspace_id, page.items
     )
+    facts = await list_facts(session, workspace_id, [item.id for item in page.items])
     return MarketingContentListResponse(
         marketing_content=[
-            _content_response(item, readiness[item.id]) for item in page.items
+            _content_response(
+                item,
+                readiness[item.id],
+                [f for f in facts if f.content_item_id == item.id],
+            )
+            for item in page.items
         ],
         total=page.total,
         limit=page.limit,

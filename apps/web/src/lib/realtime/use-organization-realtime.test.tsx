@@ -581,6 +581,7 @@ describe("useOrganizationRealtime", () => {
     ["content becomes scheduled", "marketing.content.status_changed", "scheduled"],
     ["content is archived", "marketing.content.status_changed", "archived"],
     ["content is published", "marketing.content.published", "published"],
+    ["delivery confirms publication", "marketing.publication.changed", "published"],
   ])(
     "keeps Drafts, Marketing Calendar, Approval Queue, and Campaign Calendar coordinated when %s",
     async (_label, eventType, status) => {
@@ -624,9 +625,49 @@ describe("useOrganizationRealtime", () => {
       expect(fetchCounts.get("approvals")).toBe(1);
       expect(fetchCounts.get("campaign-calendar")).toBe(2);
       expect(navigation.refresh).not.toHaveBeenCalled();
-      expect(screen.getByText(eventType)).toBeInTheDocument();
+      expect(
+        screen.getByText(eventType === "marketing.publication.changed" ? "no activity" : eventType),
+      ).toBeInTheDocument();
     },
   );
+
+  it("refreshes publications that arrive while the first calendar snapshots are still loading", async () => {
+    routeState.pathname = "/marketing";
+    const finishInitial: Array<() => void> = [];
+    const counts = new Map<string, number>();
+    vi.mocked(fetch).mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      const count = (counts.get(url) ?? 0) + 1;
+      counts.set(url, count);
+      const response = () =>
+        Response.json(
+          url.includes("campaign-calendar")
+            ? campaignCalendarResponse("org_01", count)
+            : url.includes("approvals")
+              ? { approvals: [], total: count, limit: 25, offset: 0 }
+              : { marketing_content: [], total: count, limit: 100, offset: 0 },
+        );
+      if (count === 1)
+        return new Promise<Response>((resolve) => {
+          finishInitial.push(() => resolve(response()));
+        });
+      return Promise.resolve(response());
+    });
+    render(<RealtimeCrossSurfaceMarketingProbe />);
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(4));
+    act(() => {
+      FakeEventSource.instances[0]!.emit(
+        "message",
+        marketingContentRealtimeEvent("marketing.publication.changed", "published"),
+      );
+    });
+    expect(fetch).toHaveBeenCalledTimes(4);
+    act(() => finishInitial.forEach((finish) => finish()));
+    await waitFor(() => expect(screen.getByText("marketing:2")).toBeInTheDocument());
+    expect(screen.getByText("campaign-calendar:2")).toBeInTheDocument();
+    expect(screen.getByText("approvals:1")).toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledTimes(7);
+  });
 
   it("invalidates approval and targeted marketing content caches for approval updates", async () => {
     routeState.pathname = "/approvals";
@@ -772,6 +813,7 @@ describe("useOrganizationRealtime", () => {
     ["content schedule changes", "marketing.content.updated"],
     ["approvals", "approval.updated"],
     ["published state", "marketing.content.published"],
+    ["authoritative publication", "marketing.publication.changed"],
     ["artist label changes", "artist.updated"],
     ["artist profile label changes", "profile.artist_profile_updated"],
     ["release label changes", "release.updated"],
@@ -797,7 +839,9 @@ describe("useOrganizationRealtime", () => {
     await waitFor(() => expect(workspaceFetchCounts.get("org_01")).toBe(2));
     expect(workspaceFetchCounts.get("org_02")).toBe(1);
     expect(navigation.refresh).not.toHaveBeenCalled();
-    expect(screen.getByText(eventType)).toBeInTheDocument();
+    expect(
+      screen.getByText(eventType === "marketing.publication.changed" ? "no activity" : eventType),
+    ).toBeInTheDocument();
   });
 
   it("does not invalidate campaign calendar workspace queries for unrelated events or other organizations", async () => {
@@ -818,6 +862,7 @@ describe("useOrganizationRealtime", () => {
     act(() => {
       source.emit("message", realtimeEvent("campaign.goal_completed"));
       source.emit("message", realtimeEvent("campaign.updated", "org_02"));
+      source.emit("message", realtimeEvent("marketing.publication.changed", "org_02"));
     });
 
     await waitFor(() => expect(screen.getByText("campaign.goal_completed")).toBeInTheDocument());

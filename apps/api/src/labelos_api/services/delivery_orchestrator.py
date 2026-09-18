@@ -105,18 +105,18 @@ async def _identity(session, workspace_id, destination_id) -> str:
     ).hexdigest()
 
 
-class _AcceptanceReceiver:
-    """Private port adapter, invoked only inside the validated Scheduling composer."""
+class PublishingDeliveryReceiver:
+    """Trusted transactional port, used only inside Scheduling's handoff composer.
 
-    def __init__(self, session: AsyncSession, workspace_id: UUID):
-        self.session = session
+    Scope comes from the host, never from the acceptance payload. The composer
+    supplies its own transaction; this adapter neither commits nor executes I/O.
+    """
+
+    def __init__(self, workspace_id: UUID):
         self.workspace_id = workspace_id
 
     async def accept(self, session, request):
-        if (
-            session is not self.session
-            or request.snapshot.workspace_id != self.workspace_id
-        ):
+        if request.snapshot.workspace_id != self.workspace_id:
             return TerminalRejected()
         repo = PublicationRepository(session, self.workspace_id)
         job = await session.scalar(
@@ -225,7 +225,7 @@ class DeliveryOrchestrator:
         """
         return await accept_scheduling_handoff(
             repository,
-            receiver=_AcceptanceReceiver(repository.session, repository.workspace_id),
+            receiver=PublishingDeliveryReceiver(repository.workspace_id),
             request=request,
             expected_worker=expected_worker,
             expected_fencing_token=expected_fencing_token,

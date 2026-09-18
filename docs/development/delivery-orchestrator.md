@@ -1,5 +1,12 @@
 # Publishing Delivery Orchestrator (Stage 3)
 
+Production intake now supports `DELIVERY_RECEIVER_BACKEND=publishing`; see
+[Scheduling to Publishing composition](scheduling-publishing-composition.md).
+The authenticated Scheduling processor and `accept_execution` share the existing
+receiver, now named `PublishingDeliveryReceiver` and scoped by the trusted host.
+Provider execution remains in the separate Publishing worker. Historical Stage 3
+descriptions of disabled-only deployment below are superseded by that composition.
+
 Stage 8 adds durable failure classification and retry eligibility; see
 [publishing retries](publishing-retries.md) for the current execution policy.
 
@@ -27,10 +34,10 @@ provider-specific API calls. Production receiver configuration remains
 The authenticated workload host calls `accept_execution` with its workspace-scoped
 Scheduling repository, prepared canonical request, worker/fence, and trusted
 transaction-local execution controls. That method delegates to the existing
-Scheduling composer, supplying a private `PublishingDeliveryAcceptancePort`
-implementation. Do not instantiate that private receiver or expose these inputs
-as user JSON. The existing Scheduling processor and receiver factory are unchanged;
-deployment wiring remains a later integration decision.
+Scheduling composer, supplying `PublishingDeliveryReceiver`. The production
+Scheduling worker selects that same port via `configured_receiver`. The composer
+supplies its transaction and validates Scheduling authority before acceptance.
+Receiver scope and selection must never come from user JSON.
 
 Scheduling retains all authority over claiming, due windows, cancellation,
 supersession, source approval, generation, and the final fenced handoff transition.

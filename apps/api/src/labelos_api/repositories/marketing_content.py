@@ -10,6 +10,7 @@ from labelos_database.models import (
     MarketingContentItem,
     MarketingContentItemChannel,
     MarketingContentItemStatus,
+    Publication,
     Release,
     SocialAccountConnection,
     UniversalProfile,
@@ -18,6 +19,8 @@ from labelos_database.models import (
 from sqlalchemy import Select, and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+
+from labelos_api.repositories.publication_calendar import published_for_item
 
 
 def _content_item_load_options():
@@ -255,7 +258,10 @@ def _filtered_items_statement(
     if release_id is not None:
         statement = statement.where(MarketingContentItem.release_id == release_id)
     if status is not None:
-        statement = statement.where(MarketingContentItem.status == status)
+        status_match = MarketingContentItem.status == status
+        if status == MarketingContentItemStatus.published:
+            status_match = or_(status_match, published_for_item(workspace_id).exists())
+        statement = statement.where(status_match)
     if owner_profile_id is not None:
         statement = statement.where(
             MarketingContentItem.owner_profile_id == owner_profile_id
@@ -277,8 +283,18 @@ def _filtered_items_statement(
             MarketingContentItemChannel.scheduled_at <= scheduled_end
         )
     if scheduled_conditions:
+        publication_match = published_for_item(workspace_id)
+        if scheduled_start is not None:
+            publication_match = publication_match.where(
+                Publication.published_at >= scheduled_start
+            )
+        if scheduled_end is not None:
+            publication_match = publication_match.where(
+                Publication.published_at <= scheduled_end
+            )
         statement = statement.where(
             or_(
+                publication_match.exists(),
                 and_(*scheduled_conditions),
                 MarketingContentItem.channels.any(and_(*channel_scheduled_conditions)),
             )

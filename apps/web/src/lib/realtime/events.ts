@@ -144,6 +144,7 @@ export const activityEventTypes = new Set<RealtimeEventType>([
 ]);
 
 export const refetchEventTypes = new Set<RealtimeEventType>([
+  "marketing.publication.changed",
   "organization.updated",
   "profile.created",
   "profile.updated",

@@ -17,11 +17,18 @@ from labelos_database.models import (
     MarketingContentItem,
     MarketingContentItemChannel,
     MarketingContentItemStatus,
+    Publication,
     SocialAccountConnection,
 )
 from sqlalchemy import ColumnElement, Select, and_, false, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+
+from labelos_api.repositories.publication_calendar import (
+    PublishedCalendarFact,
+    list_facts,
+    published_for_item,
+)
 
 CAMPAIGN_START = "campaign.start"
 CAMPAIGN_TARGET_END = "campaign.target_end"
@@ -59,10 +66,10 @@ class CampaignCalendarEvent:
     source_type: str
     source_id: UUID
     workspace_id: UUID
-    campaign_id: UUID
-    campaign_name: str
-    campaign_status: str
-    campaign_type: str
+    campaign_id: UUID | None
+    campaign_name: str | None
+    campaign_status: str | None
+    campaign_type: str | None
     status: str
     title: str
     artist_id: UUID | None = None
@@ -79,6 +86,7 @@ class CampaignCalendarEvent:
     approval_request_id: UUID | None = None
     approval_request: ApprovalRequest | None = None
     content_item: MarketingContentItem | None = None
+    publication: PublishedCalendarFact | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -174,7 +182,16 @@ async def list_events(
                 *_content_load_options()
             )
         )
-        events.extend(_project_content_events(items.unique().all(), query, event_types))
+        content_items = items.unique().all()
+        facts = (
+            await list_facts(session, workspace_id, [item.id for item in content_items])
+            if PUBLISHED_EVENT_TYPES & event_types
+            else []
+        )
+        events.extend(_project_content_events(content_items, query, event_types, facts))
+        events.extend(
+            _project_publication_events(content_items, query, event_types, facts)
+        )
 
     return sorted(events, key=_event_sort_key)
 
@@ -224,11 +241,11 @@ def _content_items_statement(
     statement = select(MarketingContentItem).where(
         MarketingContentItem.organization_id == workspace_id
     )
-    statement = statement.join(MarketingContentItem.campaign)
+    statement = statement.outerjoin(MarketingContentItem.campaign)
     statement = statement.outerjoin(MarketingContentItem.approval_request)
     statement = _filter_content_scope(statement, query)
-    statement = _filter_content_status(statement, query)
-    statement = _filter_content_dates(statement, query)
+    statement = _filter_content_status(statement, query, workspace_id)
+    statement = _filter_content_dates(statement, query, workspace_id)
     return statement
 
 
@@ -293,7 +310,9 @@ def _filter_campaign_status(statement: Select, query: CampaignCalendarEventQuery
     return statement
 
 
-def _filter_content_status(statement: Select, query: CampaignCalendarEventQuery):
+def _filter_content_status(
+    statement: Select, query: CampaignCalendarEventQuery, workspace_id: UUID
+):
     status_values = _status_values(query.statuses)
     if status_values:
         content_statuses = _enum_values(status_values, MarketingContentItemStatus)
@@ -303,6 +322,11 @@ def _filter_content_status(statement: Select, query: CampaignCalendarEventQuery)
             filters.append(MarketingContentItem.status.in_(content_statuses))
         if request_statuses:
             filters.append(ApprovalRequest.status.in_(request_statuses))
+        if (
+            "published" in status_values
+            and PUBLISHED_EVENT_TYPES & _requested_event_types(query)
+        ):
+            filters.append(published_for_item(workspace_id).exists())
         statement = statement.where(or_(*filters) if filters else false())
     elif not query.include_archived:
         statement = statement.where(
@@ -331,10 +355,19 @@ def _filter_campaign_dates(statement: Select, query: CampaignCalendarEventQuery)
     return statement.where(or_(*date_filters)) if date_filters else statement
 
 
-def _filter_content_dates(statement: Select, query: CampaignCalendarEventQuery):
+def _filter_content_dates(
+    statement: Select, query: CampaignCalendarEventQuery, workspace_id: UUID
+):
     start_datetime, end_datetime = _datetime_bounds(query.range_start, query.range_end)
     event_types = _requested_event_types(query)
     filters = []
+    if PUBLISHED_EVENT_TYPES & event_types:
+        published = published_for_item(workspace_id)
+        if start_datetime is not None:
+            published = published.where(Publication.published_at >= start_datetime)
+        if end_datetime is not None:
+            published = published.where(Publication.published_at <= end_datetime)
+        filters.append(published.exists())
     for field, event_type, is_channel_field in (
         (MarketingContentItem.scheduled_at, MARKETING_CONTENT_SCHEDULED, False),
         (
@@ -446,6 +479,7 @@ def _project_content_events(
     items: Sequence[MarketingContentItem],
     query: CampaignCalendarEventQuery,
     event_types: frozenset[str],
+    facts: Sequence[PublishedCalendarFact] = (),
 ) -> list[CampaignCalendarEvent]:
     events = []
     for item in items:
@@ -462,7 +496,11 @@ def _project_content_events(
                     title=item.title,
                 )
             )
-        if item.published_at and MARKETING_CONTENT_PUBLISHED in event_types:
+        if (
+            item.published_at
+            and MARKETING_CONTENT_PUBLISHED in event_types
+            and not any(f.content_item_id == item.id for f in facts)
+        ):
             events.append(
                 _content_event(
                     item,
@@ -530,6 +568,7 @@ def _project_content_events(
                 )
             if (
                 channel.published_at
+                and not any(f.channel_id == channel.id for f in facts)
                 and MARKETING_CONTENT_CHANNEL_PUBLISHED in event_types
             ):
                 events.append(
@@ -541,6 +580,53 @@ def _project_content_events(
                     )
                 )
     return [event for event in events if _event_in_range(event.event_at, query)]
+
+
+def _project_publication_events(
+    items: Sequence[MarketingContentItem],
+    query: CampaignCalendarEventQuery,
+    event_types: frozenset[str],
+    facts: Sequence[PublishedCalendarFact],
+) -> list[CampaignCalendarEvent]:
+    by_id = {item.id: item for item in items}
+    events = []
+    for fact in facts:
+        item = by_id.get(fact.content_item_id)
+        if item is None or item.organization_id != fact.workspace_id:
+            continue
+        if (
+            not query.include_archived
+            and item.status == MarketingContentItemStatus.archived
+        ):
+            continue
+        statuses = _status_values(query.statuses)
+        if statuses and "published" not in statuses:
+            continue
+        if not _event_in_range(fact.published_at, query):
+            continue
+        channel = next((c for c in item.channels if c.id == fact.channel_id), None)
+        if channel is None:
+            continue
+        for event_type in sorted(PUBLISHED_EVENT_TYPES & event_types):
+            event = _content_event(
+                item,
+                event_type=event_type,
+                event_at=fact.published_at,
+                source_type="publication",
+                source_id=fact.publication_id,
+                title=item.title,
+            )
+            events.append(
+                replace(
+                    event,
+                    status="published",
+                    publication=fact,
+                    channel_id=fact.channel_id,
+                    channel=fact.channel,
+                    placement=fact.placement,
+                )
+            )
+    return events
 
 
 def _campaign_event(
@@ -591,9 +677,9 @@ def _content_event(
         source_id=source_id,
         workspace_id=item.organization_id,
         campaign_id=item.campaign_id,
-        campaign_name=item.campaign.name,
-        campaign_status=item.campaign.status.value,
-        campaign_type=item.campaign.campaign_type.value,
+        campaign_name=item.campaign.name if item.campaign else None,
+        campaign_status=item.campaign.status.value if item.campaign else None,
+        campaign_type=item.campaign.campaign_type.value if item.campaign else None,
         status=item.status.value,
         title=title,
         artist_id=artist_id,
@@ -658,7 +744,7 @@ def _content_artist_context(
 ) -> tuple[UUID | None, str | None]:
     if item.artist is not None:
         return item.artist.id, item.artist.name
-    return _campaign_artist_context(item.campaign)
+    return _campaign_artist_context(item.campaign) if item.campaign else (None, None)
 
 
 def _content_release_context(
@@ -666,7 +752,11 @@ def _content_release_context(
 ) -> tuple[UUID | None, str | None, UUID | None]:
     if item.release is not None:
         return item.release.id, item.release.title, item.release.artist_id
-    return _campaign_release_context(item.campaign)
+    return (
+        _campaign_release_context(item.campaign)
+        if item.campaign
+        else (None, None, None)
+    )
 
 
 def _approval_requested_at(item: MarketingContentItem) -> datetime | None:

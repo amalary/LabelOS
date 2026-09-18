@@ -113,7 +113,22 @@ export type MarketingContentApprovalState = {
   can_schedule: boolean;
 };
 
+export type PublishedCalendarFact = {
+  publication_id: string;
+  channel: string;
+  placement: string;
+  workspace_id: string;
+  content_item_id: string;
+  channel_id: string;
+  social_account_connection_id: string;
+  provider: string;
+  published_at: string;
+  external_post_id: string;
+  provider_url: string | null;
+};
+
 export type MarketingContentItem = {
+  publications?: PublishedCalendarFact[];
   id: string;
   workspace_id: string;
   campaign_id: string;
@@ -588,7 +603,19 @@ export function invalidateMarketingContentCache(predicate?: (key: string) => boo
     entry.data = null;
     entry.error = null;
     if (entry.fetcher) {
-      void loadResource(key, entry.fetcher).catch(() => undefined);
+      // A publication can commit while an earlier calendar snapshot is in flight.
+      // Refresh after that request settles so its stale result cannot consume the invalidation.
+      if (entry.promise) {
+        void entry.promise
+          .finally(() => {
+            if (cache.get(key) === entry && entry.fetcher) {
+              void loadResource(key, entry.fetcher).catch(() => undefined);
+            }
+          })
+          .catch(() => undefined);
+      } else {
+        void loadResource(key, entry.fetcher).catch(() => undefined);
+      }
     } else {
       emit(entry);
     }

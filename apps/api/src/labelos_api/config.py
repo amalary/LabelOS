@@ -100,13 +100,20 @@ class Settings(DatabaseSettings):
         self.validate_youtube_oauth_configuration()
 
     def validate_delivery_receiver(self) -> None:
-        # There is no certified production adapter yet. Test doubles may only be
-        # injected in tests, never selected through deployment configuration.
-        if self.delivery_receiver_backend != "unavailable":
+        if self.delivery_receiver_backend not in {"unavailable", "publishing"}:
             raise RuntimeError(
-                "DELIVERY_RECEIVER_BACKEND must be unavailable; successful fake "
-                "receivers are not deployable"
+                "DELIVERY_RECEIVER_BACKEND must be unavailable or publishing; "
+                "successful fake receivers are not deployable"
             )
+        if self.delivery_receiver_backend == "publishing":
+            if not self.database_url.startswith("postgresql+asyncpg://"):
+                raise RuntimeError(
+                    "Publishing delivery receiver requires PostgreSQL with asyncpg"
+                )
+            if self.database_echo:
+                raise RuntimeError(
+                    "Publishing delivery receiver DATABASE_ECHO must be false"
+                )
 
     def validate_youtube_oauth_configuration(self) -> None:
         configured = bool(self.youtube_oauth_client_id) or bool(

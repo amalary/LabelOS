@@ -32,6 +32,7 @@ from labelos_api.publishing.providers import ProviderOutcome as Outcome
 from labelos_api.publishing.providers import ProviderRegistry
 from labelos_api.publishing.recovery import resolution
 from labelos_api.publishing.retries import MAX_ELAPSED, FailureCategory
+from labelos_api.repositories.publication_calendar import list_facts
 from labelos_api.repositories.publishing import (
     PublicationConflict,
     PublicationRepository,
@@ -180,6 +181,9 @@ def test_manual_completion_receipt_history_and_secret_free_handoff(
         assert len(row.attempts) == 1 and len(row.transitions) == 2
         assert row.attempts[0].outcome == "retryable_failure"
         assert len(row.actions) == 2
+        # Human completion is explicitly not authoritative provider evidence.
+        async with sessions() as session:
+            assert not await list_facts(session, scope, [row.marketing_content_item_id])
 
         def downgrade(connection):
             scripts = ScriptDirectory.from_config(

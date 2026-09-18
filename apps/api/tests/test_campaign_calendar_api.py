@@ -724,4 +724,5 @@ def test_campaign_calendar_openapi_contract_exposes_stable_fields(
         "approval",
         "url",
         "sort_key",
+        "publication",
     }

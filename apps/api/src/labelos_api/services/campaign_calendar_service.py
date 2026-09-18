@@ -143,6 +143,7 @@ class NormalizedCampaignCalendarEvent:
     approval: CampaignCalendarApprovalContext | None
     url: str | None
     sort_key: str
+    publication: campaign_calendar.PublishedCalendarFact | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -327,8 +328,9 @@ async def _normalize_event(
         release=_release_context(event),
         channel=_channel_context(event, readiness),
         approval=approval,
-        url=None,
+        url=event.publication.provider_url if event.publication else None,
         sort_key=sort_key,
+        publication=event.publication,
     )
 
 
@@ -372,6 +374,13 @@ def _aware_utc(value: datetime) -> datetime:
 def _campaign_context(
     event: campaign_calendar.CampaignCalendarEvent,
 ) -> CampaignCalendarCampaignContext | None:
+    if (
+        event.campaign_id is None
+        or event.campaign_name is None
+        or event.campaign_status is None
+        or event.campaign_type is None
+    ):
+        return None
     return CampaignCalendarCampaignContext(
         id=str(event.campaign_id),
         name=event.campaign_name,
@@ -418,9 +427,17 @@ def _channel_context(
         id=str(event.channel_id),
         channel=event.channel,
         placement=event.placement,
-        destination_readiness=_destination_readiness(event, eligibility),
-        scheduling_eligibility=eligibility.projection() if eligibility else None,
-        scheduling_job=readiness.jobs.get(event.channel_id) if readiness else None,
+        destination_readiness=(
+            None if event.publication else _destination_readiness(event, eligibility)
+        ),
+        scheduling_eligibility=(
+            eligibility.projection() if eligibility and not event.publication else None
+        ),
+        scheduling_job=(
+            readiness.jobs.get(event.channel_id)
+            if readiness and not event.publication
+            else None
+        ),
     )
 
 
@@ -604,6 +621,8 @@ def _deterministic_event_id(
     event: campaign_calendar.CampaignCalendarEvent,
 ) -> str:
     source_id = str(event.source_id)
+    if event.publication is not None:
+        return f"publication:{source_id}:{event.event_type}"
     if event.event_type == campaign_calendar.CAMPAIGN_START:
         return f"campaign:{source_id}:start"
     if event.event_type == campaign_calendar.CAMPAIGN_TARGET_END:
@@ -626,8 +645,10 @@ def _deterministic_event_id(
 
 
 def _source_parent_id(event: campaign_calendar.CampaignCalendarEvent) -> str | None:
+    if event.source_type == "publication":
+        return str(event.content_item_id) if event.content_item_id else None
     if event.source_type in {"campaign_milestone", "marketing_content_item"}:
-        return str(event.campaign_id)
+        return str(event.campaign_id) if event.campaign_id else None
     if event.source_type == "marketing_content_item_channel":
         return str(event.content_item_id) if event.content_item_id is not None else None
     if event.source_type == "approval_request":
