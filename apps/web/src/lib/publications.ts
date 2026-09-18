@@ -61,6 +61,8 @@ export type Publication = {
   created_at: string;
   started_at: string | null;
   published_at: string | null;
+  cancelled_at?: string | null;
+  cancellation_reason?: string | null;
   last_failed_at: string | null;
   manual_completed_at: string | null;
   next_retry_at: string | null;
@@ -95,6 +97,23 @@ const failureMessages: Record<string, string> = {
   authorization_required: "The destination requires renewed publishing access.",
   outcome_unknown: "Delivery could not be confirmed. Check the provider before publishing again.",
 };
+
+const cancellationMessages: Record<string, string> = {
+  scheduling_cancelled: "The scheduled delivery was cancelled.",
+  stale_approval:
+    "Approval is no longer valid. Approve and schedule a new content revision to publish.",
+  stale_content_revision:
+    "The approved content revision was replaced. Schedule the newly approved revision to publish.",
+  ineligible_parent_state: "The content is no longer approved for delivery.",
+  changed_schedule_generation: "This delivery intent was superseded by a schedule change.",
+  missing_schedule_intent: "The schedule for this delivery was removed.",
+};
+
+export function publicationCancellationMessage(code: string | null | undefined): string {
+  return code && Object.hasOwn(cancellationMessages, code)
+    ? cancellationMessages[code]!
+    : "This publication was cancelled.";
+}
 
 export function publicationFailureMessage(code: string | null): string {
   return code

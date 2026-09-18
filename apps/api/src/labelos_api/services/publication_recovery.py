@@ -315,6 +315,8 @@ class PublicationRecoveryService:
             "created_at": row.created_at,
             "started_at": row.attempts[0].started_at if row.attempts else None,
             "published_at": row.published_at,
+            "cancelled_at": row.cancelled_at,
+            "cancellation_reason": row.cancellation_reason,
             "last_failed_at": failures[-1].observed_at if failures else None,
             "latest_failure_reason": failures[-1].failure_reason if failures else None,
             "manual_completed_at": completion.occurred_at if completion else None,

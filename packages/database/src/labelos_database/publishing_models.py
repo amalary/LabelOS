@@ -149,7 +149,7 @@ class Publication(Base):
             name="publication_evidence",
         ),
         CheckConstraint(
-            "(status = 'cancelled' AND cancelled_at IS NOT NULL AND cancellation_reason IS NOT NULL AND cancellation_reason = 'scheduling_cancelled') OR (status != 'cancelled' AND cancelled_at IS NULL AND cancellation_reason IS NULL)",
+            "(status = 'cancelled' AND cancelled_at IS NOT NULL AND cancellation_reason IS NOT NULL AND cancellation_reason IN ('scheduling_cancelled', 'stale_approval', 'stale_content_revision', 'ineligible_parent_state', 'changed_schedule_generation', 'missing_schedule_intent')) OR (status != 'cancelled' AND cancelled_at IS NULL AND cancellation_reason IS NULL)",
             name="cancellation",
         ),
         CheckConstraint(

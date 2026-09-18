@@ -7,6 +7,7 @@ import {
   getPublication,
   listPublications,
   publicProviderUrl,
+  publicationCancellationMessage,
   publicationErrorMessage,
   publicationFailureMessage,
   publicationResolution,
@@ -143,6 +144,13 @@ function PublicationDetail({ publication }: { publication: Publication }) {
           <dt>Latest failure</dt>
           <dd>{timestamp(publication.last_failed_at, zone)}</dd>
         </div>
+        {publication.delivery_status === "cancelled" && (
+          <div className="sm:col-span-2">
+            <dt>Delivery cancelled</dt>
+            <dd>{timestamp(publication.cancelled_at ?? null, zone)}</dd>
+            <dd>{publicationCancellationMessage(publication.cancellation_reason)}</dd>
+          </div>
+        )}
         {publication.manual_completed_at && (
           <div>
             <dt>Manual completion recorded</dt>

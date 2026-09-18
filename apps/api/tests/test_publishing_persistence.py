@@ -480,8 +480,10 @@ def test_migration_round_trip(postgres_test_engine):
             str(Path(__file__).resolve().parents[3] / "packages/database/alembic.ini")
         )
     )
-    assert scripts.get_heads() == ["202609170300"]
-    recovery = scripts.get_revision("head")
+    assert scripts.get_heads() == ["202609170400"]
+    invalidation = scripts.get_revision("head")
+    assert invalidation.down_revision == "202609170300"
+    recovery = scripts.get_revision("202609170300")
     assert recovery.down_revision == "202609170200"
     leases = scripts.get_revision("202609170200")
     assert leases.down_revision == "202609170100"
@@ -495,6 +497,7 @@ def test_migration_round_trip(postgres_test_engine):
         with Operations.context(MigrationContext.configure(connection)):
             for rev in reversed(list(scripts.walk_revisions())):
                 rev.module.upgrade()
+            invalidation.module.downgrade()
             recovery.module.downgrade()
             leases.module.downgrade()
             for operation in (revision.module.downgrade, revision.module.upgrade):
@@ -508,6 +511,7 @@ def test_migration_round_trip(postgres_test_engine):
                 ) == (operation == revision.module.upgrade)
             leases.module.upgrade()
             recovery.module.upgrade()
+            invalidation.module.upgrade()
             for name in (
                 "publication_actions",
                 "publication_leases",
@@ -724,7 +728,7 @@ def test_frozen_migration_guards_match_metadata():
             statement.replace("CREATE OR REPLACE FUNCTION", "CREATE FUNCTION", 1)
             in current
         )
-    recovery = scripts.get_revision("head")
+    recovery = scripts.get_revision("202609170300")
     for statement in recovery.module.NEW_ATTEMPT_GUARDS["postgresql"]:
         assert statement in current
     from labelos_database.publication_action_guards import action_guard_statements

@@ -93,6 +93,26 @@ describe("publication history", () => {
     vi.useRealTimers();
   });
 
+  it("shows withdrawn approval as cancellation without inventing an attempt", async () => {
+    current = publication({
+      delivery_status: "cancelled",
+      resolution: "cancelled",
+      cancelled_at: "2026-09-17T12:01:00Z",
+      cancellation_reason: "stale_approval",
+      started_at: null,
+      last_failed_at: null,
+      latest_failure_reason: null,
+      attempt_count: 0,
+      attempts: [],
+    });
+    render(panel());
+    const detail = await openDetail();
+    expect(within(detail).getByText("Delivery cancelled")).toBeInTheDocument();
+    expect(within(detail).getByText(/Approval is no longer valid/)).toBeInTheDocument();
+    expect(within(detail).getByText("No delivery attempts have started.")).toBeInTheDocument();
+    expect(within(detail).queryByRole("button", { name: /Retry|Recover/ })).not.toBeInTheDocument();
+  });
+
   it("shows approved intent, context, destination, timing, attempts and reconnect guidance", async () => {
     render(panel());
     const detail = await openDetail();

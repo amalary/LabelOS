@@ -77,8 +77,8 @@ class PublicationLeaseRepository:
                     ),
                 ),
             )
-            # Refused pending work remains pending. Rotate by claim generation so
-            # repeated bounded sweeps also reach work behind an unsupported item.
+            # Cancelled (including invalidated approval) is terminal and excluded.
+            # Rotate transient preflight refusals so later work remains reachable.
             .order_by(
                 PublicationLease.fencing_token, Publication.created_at, Publication.id
             )

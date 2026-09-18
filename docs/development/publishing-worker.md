@@ -50,6 +50,32 @@ If start has committed, cancellation of waiting work is rejected; an in-flight
 external action cannot truthfully be declared cancelled. Lease checks also reject
 unfenced direct execution/evidence while a worker owns the publication.
 
+Approval invalidation discovered during execution preparation cancels waiting
+Publications durably. The same applies to a replaced approved revision, an
+ineligible parent state, or a withdrawn/superseded schedule intent. Migration
+`202609170400` extends the existing cancellation reason constraint; no new state
+or provider failure evidence is introduced. `pending` and `retryable_failure`
+transition to terminal `cancelled`, with the safe refusal code retained in
+`cancellation_reason`. Since cancellation is terminal and database-immutable,
+that reason belongs to the aggregate's sole cancellation history fact.
+
+The execution transaction retains source/approval/job locks, validates the
+Publication version and worker fence/expiry, appends cancellation and the realtime
+outbox event, clears retry metadata, and revokes the lease with a higher fence.
+It commits normally instead of raising a preflight exception that would roll back
+the disposition. No attempt is created; existing attempts and observations remain
+intact. Expired or superseded workers cannot write the cancellation or override it.
+Both worker polling and `retry_due` exclude cancelled work using their existing
+status predicates. Invalid work may be claimed once to discover the disposition;
+subsequent sweeps cannot reclaim it. A future retry is checked when it becomes due.
+
+Accepted Scheduling redelivery still returns the original receipt and cancelled
+Publication. It cannot create another Publication for the same intent. A newly
+approved content revision follows normal Scheduling activation and handoff with
+a new intent; historical cancellation is never reversed. History exposes the
+cancellation timestamp/reason, realtime emits cancelled status and its reason,
+and the calendar never treats cancellation as confirmed publication.
+
 ## Expiration, uncertain calls and shutdown
 
 Expiration is permission to recover ownership, **not evidence of nonpublication**.

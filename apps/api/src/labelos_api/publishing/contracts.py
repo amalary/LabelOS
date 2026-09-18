@@ -34,6 +34,15 @@ class PublicationOperation(StrEnum):
     cancel = "cancel"
 
 
+class PublicationCancellationReason(StrEnum):
+    scheduling_cancelled = "scheduling_cancelled"
+    stale_approval = "stale_approval"
+    stale_content_revision = "stale_content_revision"
+    ineligible_parent_state = "ineligible_parent_state"
+    changed_schedule_generation = "changed_schedule_generation"
+    missing_schedule_intent = "missing_schedule_intent"
+
+
 TERMINAL_STATES = frozenset(
     {
         PublicationState.published,
@@ -319,11 +328,17 @@ class PublicationTransition:
     occurred_at: datetime
     attempt: PublicationAttempt | None = None
     evidence: PublicationEvidence | None = None
+    cancellation_reason: PublicationCancellationReason | None = None
 
     def __post_init__(self) -> None:
         _utc(self.occurred_at)
         if not isinstance(self.operation, PublicationOperation):
             raise PublicationInvariantError("Invalid publication operation")
+        if self.cancellation_reason is not None and (
+            self.operation != PublicationOperation.cancel
+            or not isinstance(self.cancellation_reason, PublicationCancellationReason)
+        ):
+            raise PublicationInvariantError("Invalid cancellation reason")
         if self.operation in {PublicationOperation.start, PublicationOperation.retry}:
             valid = (
                 isinstance(self.attempt, PublicationAttempt) and self.evidence is None
@@ -432,8 +447,8 @@ class Publication:
     ) -> "Publication":
         """Append one fact; caller supplies authenticated scope, never user JSON.
 
-        Cancellation is a delivery response to Scheduling's cancellation command,
-        allowed only while no side effect is possible. It cannot undo publication.
+        Cancellation withdraws waiting delivery, including invalidated approval or
+        superseded intent. It cannot undo publication or an uncertain attempt.
         """
         _uuid(workspace_id)
         if workspace_id != self.workspace_id:

@@ -49,6 +49,7 @@ from labelos_api.scheduling.contracts import (
     DurableAccepted,
     SchedulingFeatureControls,
     TerminalRejected,
+    approval_blocked_reason,
 )
 from labelos_api.scheduling.payload import (
     InvalidHandoffPayload,
@@ -261,6 +262,23 @@ class DeliveryOrchestrator:
                 or job.handoff_receipt_id != row.receipt_id
             ):
                 raise DeliveryIneligible("scheduling_acceptance_missing")
+            # A destination change must not mask withdrawn approval and leave
+            # that intent claimable forever. Use the same authoritative approval
+            # predicate as Scheduling, while all source/approval locks are held.
+            reason = approval_blocked_reason(
+                snapshot_for(job),
+                current_revision=source.item.content_revision,
+                approved_revision=source.item.approved_revision,
+                parent_status=source.item.status,
+                evidence=(
+                    source.approval
+                    if source.item.approval_request_id
+                    in (None, job.approval_request_id)
+                    else None
+                ),
+            )
+            if reason:
+                raise DeliveryIneligible(reason.value)
             reason = await repository.detect_stale_job(job.id)
             if reason:
                 raise DeliveryIneligible(reason.value)
@@ -399,11 +417,55 @@ class DeliveryOrchestrator:
                 await repo.require_unused_execution(execution_id, publication_id)
             except PublicationConflict as exc:
                 raise DeliveryIneligible(str(exc)) from exc
-            context = await self.prepare_execution(
-                SchedulingRepository(session, workspace_id, lateness_window_seconds=0),
-                publication_id,
-                allow_delivery_blockers=True,
-            )
+            try:
+                context = await self.prepare_execution(
+                    SchedulingRepository(
+                        session, workspace_id, lateness_window_seconds=0
+                    ),
+                    publication_id,
+                    allow_delivery_blockers=True,
+                )
+            except DeliveryIneligible as exc:
+                # Source/job locks from preparation still protect this observation.
+                # Only revoked approval/intent is terminal here, not transient
+                # destination readiness or arbitrary preparation errors.
+                invalidation_reasons = set(domain.PublicationCancellationReason) - {
+                    domain.PublicationCancellationReason.scheduling_cancelled
+                }
+                if str(exc) not in invalidation_reasons:
+                    raise
+                row = await repo.get(publication_id, lock=True)
+                if row is None or row.status not in ("pending", "retryable_failure"):
+                    raise DeliveryIneligible("publication_not_executable") from exc
+                await require_ownership(session, row, claim)
+                if (
+                    expected_version is not None
+                    and expected_version != row.transition_version
+                ):
+                    raise DeliveryIneligible("publication_version_conflict") from exc
+                row = await repo.append(
+                    row.id,
+                    expected_version=row.transition_version,
+                    operation_id=uuid4(),
+                    claim=claim,
+                    entry=domain.PublicationTransition(
+                        operation=domain.PublicationOperation.cancel,
+                        occurred_at=max(
+                            row.updated_at,
+                            await database_now(session) if claim else self.clock(),
+                        ),
+                        cancellation_reason=domain.PublicationCancellationReason(
+                            str(exc)
+                        ),
+                    ),
+                )
+                # Return normally so cancellation, history, outbox and lease
+                # revocation COMMIT; raising the refusal here would roll them back.
+                return DeliveryResult(
+                    publication_id=row.id,
+                    status=row.status,
+                    reason_code=row.cancellation_reason,
+                )
             # Preparation locks source -> job -> destination -> publication. Do
             # not take a publication lock before it (would invert lock order).
             try:

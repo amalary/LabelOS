@@ -102,6 +102,13 @@ def aggregate(row: Publication) -> domain.Publication:
                 occurred_at=entry.occurred_at,
                 attempt=attempt,
                 evidence=evidence,
+                # Cancellation is terminal and its reason is immutable on the
+                # aggregate row; there can only be one cancellation history fact.
+                cancellation_reason=(
+                    domain.PublicationCancellationReason(row.cancellation_reason)
+                    if entry.operation == "cancel"
+                    else None
+                ),
             )
         )
     result = domain.Publication(
@@ -387,7 +394,7 @@ class PublicationRepository:
             cancelling = entry.operation == domain.PublicationOperation.cancel
             lease = (
                 await self.session.get(PublicationLease, row.id, populate_existing=True)
-                if cancelling
+                if cancelling and claim is None
                 else await require_ownership(self.session, row, claim)
             )
             if (
@@ -497,7 +504,10 @@ class PublicationRepository:
                     else None
                 ),
                 cancellation_reason=(
-                    "scheduling_cancelled"
+                    (
+                        entry.cancellation_reason
+                        or domain.PublicationCancellationReason.scheduling_cancelled
+                    ).value
                     if after.state == domain.PublicationState.cancelled
                     else None
                 ),
@@ -560,6 +570,8 @@ class PublicationRepository:
             self._outbox(row, operation_id)
             await self.session.flush()
             if cancelling and lease is not None:
+                if claim is not None:
+                    await require_ownership(self.session, row, claim)
                 lease.fencing_token += 1
                 lease.owner_id = lease.expires_at = None
                 await self.session.flush()
@@ -590,6 +602,7 @@ class PublicationRepository:
                     "channelId": str(row.marketing_content_item_channel_id),
                     "status": row.status,
                     "transitionVersion": row.transition_version,
+                    "cancellationReason": row.cancellation_reason,
                     "failureCategory": row.failure_category,
                     "retryDisposition": row.retry_disposition,
                     "nextRetryAt": (
