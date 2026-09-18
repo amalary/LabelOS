@@ -84,6 +84,35 @@ class ExecutionConnectionSnapshot:
     updated_at: datetime | None
     last_error_code: str | None
 
+    def same_authorization(self, other: "ExecutionConnectionSnapshot") -> bool:
+        """Compare execution authority without treating observations as versions.
+
+        Full equality still fences health writes, so an older observation cannot
+        clear a newer one. Expiry remains sensitive: refresh replaces credentials
+        under the same reference and must fence an older refresh's SQL result.
+        """
+        return self._authorization_state() == other._authorization_state()
+
+    def _authorization_state(self) -> tuple[object, ...]:
+        return (
+            self.workspace_id,
+            self.connection_id,
+            self.provider,
+            self.connection_method,
+            self.external_account_id,
+            self.status,
+            frozenset(self.capabilities),
+            self.credential_ref,
+            self.token_expires_at,
+            # Only known transient errors are observational. Retain unknown or
+            # authorization-related codes, even if status has not changed.
+            (
+                None
+                if self.last_error_code in HEALTH_RETAIN_CURRENT_STATUS_CODES
+                else self.last_error_code
+            ),
+        )
+
 
 def _execution_snapshot(
     connection: SocialAccountConnection,
@@ -157,6 +186,8 @@ async def load_execution_connection(
 async def _lock_execution_observation(
     session: AsyncSession,
     expected: ExecutionConnectionSnapshot,
+    *,
+    for_refresh: bool = False,
 ) -> SocialAccountConnection | None:
     connection = await session.scalar(
         select(SocialAccountConnection)
@@ -171,7 +202,8 @@ async def _lock_execution_observation(
     if (
         connection is None
         or connection.status not in {"connected", "limited"}
-        or _execution_snapshot(connection) != expected
+        or not _execution_snapshot(connection).same_authorization(expected)
+        or (not for_refresh and _execution_snapshot(connection) != expected)
     ):
         return None
     return connection
@@ -233,7 +265,7 @@ async def apply_execution_refresh(
     result: SocialAccountCredentialResult,
 ) -> ExecutionConnectionSnapshot | None:
     """Persist only refresh expiry, grants and canonical health, after provider I/O."""
-    connection = await _lock_execution_observation(session, expected)
+    connection = await _lock_execution_observation(session, expected, for_refresh=True)
     if connection is None:
         return None
     if (

@@ -77,6 +77,21 @@ holding a short row lock. Reconnect, disconnect, replacement and scope changes
 invalidate an old observation. No SQL transaction spans credential-store or provider
 I/O. UTC normalization also makes snapshot comparison consistent in SQLite tests.
 
+Publishing's pre-upload checks and refresh admission compare only execution
+authority: workspace and connection IDs, provider/method, external account ID,
+status, capability set, credential reference, token expiry, and non-transient
+health error codes. Expiry remains a refresh fence because the credential store
+replaces tokens under the same reference. Only the known transient codes
+`provider_unavailable`, `third_party_service_unavailable`, and `rate_limited` are
+equivalent to no error for this comparison. Revocation and other authorization
+errors remain sensitive even when status is unchanged.
+
+`updated_at`, health/sync timestamps, diagnostic messages, display fields and
+provider metadata do not independently invalidate execution. Ordinary health
+writes retain the stricter full-snapshot comparison above so an older successful
+observation cannot clear newer health information. No new connection version,
+credential-store protocol, or publishing lifecycle is introduced.
+
 Health and its event commit together. If health storage fails, the adapter preserves
 the authoritative delivery result; a health database outage must not convert a
 confirmed upload rejection or success into ambiguous evidence. This health update

@@ -126,7 +126,7 @@ class YouTubePublishingAdapter:
             connection = await self._connection(request)
             connection, credentials = await self._accounts.credentials(connection)
             # Check again after refresh/store I/O before using the token externally.
-            if await self._connection(request) != connection:
+            if not (await self._connection(request)).same_authorization(connection):
                 return _failure(ProviderOutcome.authorization_required)
             token = credentials.expose()["access_token"]
             headers = {"Authorization": f"Bearer {token}"}
@@ -154,7 +154,7 @@ class YouTubePublishingAdapter:
                 await self._accounts.observe(connection, Code.authorization_failed)
                 return _failure(ProviderOutcome.authorization_required)
             # Detect reconnect/disconnect/replacement during credential I/O.
-            if await self._connection(request) != connection:
+            if not (await self._connection(request)).same_authorization(connection):
                 return _failure(ProviderOutcome.authorization_required)
             content_type, content = _multipart(request)
             write_started = True
