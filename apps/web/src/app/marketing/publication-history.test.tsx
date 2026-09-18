@@ -3,6 +3,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MarketingContentItem } from "../../lib/marketing-content";
 import { type Publication, publicationStatusLabels } from "../../lib/publications";
 import { notifySchedulingUpdate } from "../../lib/scheduling";
+import {
+  startSocialAccountOAuthConnection,
+  navigateToSocialAccountAuthorization,
+} from "../../lib/social-account-connections";
+vi.mock("../../lib/social-account-connections", () => ({
+  startSocialAccountOAuthConnection: vi.fn(),
+  navigateToSocialAccountAuthorization: vi.fn(),
+}));
 import { PublicationHistory } from "./publication-history";
 
 const item = {
@@ -63,6 +71,14 @@ function publication(overrides: Partial<Publication> = {}): Publication {
         observations: [],
       },
     ],
+    transition_version: 2,
+    action_version: 0,
+    can_manage_recovery: true,
+    can_manage_account: true,
+    can_authorize_retry: true,
+    can_begin_manual: true,
+    can_complete_manual: false,
+    destination_connection_status: "connected",
     actions: [],
     ...overrides,
   };
@@ -90,6 +106,8 @@ describe("publication history", () => {
   });
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
     vi.useRealTimers();
   });
 
@@ -301,6 +319,206 @@ describe("publication history", () => {
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining("/other-workspace/publications?content_item_id=other"),
       expect.anything(),
+    );
+  });
+  it.each([
+    { can_manage_recovery: false },
+    { can_manage_recovery: undefined },
+    { can_authorize_retry: false },
+    { delivery_status: "published", resolution: "published" },
+    { resolution: "manually_completed" },
+    { delivery_status: "manual_action_required", resolution: "reconciliation_required" },
+    { destination_connection_status: "reconnect_required" },
+  ] satisfies Partial<Publication>[])("hides retry for ineligible state %j", async (state) => {
+    current = publication(state);
+    render(panel());
+    await openDetail();
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+  });
+
+  it("retries once with canonical versions and refreshes the authorized state", async () => {
+    render(panel());
+    await openDetail();
+    let finish!: (response: Response) => void;
+    fetchMock.mockImplementationOnce(
+      () =>
+        new Promise<Response>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const retry = screen.getByRole("button", { name: "Retry" });
+    fireEvent.click(retry);
+    fireEvent.click(retry);
+    expect(screen.getByRole("button", { name: "Requesting retry..." })).toBeDisabled();
+    const posts = fetchMock.mock.calls.filter(([, init]) => init?.method === "POST");
+    expect(posts).toHaveLength(1);
+    expect(posts[0]?.[0]).toBe("/api/workspaces/workspace/publications/publication/recover");
+    expect(JSON.parse(posts[0]?.[1].body)).toEqual({
+      expected_version: 2,
+      expected_action_version: 0,
+    });
+    expect(posts[0]?.[1].headers["Idempotency-Key"]).toMatch(/^[a-f0-9-]{36}$/);
+    current = publication({
+      resolution: "retry_authorized",
+      can_authorize_retry: false,
+      action_version: 1,
+    });
+    await act(async () => finish(Response.json(current)));
+    expect(await screen.findByText(/Retry authorized. The worker/)).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument(),
+    );
+    expect(screen.getByLabelText("Attempt 1")).toBeInTheDocument();
+  });
+
+  it("keeps an idempotency key after uncertain failure and never reflects provider errors", async () => {
+    render(panel());
+    await openDetail();
+    fetchMock.mockResolvedValueOnce(
+      Response.json({ detail: "Authorization: Bearer private" }, { status: 503 }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Recovery could not be confirmed");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Retry" })).toBeEnabled());
+    fetchMock.mockRejectedValueOnce(new Error("private token"));
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Retry" })).toBeEnabled());
+    const posts = fetchMock.mock.calls.filter(([, init]) => init?.method === "POST");
+    expect(posts).toHaveLength(2);
+    expect(posts[0]?.[1].headers["Idempotency-Key"]).toBe(posts[1]?.[1].headers["Idempotency-Key"]);
+    expect(screen.queryByText(/private/)).not.toBeInTheDocument();
+  });
+
+  it("refreshes stale conflicts and removes controls for a published terminal state", async () => {
+    render(panel());
+    await openDetail();
+    current = publication({
+      delivery_status: "published",
+      resolution: "published",
+      completion_source: "provider",
+    });
+    fetchMock.mockResolvedValueOnce(Response.json({ detail: "private" }, { status: 409 }));
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Publication state changed");
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument(),
+    );
+    expect(
+      screen.queryByRole("button", { name: "Reserve manual delivery" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("Published")).toBeInTheDocument();
+  });
+
+  it("reserves manual delivery then records validated human evidence without replacing attempts", async () => {
+    render(panel());
+    await openDetail();
+    current = publication({
+      resolution: "manual_publishing",
+      action_version: 1,
+      can_authorize_retry: false,
+      can_begin_manual: false,
+      can_complete_manual: true,
+      asset_refs: [{ sha256: "a".repeat(64), size_bytes: 10, media_type: "image/png" }],
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Reserve manual delivery" }));
+    const complete = await screen.findByRole("button", { name: "Mark publication completed" });
+    expect(complete).toBeDisabled();
+    expect(screen.getByRole("link", { name: "Download prepared asset" })).toHaveAttribute(
+      "href",
+      expect.stringContaining("/assets/"),
+    );
+    expect(screen.getByText(/does not publish through the provider API/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("checkbox"));
+    fireEvent.change(screen.getByLabelText("Provider URL (optional)"), {
+      target: { value: "https://example.com/post?access_token=private" },
+    });
+    fireEvent.click(complete);
+    expect(await screen.findByRole("alert")).toHaveTextContent("valid resource ID");
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+    fireEvent.change(screen.getByLabelText("Provider URL (optional)"), {
+      target: { value: "https://example.com/post" },
+    });
+    fireEvent.change(screen.getByLabelText("Provider resource ID (optional)"), {
+      target: { value: "post-123" },
+    });
+    current = publication({
+      resolution: "manually_completed",
+      action_version: 2,
+      completion_source: "human",
+      can_complete_manual: false,
+    });
+    fireEvent.click(complete);
+    await screen.findByText(/Manual completion recorded. Automatic attempt/);
+    const posts = fetchMock.mock.calls.filter(([, init]) => init?.method === "POST");
+    expect(JSON.parse(posts[1]?.[1].body)).toEqual({
+      expected_version: 2,
+      expected_action_version: 1,
+      delivery_confirmed: true,
+      external_post_id: "post-123",
+      provider_url: "https://example.com/post",
+    });
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "Mark publication completed" }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(screen.getByLabelText("Attempt 1")).toBeInTheDocument();
+  });
+
+  it("offers no mutation controls to an unauthorized viewer", async () => {
+    current = publication({ can_manage_recovery: false, can_manage_account: false });
+    render(panel());
+    const detail = await openDetail();
+    expect(within(detail).queryByRole("button")).not.toBeInTheDocument();
+    expect(
+      within(detail).queryByRole("link", { name: /Reconnect Account/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("uses existing OAuth for reconnect, then refreshes account/publication state on return without publishing", async () => {
+    vi.stubEnv("NEXT_PUBLIC_YOUTUBE_DIRECT_OAUTH_ENABLED", "true");
+    current = publication({
+      provider: "youtube",
+      destination_connection_method: "direct_api",
+      destination_connection_status: "reconnect_required",
+    });
+    const popup = { opener: {}, close: vi.fn() } as unknown as Window;
+    vi.spyOn(window, "open").mockReturnValue(popup);
+    vi.mocked(startSocialAccountOAuthConnection).mockResolvedValue({
+      authorization_url: "https://accounts.google.com/oauth",
+      state: "state",
+      expires_at: "soon",
+      scopes: [],
+    });
+    render(panel());
+    await openDetail();
+    fireEvent.click(screen.getByRole("button", { name: "Reconnect Account" }));
+    await waitFor(() =>
+      expect(navigateToSocialAccountAuthorization).toHaveBeenCalledWith(
+        "https://accounts.google.com/oauth",
+        popup,
+      ),
+    );
+    expect(startSocialAccountOAuthConnection).toHaveBeenCalledWith("workspace", {
+      provider: "youtube",
+      redirect_uri: "http://localhost:3000/api/social-account-connections/oauth/youtube/callback",
+      safe_redirect_path: "/marketing?tab=accounts",
+    });
+    current = { ...current, destination_connection_status: "connected" };
+    fireEvent(window, new Event("focus"));
+    expect(await screen.findByRole("button", { name: "Retry" })).toBeInTheDocument();
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(0);
+  });
+
+  it("refreshes expanded recovery actions on realtime updates", async () => {
+    render(panel());
+    await openDetail();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeEnabled();
+    current = publication({ delivery_status: "published", resolution: "published" });
+    act(() => notifySchedulingUpdate("workspace", "content"));
+    await screen.findByText("Published");
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument(),
     );
   });
 });

@@ -3150,6 +3150,7 @@ function SocialAccountsTab({
   const accountItems = accounts.data?.social_account_connections ?? [];
   const artistOptions = campaignArtistOptions(campaigns);
   const youtubeDirectOAuthEnabled = isYouTubeDirectOAuthEnabled();
+  const oauthResult = useSearchParams().get("oauth");
 
   function updateCapability(capability: SocialAccountCapability, checked: boolean) {
     setForm((current) => ({
@@ -3201,6 +3202,17 @@ function SocialAccountsTab({
 
   return (
     <section className="grid gap-4" aria-label="Social account connections">
+      {oauthResult === "connected" && (
+        <p role="status" className="text-sm text-indigo-800">
+          Account connection updated. If recovering a publication, return to its delivery details
+          and refresh. Reconnection does not publish; request Retry when ready.
+        </p>
+      )}
+      {oauthResult === "failed" && (
+        <p role="alert" className="text-sm text-red-800">
+          Account connection could not be completed. Try reconnecting again.
+        </p>
+      )}
       <Card className="grid gap-1">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>

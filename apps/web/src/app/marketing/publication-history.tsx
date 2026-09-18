@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { MarketingContentItem } from "../../lib/marketing-content";
 import {
   getPublication,
+  preparedAssetPath,
   listPublications,
   publicProviderUrl,
   publicationCancellationMessage,
@@ -14,6 +15,7 @@ import {
   publicationStatusLabels,
   type Publication,
 } from "../../lib/publications";
+import { PublicationRecovery } from "./publication-recovery";
 import { subscribeSchedulingUpdates } from "../../lib/scheduling";
 
 function timestamp(value: string | null, zone: string) {
@@ -77,13 +79,26 @@ function Recovery({ publication }: { publication: Publication }) {
   );
 }
 
-function PublicationDetail({ publication }: { publication: Publication }) {
+function PublicationDetail({
+  publication,
+  refreshing,
+  onRefresh,
+}: {
+  publication: Publication;
+  refreshing: boolean;
+  onRefresh: () => Promise<void>;
+}) {
   const url = publicProviderUrl(publication.provider_url);
   const zone = publication.authoring_timezone;
   const attempts = [...publication.attempts].sort((a, b) => a.number - b.number);
   return (
     <div className="grid min-w-0 gap-4 text-sm" aria-label="Publication detail">
       <Recovery publication={publication} />
+      <PublicationRecovery
+        publication={publication}
+        refreshing={refreshing}
+        onRefresh={onRefresh}
+      />
       <section className="grid gap-2" aria-label="Approved publication intent">
         <h5 className="font-semibold">Approved publication intent</h5>
         <p>
@@ -104,6 +119,15 @@ function PublicationDetail({ publication }: { publication: Publication }) {
               <li key={asset.sha256} className="break-all text-xs text-slate-600">
                 {asset.media_type} · {asset.size_bytes.toLocaleString()} bytes · SHA-256{" "}
                 {asset.sha256}
+                {publication.resolution === "manual_publishing" && (
+                  <a
+                    className="ml-2 text-indigo-700 underline"
+                    href={preparedAssetPath(publication, asset.sha256)}
+                    download
+                  >
+                    Download prepared asset
+                  </a>
+                )}
               </li>
             ))}
           </ul>
@@ -353,6 +377,10 @@ function PublicationHistoryPanel({
 
   useEffect(() => {
     void refresh();
+    const onFocus = () => {
+      void refresh();
+    };
+    window.addEventListener("focus", onFocus);
     const timer = window.setInterval(() => {
       if (!request.current && document.visibilityState !== "hidden") void refresh();
     }, 15000);
@@ -362,6 +390,7 @@ function PublicationHistoryPanel({
     return () => {
       request.current?.abort();
       window.clearInterval(timer);
+      window.removeEventListener("focus", onFocus);
       unsubscribe();
     };
   }, [refresh, workspaceId, contentId]);
@@ -375,13 +404,15 @@ function PublicationHistoryPanel({
     const controller = new AbortController();
     setDetailLoading(true);
     setDetailError(null);
-    setDetail(null);
     void getPublication(workspaceId, selectedId, controller.signal)
       .then((value) => {
         if (!controller.signal.aborted) setDetail(value);
       })
       .catch((reason: unknown) => {
-        if (!controller.signal.aborted) setDetailError(publicationErrorMessage(reason));
+        if (!controller.signal.aborted) {
+          setDetail(null);
+          setDetailError(publicationErrorMessage(reason));
+        }
       })
       .finally(() => {
         if (!controller.signal.aborted) setDetailLoading(false);
@@ -454,9 +485,10 @@ function PublicationHistoryPanel({
             variant="secondary"
             aria-expanded={selectedId === publication.id}
             aria-controls={`publication-${publication.id}`}
-            onClick={() =>
-              setSelectedId((current) => (current === publication.id ? null : publication.id))
-            }
+            onClick={() => {
+              setDetail(null);
+              setSelectedId((current) => (current === publication.id ? null : publication.id));
+            }}
           >
             {selectedId === publication.id ? "Hide delivery details" : "View delivery details"}
           </Button>
@@ -468,7 +500,14 @@ function PublicationHistoryPanel({
                   {detailError}
                 </p>
               )}
-              {detail?.id === publication.id && <PublicationDetail publication={detail} />}
+              {detail?.id === publication.id && (
+                <PublicationDetail
+                  key={detail.id}
+                  publication={detail}
+                  refreshing={loading || detailLoading}
+                  onRefresh={refresh}
+                />
+              )}
             </div>
           )}
         </article>

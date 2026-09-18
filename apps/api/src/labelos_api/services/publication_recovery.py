@@ -5,6 +5,7 @@ import json
 from datetime import UTC, datetime
 from uuid import UUID
 
+from labelos_database.capabilities import Capability
 from labelos_database.models import (
     PublicationAction,
     PublicationLease,
@@ -29,6 +30,7 @@ from labelos_api.repositories.publishing import (
 from labelos_api.repositories.scheduling import SchedulingRepository
 from labelos_api.scheduling.payload import canonical_json
 from labelos_api.services import marketing_content_service as content
+from labelos_api.services import social_account_service as accounts
 from labelos_api.services.delivery_orchestrator import DeliveryOrchestrator
 from labelos_api.services.scheduling_commands import authorized_item
 
@@ -220,12 +222,42 @@ class PublicationRecoveryService:
         prepared = envelope["content"]
         now = self.clock()
         state = resolution(row, now)
+        can_manage_recovery = False
+        can_manage_account = False
+        if (
+            self.actor is not None
+            and content._actor_kind(self.actor) == "user"
+            and content._actor_user(self.actor) is not None
+        ):
+            try:
+                await authorized_item(
+                    self.session,
+                    self.workspace_id,
+                    row.marketing_content_item_id,
+                    self.actor,
+                    mutate=True,
+                )
+                can_manage_recovery = True
+            except content.MarketingContentAuthorizationError:
+                pass
+            try:
+                await accounts._require_capability(
+                    self.session,
+                    actor=self.actor,
+                    workspace_id=self.workspace_id,
+                    capability=Capability.marketing_account_manage,
+                )
+                can_manage_account = True
+            except accounts.SocialAccountAuthorizationError:
+                pass
         destination = (
             await self.session.execute(
                 select(
                     SocialAccountConnection.external_account_id,
                     SocialAccountConnection.username,
                     SocialAccountConnection.display_name,
+                    SocialAccountConnection.connection_method,
+                    SocialAccountConnection.status,
                 ).where(
                     SocialAccountConnection.organization_id == self.workspace_id,
                     SocialAccountConnection.id == row.social_account_connection_id,
@@ -334,13 +366,24 @@ class PublicationRecoveryService:
                 completion.external_post_id if completion else row.external_post_id
             ),
             "provider_url": completion.provider_url if completion else row.provider_url,
+            "can_manage_recovery": can_manage_recovery,
+            "can_manage_account": can_manage_account,
+            "destination_connection_method": (
+                destination.connection_method.value if identity_matches else None
+            ),
+            "destination_connection_status": (
+                destination.status if identity_matches else None
+            ),
             "transition_version": row.transition_version,
             "action_version": len(row.actions),
             "provider": row.provider,
             "destination_id": row.social_account_connection_id,
             "destination_identity_matches": identity_matches,
             "destination_account": (
-                dict(destination._mapping)
+                {
+                    key: getattr(destination, key)
+                    for key in ("external_account_id", "username", "display_name")
+                }
                 if identity_matches and destination is not None
                 else None
             ),

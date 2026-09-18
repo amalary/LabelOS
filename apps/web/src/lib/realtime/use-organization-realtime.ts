@@ -300,7 +300,8 @@ export function useOrganizationRealtime(organizationId: string | null): Organiza
 
         if (
           event.type.startsWith(schedulingEventPrefix) ||
-          event.type.startsWith("marketing.publication.")
+          event.type.startsWith("marketing.publication.") ||
+          event.type.startsWith(marketingSocialAccountEventPrefix)
         ) {
           notifySchedulingUpdate(
             organizationId,

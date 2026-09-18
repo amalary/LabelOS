@@ -29,6 +29,15 @@ export type PublicationAttempt = {
 
 /** Explicit public projection; provider diagnostics and credentials are never part of this contract. */
 export type Publication = {
+  transition_version?: number;
+  action_version?: number;
+  can_authorize_retry?: boolean;
+  can_begin_manual?: boolean;
+  can_complete_manual?: boolean;
+  can_manage_recovery?: boolean;
+  can_manage_account?: boolean;
+  destination_connection_method?: string | null;
+  destination_connection_status?: string | null;
   id: string;
   workspace_id: string;
   content_item_id: string;
@@ -253,4 +262,63 @@ export async function listPublications(
 
 export function getPublication(workspaceId: string, publicationId: string, signal?: AbortSignal) {
   return read<Publication>(`${basePath(workspaceId)}/${encodeURIComponent(publicationId)}`, signal);
+}
+
+export type PublicationCommand = "recover" | "manual/start" | "manual/complete";
+export class PublicationCommandError extends Error {
+  constructor(readonly status = 0) {
+    super(
+      status === 409
+        ? "Publication state changed or recovery is no longer allowed. Review the refreshed state before trying again."
+        : status === 401
+          ? "Sign in again to recover this publication."
+          : status === 403
+            ? "You do not have permission to recover this publication."
+            : status === 404
+              ? "This publication is no longer available."
+              : status === 422
+                ? "Check the completion information and refresh before trying again."
+                : "Recovery could not be confirmed. Refresh or retry the same action safely.",
+    );
+  }
+}
+
+export function preparedAssetPath(publication: Publication, digest: string) {
+  return `${basePath(publication.workspace_id)}/${encodeURIComponent(publication.id)}/assets/${encodeURIComponent(digest)}`;
+}
+
+export async function publicationCommand(
+  publication: Publication,
+  command: PublicationCommand,
+  operationId: string,
+  evidence: { delivery_confirmed?: boolean; external_post_id?: string; provider_url?: string } = {},
+): Promise<Publication> {
+  let response: Response;
+  try {
+    response = await fetch(
+      `${basePath(publication.workspace_id)}/${encodeURIComponent(publication.id)}/${command}`,
+      {
+        method: "POST",
+        cache: "no-store",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          "Idempotency-Key": operationId,
+        },
+        body: JSON.stringify({
+          expected_version: publication.transition_version,
+          expected_action_version: publication.action_version,
+          ...evidence,
+        }),
+      },
+    );
+  } catch {
+    throw new PublicationCommandError();
+  }
+  if (!response.ok) throw new PublicationCommandError(response.status);
+  try {
+    return (await response.json()) as Publication;
+  } catch {
+    throw new PublicationCommandError();
+  }
 }

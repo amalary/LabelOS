@@ -230,6 +230,11 @@ def test_completion_requires_human_permission_and_workspace(recovery_api, sessio
     assert command(client, scope, identifier, "manual/start").status_code == 200
     for denied in (viewer, _agent_actor(actor)):
         state["actor"] = denied
+        projection = client.get(
+            f"/api/v1/workspaces/{scope}/publications/{identifier}"
+        ).json()
+        assert projection["can_manage_recovery"] is False
+        assert projection["can_manage_account"] is False
         assert (
             command(
                 client, scope, identifier, "manual/complete", 1, delivery_confirmed=True
@@ -567,3 +572,37 @@ def test_prepared_asset_download_is_bound_to_publication_and_workspace(
         ).status_code
         == 404
     )
+
+
+def test_recovery_projects_only_safe_matching_connection_fields(sessions):
+    async def run():
+        async with sessions.begin() as session:
+            repo, _, accepted = await seed_publication(session, persist=False)
+            row = await repo.create(
+                accepted,
+                created_at=datetime.now(UTC),
+                destination_identity=hashlib.sha256(
+                    canonical_json(["instagram", None])
+                ).hexdigest(),
+            )
+            actor, _ = await _seed_actor(
+                session,
+                workspace=await session.get(Organization, row.workspace_id),
+                email=f"{uuid4()}@test.com",
+                capabilities=(
+                    Capability.marketing_content_view.value,
+                    Capability.marketing_content_schedule.value,
+                    Capability.marketing_account_manage.value,
+                ),
+            )
+            data = await PublicationRecoveryService(
+                session, row.workspace_id, actor=actor
+            ).handoff(row)
+            assert data["can_manage_recovery"] is True
+            assert data["can_manage_account"] is True
+            assert data["destination_identity_matches"] is True
+            assert data["destination_connection_method"] == "assisted"
+            assert set(data["destination_account"]) == {
+                "external_account_id", "username", "display_name"
+            }
+    asyncio.run(run())

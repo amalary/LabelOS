@@ -19,6 +19,8 @@ def test_pending_history_and_view_only_access(recovery_api, sessions):
     response = client.get(f"{base}/{identifier}")
     assert response.status_code == 200
     data = response.json()
+    assert data["can_manage_recovery"] is False
+    assert data["can_manage_account"] is False
     assert data["delivery_status"] == "pending"
     assert data["attempt_count"] == 0
     assert data["attempts"] == []
@@ -50,6 +52,10 @@ def test_failure_then_success_preserves_attempt_history(recovery_api, sessions):
     fail(sessions, scope, identifier)
     base = f"/api/v1/workspaces/{scope}/publications/{identifier}"
     failed = client.get(base).json()
+    assert failed["can_manage_recovery"] is True
+    assert failed["can_manage_account"] is False
+    assert failed["destination_connection_method"] is None
+    assert failed["destination_connection_status"] is None
     assert failed["attempt_count"] == 1
     assert failed["resolution"] == "reconnect_required"
     assert failed["latest_failure_reason"] == "authorization_required"

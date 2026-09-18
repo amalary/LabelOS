@@ -254,6 +254,25 @@ describe("useOrganizationRealtime", () => {
     }
   });
 
+  it("refreshes publication recovery when a social connection changes", () => {
+    const listener = vi.fn();
+    const unsubscribe = subscribeSchedulingUpdates(listener);
+    try {
+      render(<RealtimeProbe />);
+      act(() =>
+        FakeEventSource.instances[0]!.emit("message", {
+          ...realtimeEvent("marketing.social_account.updated"),
+          entity_type: "social_account_connection",
+          entity_id: "connection",
+          payload: { connectionId: "connection" },
+        }),
+      );
+      expect(listener).toHaveBeenCalledExactlyOnceWith("org_01", null);
+    } finally {
+      unsubscribe();
+    }
+  });
+
   beforeEach(() => {
     clearApprovalCache();
     clearAnalyticsCache();
