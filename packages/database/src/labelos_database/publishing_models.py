@@ -17,17 +17,17 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from labelos_database.base import Base, UUIDPrimaryKey
-from labelos_database.publishing_guards import register_publishing_guards
 from labelos_database.publication_action_guards import register_action_guards
 from labelos_database.publishing import (
-    STATES,
     OPERATIONS,
     OUTCOMES,
     REASONS,
     SOURCES,
+    STATES,
     PublicResourceURL,
     choices,
 )
+from labelos_database.publishing_guards import register_publishing_guards
 from labelos_database.scheduling import SchedulingUTCDateTime
 
 JOB_SCOPE = (
