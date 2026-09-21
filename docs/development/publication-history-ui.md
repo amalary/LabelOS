@@ -50,10 +50,15 @@ non-provider error messages. Mutation receipts do not replace attempt history.
 
 ## API and refresh behavior
 
-The existing content-scoped publication list and detail APIs retain their
-workspace/campaign authorization. Their explicit public projection now includes
-origin IDs, lifecycle timestamps, attempt count and individual attempts with
-normalized observations. Attempt completion remains the original execution
+The content-scoped publication list and detail APIs retain their
+workspace/campaign authorization. The list now returns `PublicationSummary`:
+identity, destination display identity, accepted channel/placement/revision and
+schedule, lifecycle/resolution, attempt count, latest failure, public provider
+reference and recovery eligibility. Content title, campaign and artist labels
+continue to come from the content inspector. The list has no media or thumbnails.
+Origin IDs, prepared captions, hashtags, asset references, individual attempts,
+observations, actions and account-management controls are fetched separately from
+the existing detail endpoint when a row is expanded. Attempt completion remains the original execution
 observation time; subsequent reconciliation is shown separately on that attempt.
 `latest_failure_reason` and `last_failed_at` describe the most recent recorded
 failure, even if a later attempt succeeded.
@@ -65,6 +70,92 @@ map to fixed user-facing text. Provider links require public HTTPS URLs without
 userinfo, query, fragment or nonstandard port. Credentials, tokens, authorization
 headers, provider response bodies, arbitrary metadata and embedded media bytes
 are absent from the history projection.
+
+### Phase 2 performance closeout
+
+The former list called `PublicationRecoveryService.get()` and `handoff()` for
+each ID. Each call loaded the full binary canonical envelope, attempts,
+observations, transitions and actions, repeated content/channel authorization
+loads and capability queries, and looked up the destination separately. Polling
+every 15 seconds repeated these loads even with all details collapsed.
+
+`services/publication_history.py` now checks workspace and campaign view access
+once per page and schedule permission once for recovery visibility. It reads
+only the content campaign ID for authorization. The repository uses one bounded
+scalar query: workspace/content filters and the existing UUID cursor order select
+at most `limit + 1` publications (API maximum 100); one-to-one joins provide small
+snapshot, immutable scheduling-job and scoped destination fields. Indexed scalar
+count/first-attempt and latest-action/latest-failure selectors provide summaries
+without materializing any journal collections. Recovery resolution shares the
+existing policy logic; commands still perform their complete authorization and
+state checks. No rich Publication or content ORM graph is hydrated by listing.
+
+Migration `202609170500` adds `publication_list_metadata`, keyed by Publication
+with a composite workspace foreign key. It stores only the accepted channel and
+placement, which must survive later draft edits. Creation writes it atomically
+with acceptance. A database-side backfill extracts these fields once from existing
+envelopes, without altering the immutable journal. The existing content index is
+extended to `(workspace_id, marketing_content_item_id, id)` to serve precisely the
+filter, cursor and ordering used here. Existing attempt-number, action-version
+and transition-version indexes serve the summary lookups; no others are added.
+
+Deploy the migration and new acceptance writers together with old acceptance
+workers quiesced; resume writes only on the new version. The one-time envelope
+backfill and index replacement require a migration window appropriate to database
+size. There is deliberately no expensive envelope fallback in list reads.
+
+The repeatable fixture in `test_publication_history_projection.py` includes 25
+publications in the requested content scope, another content item in the same
+workspace and another workspace/content item,
+three named destinations, 36 attempts, and two 128 KiB media assets in each of 24
+accepted envelopes. It also puts 256 KiB of unrelated metadata on the current
+content item and changes a draft placement. SQLAlchemy cursor instrumentation
+replays the old endpoint and compares it with the new API in fresh sessions:
+
+| Page size | Former SELECTs | New SELECTs |
+| --------- | -------------: | ----------: |
+| 1         |         50–51* |          24 |
+| 5         |       198–199* |          24 |
+| 25        |            938 |          24 |
+
+*The pending row's random UUID position determines whether an observations query
+is needed. Counts include real RBAC reads, but not test setup or transaction
+control. Both SQLite and PostgreSQL reproduce the constant new count. One of the
+24 queries is the entire publication projection; the rest are authorization and
+the campaign-ID lookup. The former 25-row read selected 25 full envelopes (about
+8 MiB of embedded base64 media across 24 rows); the new list selects none. Tests
+also reject asset/content-metadata columns and channel hydration in captured SQL.
+SQLite EXPLAIN verifies use of the content cursor index; PostgreSQL EXPLAIN ANALYZE
+verifies the bounded result. Backfill tests rebuild all 27 metadata snapshots from
+the representative dataset and compare them with the snapshots captured on acceptance.
+
+Remaining costs are the existing constant authorization reads, one summary lookup
+per returned publication inside the bounded SQL query, and polling each page the
+user has loaded. An expanded detail still uses the rich endpoint and asset
+downloads still read the prepared snapshot. These behaviors are intentionally
+outside this listing-only fix. Production latency and migration duration should
+be observed at deployment; the regression measurements are query/load counts,
+not a production throughput benchmark.
+
+Closeout verification: Publication History API/projection, recovery, retry,
+publishing persistence/migration, PostgreSQL recovery and invalidation suites
+pass on the applicable SQLite/PostgreSQL backends. This includes query-count and
+no-media assertions, current and revoked permissions, campaign denial, public
+destination identity, manual/provider outcome parity, stable cursor pagination,
+same-workspace content isolation and media-bearing migration backfill. The 154
+targeted frontend tests (history, client, proxy and Marketing workspace) and the
+frontend typecheck pass. The history tests use the exact summary field set and
+verify that repeated 15-second polls never fetch rich details while collapsed;
+expansion fetches the detail endpoint, and collapsing stops those detail reads.
+Changed Python files pass Ruff. The MEDIUM listing performance finding is CLOSED in code, with the
+migration/deployment sequence above required before rollout.
+
+Closeout rerun: 122 backend tests passed without PostgreSQL (five PostgreSQL-only
+tests skipped). With PostgreSQL enabled, the selected run passed 154 tests and had
+one connection timeout during recovery-test setup after a long execution pause;
+that test passed on immediate isolated rerun (155 selected tests verified in total).
+The timeout occurred before exercising publication behavior. No application change
+was made for it. The disposable PostgreSQL server was stopped after verification.
 
 The panel supports cursor pagination, refreshes all loaded pages on delivery
 events and social-account changes, refreshes on window focus, and polls every 15 seconds while visible. Scope changes abort in-flight

@@ -1,7 +1,11 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MarketingContentItem } from "../../lib/marketing-content";
-import { type Publication, publicationStatusLabels } from "../../lib/publications";
+import {
+  type Publication,
+  type PublicationSummary,
+  publicationStatusLabels,
+} from "../../lib/publications";
 import { notifySchedulingUpdate } from "../../lib/scheduling";
 import {
   startSocialAccountOAuthConnection,
@@ -84,6 +88,42 @@ function publication(overrides: Partial<Publication> = {}): Publication {
   };
 }
 const fetchMock = vi.fn();
+function summary(value: Publication): PublicationSummary {
+  // The poll response deliberately has no prepared content or journals.
+  return {
+    id: value.id,
+    workspace_id: value.workspace_id,
+    content_item_id: value.content_item_id,
+    provider: value.provider,
+    destination_id: value.destination_id,
+    delivery_status: value.delivery_status,
+    published_at: value.published_at,
+    channel: value.channel,
+    placement: value.placement,
+    content_revision: value.content_revision,
+    scheduled_for: value.scheduled_for,
+    authoring_timezone: value.authoring_timezone,
+    attempt_count: value.attempt_count,
+    started_at: value.started_at,
+    latest_failure_reason: value.latest_failure_reason,
+    last_failed_at: value.last_failed_at,
+    failure_category: null,
+    transition_version: value.transition_version,
+    next_retry_at: value.next_retry_at,
+    resolution: value.resolution,
+    destination_identity_matches: value.destination_identity_matches,
+    destination_account: value.destination_account,
+    completion_source: value.completion_source,
+    external_post_id: value.external_post_id,
+    provider_url: value.provider_url,
+    manual_completed_at: value.manual_completed_at,
+    action_version: value.action_version,
+    can_manage_recovery: value.can_manage_recovery,
+    can_authorize_retry: value.can_authorize_retry,
+    can_begin_manual: value.can_begin_manual,
+    can_complete_manual: value.can_complete_manual,
+  };
+}
 let current: Publication;
 function panel(value = item) {
   return <PublicationHistory item={value} campaignName="Debut campaign" artistName="Nova" />;
@@ -99,7 +139,7 @@ describe("publication history", () => {
     fetchMock.mockReset();
     fetchMock.mockImplementation(async (path: string) =>
       Response.json(
-        path.includes("?") ? { publications: [current], next_after_id: null } : current,
+        path.includes("?") ? { publications: [summary(current)], next_after_id: null } : current,
       ),
     );
     vi.stubGlobal("fetch", fetchMock);
@@ -267,12 +307,37 @@ describe("publication history", () => {
     expect(screen.queryByText(/secret-value/)).not.toBeInTheDocument();
   });
 
+  it("polls summaries without fetching rich details until expanded", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    render(panel());
+    await screen.findByRole("button", { name: "View delivery details" });
+    await act(async () => vi.advanceTimersByTimeAsync(30000));
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock.mock.calls.every(([path]) => path.includes("?content_item_id="))).toBe(true);
+    expect(screen.queryByText("The approved teaser")).not.toBeInTheDocument();
+
+    const detail = await openDetail();
+    expect(within(detail).getByText("The approved teaser")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      "/api/workspaces/workspace/publications/publication",
+      expect.anything(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Hide delivery details" }));
+    await act(async () => vi.advanceTimersByTimeAsync(15000));
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    expect(fetchMock.mock.calls.filter(([path]) => !path.includes("?"))).toHaveLength(1);
+  });
+
   it("paginates without duplicates and refreshes all visible pages", async () => {
     fetchMock.mockImplementation(async (path: string) =>
       Response.json(
         path.includes("after_id=")
-          ? { publications: [current, publication({ id: "older" })], next_after_id: null }
-          : { publications: [current], next_after_id: "cursor" },
+          ? {
+              publications: [summary(current), summary(publication({ id: "older" }))],
+              next_after_id: null,
+            }
+          : { publications: [summary(current)], next_after_id: "cursor" },
       ),
     );
     render(panel());

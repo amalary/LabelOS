@@ -7,9 +7,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
-from labelos_database.models import Publication
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -77,26 +75,11 @@ async def list_publications(
     limit: Annotated[int, Query(ge=1, le=100)] = 100,
     after_id: UUID | None = None,
 ):
-    from labelos_api.services.scheduling_commands import authorized_item
+    from labelos_api.services.publication_history import list_publications as history
 
-    await authorized_item(session, workspace_id, content_item_id, context)
-    query = select(Publication.id).where(
-        Publication.workspace_id == workspace_id,
-        Publication.marketing_content_item_id == content_item_id,
+    return await history(
+        session, workspace_id, content_item_id, context, limit=limit, after_id=after_id
     )
-    if after_id is not None:
-        query = query.where(Publication.id > after_id)
-    identifiers = list(
-        await session.scalars(query.order_by(Publication.id).limit(limit + 1))
-    )
-    service = PublicationRecoveryService(session, workspace_id, actor=context)
-    return {
-        "publications": [
-            await service.handoff(await service.get(identifier))
-            for identifier in identifiers[:limit]
-        ],
-        "next_after_id": identifiers[limit - 1] if len(identifiers) > limit else None,
-    }
 
 
 @router.get("/{publication_id}")

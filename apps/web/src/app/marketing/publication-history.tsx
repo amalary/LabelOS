@@ -14,6 +14,7 @@ import {
   publicationResolution,
   publicationStatusLabels,
   type Publication,
+  type PublicationSummary,
 } from "../../lib/publications";
 import { PublicationRecovery } from "./publication-recovery";
 import { subscribeSchedulingUpdates } from "../../lib/scheduling";
@@ -31,7 +32,9 @@ function timestamp(value: string | null, zone: string) {
   }
 }
 
-function destination(publication: Publication) {
+function destination(
+  publication: Pick<Publication, "destination_identity_matches" | "destination_account">,
+) {
   const account = publication.destination_identity_matches ? publication.destination_account : null;
   return (
     account?.display_name ??
@@ -41,7 +44,7 @@ function destination(publication: Publication) {
   );
 }
 
-function Status({ publication }: { publication: Publication }) {
+function Status({ publication }: { publication: Pick<Publication, "delivery_status"> }) {
   return (
     <Badge
       variant={
@@ -312,7 +315,7 @@ function PublicationHistoryPanel({
   campaignName: string;
   artistName?: string;
 }) {
-  const [publications, setPublications] = useState<Publication[]>([]);
+  const [publications, setPublications] = useState<PublicationSummary[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);

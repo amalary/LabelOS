@@ -3785,5 +3785,6 @@ from labelos_database.publishing_models import (  # noqa: E402,F401
     PublicationAction,
     PublicationAttempt,
     PublicationLease,
+    PublicationListMetadata,
     PublicationTransition,
 )

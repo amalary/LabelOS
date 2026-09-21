@@ -15,6 +15,7 @@ from labelos_database.models import (
     Publication,
     PublicationAttempt,
     PublicationLease,
+    PublicationListMetadata,
     PublicationTransition,
     RealtimeEvent,
     SchedulingJob,
@@ -276,7 +277,8 @@ class PublicationRepository:
             or job.schedule_timezone != request.authoring_timezone
         ):
             raise PublicationConflict("publication_source_mismatch")
-        canonical = canonical_json(envelope(request))
+        accepted_envelope = envelope(request)
+        canonical = canonical_json(accepted_envelope)
         existing = await self.get_by_job(request.job_id)
         if existing:
             if (
@@ -333,6 +335,15 @@ class PublicationRepository:
         async with self.session.begin_nested():
             self.session.add(row)
             await self.session.flush()
+            prepared = accepted_envelope["content"]
+            self.session.add(
+                PublicationListMetadata(
+                    publication_id=row.id,
+                    workspace_id=self.workspace_id,
+                    channel=prepared["channel"],
+                    placement=prepared["placement"],
+                )
+            )
             self.session.add(
                 PublicationLease(publication_id=row.id, workspace_id=self.workspace_id)
             )

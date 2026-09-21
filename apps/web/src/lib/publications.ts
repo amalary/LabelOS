@@ -85,7 +85,42 @@ export type Publication = {
   }[];
 };
 
-export type PublicationPage = { publications: Publication[]; next_after_id: string | null };
+/** Polling contract: rich content, assets and journals are fetched on expansion. */
+export type PublicationSummary = Pick<
+  Publication,
+  | "id"
+  | "workspace_id"
+  | "content_item_id"
+  | "provider"
+  | "destination_id"
+  | "delivery_status"
+  | "published_at"
+  | "channel"
+  | "placement"
+  | "content_revision"
+  | "scheduled_for"
+  | "authoring_timezone"
+  | "attempt_count"
+  | "started_at"
+  | "latest_failure_reason"
+  | "last_failed_at"
+  | "transition_version"
+  | "next_retry_at"
+  | "resolution"
+  | "destination_identity_matches"
+  | "destination_account"
+  | "completion_source"
+  | "external_post_id"
+  | "provider_url"
+  | "manual_completed_at"
+  | "action_version"
+  | "can_manage_recovery"
+  | "can_authorize_retry"
+  | "can_begin_manual"
+  | "can_complete_manual"
+> & { failure_category: string | null };
+
+export type PublicationPage = { publications: PublicationSummary[]; next_after_id: string | null };
 
 export const publicationStatusLabels: Record<PublicationStatus, string> = {
   pending: "Pending delivery",

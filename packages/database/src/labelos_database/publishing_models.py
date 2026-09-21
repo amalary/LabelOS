@@ -172,7 +172,7 @@ class Publication(Base):
             "id",
         ),
         Index("ix_publications_retry_due", "workspace_id", "next_retry_at", "id"),
-        Index("ix_publications_content", "workspace_id", "marketing_content_item_id"),
+        Index("ix_publications_content", "workspace_id", "marketing_content_item_id", "id"),
         Index("ix_publications_destination", "social_account_connection_id"),
         Index(
             "uq_publications_provider_resource",
@@ -182,6 +182,24 @@ class Publication(Base):
             unique=True,
             postgresql_where=external_post_id.is_not(None),
             sqlite_where=external_post_id.is_not(None),
+        ),
+    )
+
+
+class PublicationListMetadata(Base):
+    """Small accepted snapshot for history; never contains prepared media."""
+
+    __tablename__ = "publication_list_metadata"
+    publication_id: Mapped[UUID] = mapped_column(primary_key=True)
+    workspace_id: Mapped[UUID]
+    channel: Mapped[str] = mapped_column(String(80))
+    placement: Mapped[str | None] = mapped_column(String(120))
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["publication_id", "workspace_id"],
+            ["publications.id", "publications.workspace_id"],
+            name="fk_publication_list_metadata_scope",
+            ondelete="RESTRICT",
         ),
     )
 

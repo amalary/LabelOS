@@ -29,36 +29,65 @@ def recovery_granted(row, now):
 
 
 def budget_available(row, now):
+    return budget_available_from_facts(
+        len(row.attempts), row.attempts[0].started_at if row.attempts else None, now
+    )
+
+
+def budget_available_from_facts(attempt_count, started_at, now):
     return bool(
-        row.attempts
-        and len(row.attempts) < MAX_ATTEMPTS
-        and now < row.attempts[0].started_at + MAX_ELAPSED
+        attempt_count
+        and attempt_count < MAX_ATTEMPTS
+        and started_at is not None
+        and now < started_at + MAX_ELAPSED
     )
 
 
 def resolution(row, now):
-    action = latest_action(row)
+    return resolution_from_facts(
+        status=row.status,
+        retry_disposition=row.retry_disposition,
+        next_retry_at=row.next_retry_at,
+        transition_version=row.transition_version,
+        action=latest_action(row),
+        budget=(
+            budget_available(row, now)
+            if row.status == "retryable_failure" and not manual_reserved(row)
+            else False
+        ),
+        now=now,
+    )
+
+
+def resolution_from_facts(
+    *, status, retry_disposition, next_retry_at, transition_version, action, budget, now
+):
     if action and action.operation == "complete_manual":
         return "manually_completed"
     if action and action.operation == "begin_manual":
         return "manual_publishing"
-    if row.status == "manual_action_required":
+    if status == "manual_action_required":
         return "reconciliation_required"
-    if row.status == "permanent_failure":
+    if status == "permanent_failure":
         return "terminal_failure"
-    if row.status == "retryable_failure":
-        if not budget_available(row, now) or row.retry_disposition == "exhausted":
+    if status == "retryable_failure":
+        if not budget or retry_disposition == "exhausted":
             return "retry_exhausted"
-        if recovery_granted(row, now):
+        if (
+            action
+            and action.operation == "authorize_retry"
+            and action.publication_version == transition_version
+            and action.retry_until > now
+        ):
             return "retry_authorized"
         return {
             "blocked_reconnection": "reconnect_required",
             "manual_action": "human_intervention_required",
         }.get(
-            row.retry_disposition,
-            "retry_scheduled" if row.next_retry_at else "human_intervention_required",
+            retry_disposition,
+            "retry_scheduled" if next_retry_at else "human_intervention_required",
         )
-    return row.status
+    return status
 
 
 def action_filters(now):
