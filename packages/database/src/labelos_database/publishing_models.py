@@ -172,7 +172,9 @@ class Publication(Base):
             "id",
         ),
         Index("ix_publications_retry_due", "workspace_id", "next_retry_at", "id"),
-        Index("ix_publications_content", "workspace_id", "marketing_content_item_id", "id"),
+        Index(
+            "ix_publications_content", "workspace_id", "marketing_content_item_id", "id"
+        ),
         Index("ix_publications_destination", "social_account_connection_id"),
         Index(
             "uq_publications_provider_resource",

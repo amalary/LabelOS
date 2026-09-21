@@ -603,6 +603,9 @@ def test_recovery_projects_only_safe_matching_connection_fields(sessions):
             assert data["destination_identity_matches"] is True
             assert data["destination_connection_method"] == "assisted"
             assert set(data["destination_account"]) == {
-                "external_account_id", "username", "display_name"
+                "external_account_id",
+                "username",
+                "display_name",
             }
+
     asyncio.run(run())
