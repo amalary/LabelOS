@@ -52,6 +52,7 @@ export type RealtimeEventType =
   | "marketing.content.approval_requested"
   | "marketing.content.approved"
   | "marketing.content.published"
+  | "marketing.publication.changed"
   | "marketing.social_account.connected"
   | "marketing.social_account.updated"
   | "marketing.social_account.disconnected"
@@ -143,6 +144,7 @@ export const activityEventTypes = new Set<RealtimeEventType>([
 ]);
 
 export const refetchEventTypes = new Set<RealtimeEventType>([
+  "marketing.publication.changed",
   "organization.updated",
   "profile.created",
   "profile.updated",

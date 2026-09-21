@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 
 from labelos_api.auth import CurrentUserContext, SessionDep, get_current_user_context
+from labelos_api.repositories.publication_calendar import PublishedCalendarFact
 from labelos_api.services import campaign_calendar_service
 from labelos_api.services.campaign_calendar_service import (
     MAX_CAMPAIGN_CALENDAR_LIMIT,
@@ -99,6 +100,7 @@ class CampaignCalendarEventResponse(BaseModel):
     approval: CampaignCalendarApprovalContextResponse | None
     url: str | None
     sort_key: str
+    publication: PublishedCalendarFact | None = None
 
 
 class CampaignCalendarResponse(BaseModel):

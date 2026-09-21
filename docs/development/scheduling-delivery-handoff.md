@@ -1,5 +1,9 @@
 # Scheduling to Delivery acceptance boundary
 
+The [Stage 3 Delivery Orchestrator](delivery-orchestrator.md) now supplies an
+internal transactional receiver through this composer. Production receiver
+selection remains unavailable; the original boundary below remains unchanged.
+
 The internal `services.scheduling_handoff.accept_scheduling_handoff` composition
 boundary implements the acceptance policy in the
 [Scheduling Engine contract](scheduling-engine-contract.md). It is not a worker,
@@ -110,12 +114,17 @@ failures propagate for durable reconciliation; they are not classified as safe r
 Logs contain only a fixed outcome and validated correlation UUID, never payloads,
 account objects, receiver representations or exception messages.
 
-`DELIVERY_RECEIVER_BACKEND=unavailable` is the default and only deployable selection.
-Both startup validation and the receiver factory reject fake, memory, successful
-no-op and unknown backends in every environment, including production. A test can
-inject a fake directly; no production fake implementation is shipped. Receiver
-readiness must remain false. Successful execution requires a certified transactional
-Delivery adapter and an authenticated worker host. Neither is enabled by the processor.
+`DELIVERY_RECEIVER_BACKEND=publishing` selects the workspace-scoped
+`PublishingDeliveryReceiver` used by the Delivery orchestrator. The authenticated
+Scheduling worker supplies scope from deployment settings; the API derives readiness
+for its authorized workspace without executing delivery. `unavailable` remains the
+default and explicit disabled option. Fake, memory, successful no-op and unknown
+backends remain rejected in every environment.
+
+The receiver persists a pending Publication, its lease and outbox in the composer's
+transaction. It never calls providers. The separate Publishing worker consumes
+committed Publications. See [production composition](scheduling-publishing-composition.md)
+for configuration, durability and failure/replay behavior.
 
 `prepare_assisted_publish_handoff` remains unchanged and read-only. Its current
 mutable asset references and manual completion fields do not meet this acceptance

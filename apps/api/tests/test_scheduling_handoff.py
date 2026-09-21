@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 import pytest
 from labelos_database.models import MarketingContentItem, MarketingContentItemChannel
 
-from labelos_api.config import Settings
+from labelos_api.config import Settings, get_settings
 from labelos_api.scheduling.contracts import (
     RetryableUnavailable,
     ScheduleSnapshot,
@@ -23,6 +23,7 @@ from labelos_api.scheduling.payload import (
     validate_request,
 )
 from labelos_api.scheduling.receivers import configured_receiver
+from labelos_api.services.delivery_orchestrator import PublishingDeliveryReceiver
 
 
 @pytest.fixture
@@ -285,3 +286,39 @@ def test_development_receiver_never_accepts(content_source):
 
 def test_production_may_remain_unavailable():
     Settings(environment="production").validate_delivery_receiver()
+
+
+def test_production_publishing_receiver_configuration_and_scope(monkeypatch):
+    monkeypatch.setenv("DELIVERY_RECEIVER_BACKEND", "publishing")
+    get_settings.cache_clear()
+    try:
+        assert get_settings().delivery_receiver_backend == "publishing"
+    finally:
+        get_settings.cache_clear()
+    settings = Settings(
+        environment="production",
+        delivery_receiver_backend="publishing",
+        credential_store_backend="gcp-secret-manager",
+        credential_store_gcp_project_id="test-project",
+        workos_client_id="client-test",
+        workos_webhook_secret="test-secret",
+    )
+    settings.validate_startup_environment()
+    with pytest.raises(RuntimeError, match="workspace scope"):
+        configured_receiver(settings)
+    workspace = uuid4()
+    receiver = configured_receiver(settings, workspace_id=workspace)
+    assert isinstance(receiver, PublishingDeliveryReceiver)
+    assert receiver.workspace_id == workspace
+    settings.scheduling_worker_workspace_id = workspace
+    assert configured_receiver(settings).workspace_id == workspace
+
+
+@pytest.mark.parametrize(
+    "values", [{"database_url": "sqlite+aiosqlite://"}, {"database_echo": True}]
+)
+def test_publishing_receiver_rejects_unsafe_storage_configuration(values):
+    with pytest.raises(RuntimeError):
+        Settings(
+            delivery_receiver_backend="publishing", **values
+        ).validate_delivery_receiver()

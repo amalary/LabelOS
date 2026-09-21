@@ -452,7 +452,7 @@ def test_full_migration_upgrade_downgrade_reupgrade(database_test_engine):
     scripts = ScriptDirectory.from_config(
         Config(str(ROOT / "packages/database/alembic.ini"))
     )
-    assert scripts.get_heads() == ["202609152100"]
+    assert scripts.get_heads() == ["202609210100"]
     head = scripts.get_revision("202609151800")
     assert head.down_revision == "202609151000"
 
@@ -471,6 +471,13 @@ def test_full_migration_upgrade_downgrade_reupgrade(database_test_engine):
                     if table.name not in {
                         "scheduling_jobs",
                         "scheduling_job_transitions",
+                        "publications",
+                        "publication_attempts",
+                        "publication_transitions",
+                        "publication_leases",
+                        "publication_actions",
+                        "publication_list_metadata",
+                        "marketing_media_assets",
                     }:
                         copy = table.to_metadata(baseline)
                         for index in list(copy.indexes):

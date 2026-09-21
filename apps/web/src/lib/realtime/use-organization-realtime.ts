@@ -73,6 +73,7 @@ const marketingContentEventPrefix = "marketing.content.";
 const marketingSocialAccountEventPrefix = "marketing.social_account.";
 const approvalEventPrefix = "approval.";
 const campaignCalendarEventTypes = new Set<RealtimeEventType>([
+  "marketing.publication.changed",
   "campaign.created",
   "campaign.updated",
   "campaign.status_changed",
@@ -297,7 +298,11 @@ export function useOrganizationRealtime(organizationId: string | null): Organiza
           });
         }
 
-        if (event.type.startsWith(schedulingEventPrefix)) {
+        if (
+          event.type.startsWith(schedulingEventPrefix) ||
+          event.type.startsWith("marketing.publication.") ||
+          event.type.startsWith(marketingSocialAccountEventPrefix)
+        ) {
           notifySchedulingUpdate(
             organizationId,
             typeof event.payload.contentItemId === "string" ? event.payload.contentItemId : null,
@@ -342,6 +347,7 @@ export function useOrganizationRealtime(organizationId: string | null): Organiza
             invalidateAnalyticsWorkspaceCache(organizationId);
           }
           if (
+            event.type === "marketing.publication.changed" ||
             event.type.startsWith(marketingContentEventPrefix) ||
             event.type.startsWith(schedulingEventPrefix)
           ) {
@@ -418,7 +424,8 @@ export function useOrganizationRealtime(organizationId: string | null): Organiza
             pathname.startsWith("/analytics") && event.type.startsWith(analyticsEventPrefix);
           const isMarketingContentWorkspaceRefresh =
             pathname.startsWith("/marketing") &&
-            (event.type.startsWith(marketingContentEventPrefix) ||
+            (event.type === "marketing.publication.changed" ||
+              event.type.startsWith(marketingContentEventPrefix) ||
               event.type.startsWith(schedulingEventPrefix) ||
               event.type.startsWith(marketingSocialAccountEventPrefix) ||
               (event.type.startsWith(approvalEventPrefix) &&
@@ -434,7 +441,8 @@ export function useOrganizationRealtime(organizationId: string | null): Organiza
             !isAnalyticsWorkspaceRefresh &&
             !isMarketingContentWorkspaceRefresh &&
             !isApprovalWorkspaceRefresh &&
-            !isCampaignCalendarWorkspaceRefresh
+            !isCampaignCalendarWorkspaceRefresh &&
+            event.type !== "marketing.publication.changed"
           ) {
             clearOrganizationScopedBrowserCaches();
             router.refresh();

@@ -9,10 +9,12 @@ from labelos_api.api.v1.campaign_calendar import router as campaign_calendar_rou
 from labelos_api.api.v1.campaigns import router as campaigns_router
 from labelos_api.api.v1.dashboard import router as dashboard_router
 from labelos_api.api.v1.marketing_content import router as marketing_content_router
+from labelos_api.api.v1.marketing_media import router as marketing_media_router
 from labelos_api.api.v1.me import router as me_router
 from labelos_api.api.v1.onboarding import router as onboarding_router
 from labelos_api.api.v1.organizations import router as organizations_router
 from labelos_api.api.v1.profiles import router as profiles_router
+from labelos_api.api.v1.publications import router as publications_router
 from labelos_api.api.v1.realtime import router as realtime_router
 from labelos_api.api.v1.scheduling import router as scheduling_router
 from labelos_api.api.v1.social_account_connections import (
@@ -34,10 +36,12 @@ api_router.include_router(campaign_calendar_router)
 api_router.include_router(campaigns_router)
 api_router.include_router(dashboard_router)
 api_router.include_router(marketing_content_router)
+api_router.include_router(marketing_media_router)
 api_router.include_router(me_router)
 api_router.include_router(onboarding_router)
 api_router.include_router(organizations_router)
 api_router.include_router(profiles_router)
+api_router.include_router(publications_router)
 api_router.include_router(realtime_router)
 api_router.include_router(scheduling_router)
 api_router.include_router(social_account_connections_oauth_router)

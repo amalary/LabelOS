@@ -280,7 +280,8 @@ async def scheduling_controls(workspace_id: UUID, session: Session):
         authoring_enabled=settings.scheduling_authoring_enabled,
         execution_enabled=settings.scheduling_execution_enabled and enabled is True,
         delivery_receiver_configured=not isinstance(
-            configured_receiver(settings), UnavailableDeliveryReceiver
+            configured_receiver(settings, workspace_id=workspace_id),
+            UnavailableDeliveryReceiver,
         ),
     )
 

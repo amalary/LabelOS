@@ -64,7 +64,7 @@ and never logged by worker code. Use an empty POST.
 | `SCHEDULING_WORKER_LEASE_SECONDS`           | `120`; range 1–3600; must exceed sweep timeout.                                                                                                         |
 | `SCHEDULING_WORKER_LATENESS_SECONDS`        | `300`; range 0–86400; older jobs block rather than publish late.                                                                                        |
 | `SCHEDULING_WORKER_TIMEOUT_SECONDS`         | `30`; range 1–300; cancels and awaits the sweep.                                                                                                        |
-| `DELIVERY_RECEIVER_BACKEND`                 | `unavailable` is currently the only deployable value. Fake/successful test receivers are rejected at startup.                                           |
+| `DELIVERY_RECEIVER_BACKEND`                 | `publishing` selects durable Publication intake; `unavailable` remains the disabled default. Fake receivers are rejected at startup.                    |
 | `DATABASE_URL`                              | PostgreSQL asyncpg connection, delivered through a runtime secret.                                                                                      |
 | `DATABASE_ECHO`                             | Must be `false` to keep SQL parameters out of logs.                                                                                                     |
 | `LOG_LEVEL`, `LOG_FORMAT`                   | Use `INFO`, `json`. Worker log service name is `labelos-scheduling-worker`.                                                                             |
@@ -84,11 +84,10 @@ does not permit new activation of overdue legacy rows.
 
 ## Deployment and safe rollout
 
-1. Review migrations through `202609152100` and the certified transactional Delivery
-   receiver gate. **Today no certified production receiver exists: deploy disabled
-   only.** Setting execution true returns `receiver_unavailable` before database
-   access. Do not bypass this by wiring a successful fake. A future adapter must
-   pass the transactional acceptance contract tests before enablement.
+1. Apply existing Scheduling and Publishing migrations through the current head.
+   Follow [production handoff composition](scheduling-publishing-composition.md)
+   to select `DELIVERY_RECEIVER_BACKEND=publishing` and deploy the separate
+   Publishing job. The default `unavailable` receiver refuses before DB claims.
 2. Have the platform operator create/review the accounts and IAM bindings above.
    Deploy the existing API image as a separate service using the runtime account,
    required IAM authentication, private database connectivity, min instances 0,
@@ -119,7 +118,7 @@ does not permit new activation of overdue legacy rows.
    (every minute), UTC, 60-second attempt deadline, and no rapid retries initially
    (`retry-count=0`); the next sweep handles recovery. Review batch capacity and
    lateness together: sustained backlog can exceed the five-minute default window.
-7. Only after receiver certification, enable the deployment switch on a reviewed
+7. After verifying the Publishing composition, enable the deployment switch on a reviewed
    revision, then explicitly enable the selected workspace's durable control,
    manually run one sweep, inspect aggregate outcomes/audit transitions, and resume
    the scheduler. Never mass-enable workspaces during migration or startup.
@@ -199,9 +198,9 @@ python -m labelos_api.scheduling_worker --execute
 The explicit process command uses a distinct local workload principal; it does
 not impersonate a user or expose an unauthenticated HTTP route. It rejects remote
 database hosts, production/test environment labels, and Cloud Run environment
-markers. Deployment and durable switches still apply. With the current receiver,
-enabling the deployment flag safely reports unavailable; use the test fixtures to
-exercise successful delivery, never a deployment-selectable fake receiver.
+markers. Deployment and durable switches still apply. With the default receiver,
+enabling the deployment flag safely reports unavailable. Select `publishing` for
+transactional intake; execute Publications through the separate Publishing job.
 
 ## Verification
 

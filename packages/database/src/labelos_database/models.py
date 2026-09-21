@@ -18,6 +18,7 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     Index,
     Integer,
+    LargeBinary,
     Numeric,
     String,
     UniqueConstraint,
@@ -2792,6 +2793,32 @@ class MarketingContentItem(Base, TimestampMixin, OrganizationOwnedMixin):
     )
 
 
+class MarketingMediaAsset(Base):
+    """Prepared media, addressed by digest within one workspace/content item."""
+
+    __tablename__ = "marketing_media_assets"
+
+    workspace_id: Mapped[UUID] = mapped_column(primary_key=True)
+    content_item_id: Mapped[UUID] = mapped_column(primary_key=True)
+    sha256: Mapped[str] = mapped_column(String(64), primary_key=True)
+    media_type: Mapped[str] = mapped_column(String(80))
+    size_bytes: Mapped[int] = mapped_column(Integer)
+    data: Mapped[bytes] = mapped_column(LargeBinary)
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["content_item_id", "workspace_id"],
+            ["marketing_content_items.id", "marketing_content_items.organization_id"],
+            ondelete="CASCADE",
+        ),
+        CheckConstraint("length(sha256) = 64", name="digest_length"),
+        CheckConstraint(
+            "size_bytes > 0 AND size_bytes <= 16777216 AND length(data) = size_bytes",
+            name="bounded_data",
+        ),
+    )
+
+
 class MarketingContentItemChannel(Base, TimestampMixin):
     __tablename__ = "marketing_content_item_channels"
 
@@ -3777,3 +3804,14 @@ class TeamSetting(Base, TimestampMixin, OrganizationOwnedMixin):
         ),
         Index("ix_team_settings_organization_id", "organization_id"),
     )
+
+
+# Register delivery storage after its canonical scheduling/content dependencies.
+from labelos_database.publishing_models import (  # noqa: F401
+    Publication,
+    PublicationAction,
+    PublicationAttempt,
+    PublicationLease,
+    PublicationListMetadata,
+    PublicationTransition,
+)

@@ -5,8 +5,9 @@ adapter is limited to connection lifecycle behavior: OAuth authorization, token
 exchange, credential storage, channel identity retrieval, scope parsing,
 capability resolution, refresh, health checks, and disconnect revocation.
 
-It does not publish content or fetch analytics reports. Future publishing and
-analytics delivery code must live behind separate provider contracts.
+It does not publish content or fetch analytics reports. The separate
+[Stage 5 publishing adapter](youtube-publishing-adapter.md) reuses this provider's
+credential store and refresh implementation for video delivery.
 
 ## Official Endpoints
 

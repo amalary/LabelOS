@@ -1,3 +1,5 @@
+import hashlib
+import json
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -12,7 +14,9 @@ from labelos_database.models import (
     SocialAccountConnectionStatus,
     User,
 )
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import lazyload
 
 from labelos_api.authorization import (
     AuthorizationActorInput,
@@ -62,6 +66,256 @@ class SocialAccountAuthorizationError(SocialAccountServiceError):
         self.reason = reason
 
 
+class ExecutionConnectionError(SocialAccountServiceError):
+    """Fixed reason only; trusted execution callers supply workspace scope."""
+
+
+@dataclass(frozen=True, repr=False)
+class ExecutionConnectionSnapshot:
+    workspace_id: UUID
+    connection_id: UUID
+    provider: str
+    connection_method: str
+    external_account_id: str
+    status: str
+    capabilities: tuple[str, ...]
+    credential_ref: str | None
+    token_expires_at: datetime | None
+    updated_at: datetime | None
+    last_error_code: str | None
+
+    def same_authorization(self, other: "ExecutionConnectionSnapshot") -> bool:
+        """Compare execution authority without treating observations as versions.
+
+        Full equality still fences health writes, so an older observation cannot
+        clear a newer one. Expiry remains sensitive: refresh replaces credentials
+        under the same reference and must fence an older refresh's SQL result.
+        """
+        return self._authorization_state() == other._authorization_state()
+
+    def _authorization_state(self) -> tuple[object, ...]:
+        return (
+            self.workspace_id,
+            self.connection_id,
+            self.provider,
+            self.connection_method,
+            self.external_account_id,
+            self.status,
+            frozenset(self.capabilities),
+            self.credential_ref,
+            self.token_expires_at,
+            # Only known transient errors are observational. Retain unknown or
+            # authorization-related codes, even if status has not changed.
+            (
+                None
+                if self.last_error_code in HEALTH_RETAIN_CURRENT_STATUS_CODES
+                else self.last_error_code
+            ),
+        )
+
+
+def _execution_snapshot(
+    connection: SocialAccountConnection,
+) -> ExecutionConnectionSnapshot:
+    return ExecutionConnectionSnapshot(
+        connection.organization_id,
+        connection.id,
+        connection.provider,
+        connection.connection_method,
+        connection.external_account_id or "",
+        connection.status,
+        tuple(connection.capabilities or []),
+        connection.credential_ref,
+        _execution_utc(connection.token_expires_at),
+        _execution_utc(connection.updated_at),
+        connection.last_error_code,
+    )
+
+
+def _execution_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+async def load_execution_connection(
+    session: AsyncSession,
+    *,
+    workspace_id: UUID,
+    connection_id: UUID,
+    provider: str,
+    connection_method: str,
+    destination_identity: str,
+    required_capability: str,
+) -> ExecutionConnectionSnapshot:
+    """Read the workspace's canonical destination, with no fallback account."""
+    connection = await session.scalar(
+        select(SocialAccountConnection)
+        .options(lazyload("*"))
+        .where(
+            SocialAccountConnection.organization_id == workspace_id,
+            SocialAccountConnection.id == connection_id,
+        )
+    )
+    if connection is None:
+        raise ExecutionConnectionError("connection_missing")
+    identity = hashlib.sha256(
+        json.dumps(
+            [connection.provider, connection.external_account_id],
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    if (
+        connection.provider != provider
+        or connection.connection_method != connection_method
+        or not (connection.external_account_id or "").strip()
+        or identity != destination_identity
+    ):
+        raise ExecutionConnectionError("destination_mismatch")
+    if connection.status not in {"connected", "limited"}:
+        raise ExecutionConnectionError("connection_unusable")
+    if connection.last_error_code in {"credential_revoked", "authorization_failed"}:
+        raise ExecutionConnectionError("authorization_revoked")
+    if required_capability not in (connection.capabilities or []):
+        raise ExecutionConnectionError("capability_missing")
+    return _execution_snapshot(connection)
+
+
+async def _lock_execution_observation(
+    session: AsyncSession,
+    expected: ExecutionConnectionSnapshot,
+    *,
+    for_refresh: bool = False,
+) -> SocialAccountConnection | None:
+    connection = await session.scalar(
+        select(SocialAccountConnection)
+        .options(lazyload("*"))
+        .where(
+            SocialAccountConnection.organization_id == expected.workspace_id,
+            SocialAccountConnection.id == expected.connection_id,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if (
+        connection is None
+        or connection.status not in {"connected", "limited"}
+        or not _execution_snapshot(connection).same_authorization(expected)
+        or (not for_refresh and _execution_snapshot(connection) != expected)
+    ):
+        return None
+    return connection
+
+
+async def record_execution_health(
+    session: AsyncSession,
+    *,
+    expected: ExecutionConnectionSnapshot,
+    error_code: SocialAccountProviderErrorCode | None,
+) -> bool:
+    """Trusted internal observation API with stale-observation protection.
+
+    Only fixed codes enter this boundary. No provider messages or metadata are accepted.
+    Commits canonical health and its event together, like the management health API.
+    """
+    connection = await _lock_execution_observation(session, expected)
+    if connection is None:
+        return False
+    if error_code == SocialAccountProviderErrorCode.insufficient_scope:
+        # A publishing permission rejection invalidates only publishing support.
+        connection = await social_accounts.update_connection(
+            session,
+            expected.workspace_id,
+            expected.connection_id,
+            {
+                "capabilities": [
+                    c
+                    for c in connection.capabilities
+                    if c != SOCIAL_ACCOUNT_CAPABILITY_CONTENT_PUBLISH
+                ]
+            },
+        )
+        assert connection is not None
+    await _persist_connection_health(
+        session,
+        workspace_id=expected.workspace_id,
+        connection=connection,
+        health=SocialAccountHealth(
+            healthy=error_code is None,
+            status=connection.status if error_code is None else "unhealthy",
+            error_code=error_code,
+            error_message=(
+                "Social account execution check failed: " + error_code.value
+                if error_code is not None
+                else None
+            ),
+        ),
+        actor=None,
+    )
+    return True
+
+
+async def apply_execution_refresh(
+    session: AsyncSession,
+    *,
+    expected: ExecutionConnectionSnapshot,
+    adapter: SocialAccountConnectionProvider,
+    result: SocialAccountCredentialResult,
+) -> ExecutionConnectionSnapshot | None:
+    """Persist only refresh expiry, grants and canonical health, after provider I/O."""
+    connection = await _lock_execution_observation(session, expected, for_refresh=True)
+    if connection is None:
+        return None
+    if (
+        result.credential_ref != expected.credential_ref
+        or adapter.provider != expected.provider
+        or adapter.connection_method != expected.connection_method
+    ):
+        raise ExecutionConnectionError("connection_changed")
+    capabilities = _capabilities_for_adapter_scopes(adapter, result.granted_scopes)
+    # Empty grants are authoritative here; they must never restore default grants.
+    if not result.granted_scopes:
+        capabilities = []
+    previous_status = _status_value(connection.status)
+    values = {
+        "token_expires_at": result.token_expires_at,
+        "capabilities": capabilities,
+        **_health_values(
+            connection,
+            SocialAccountHealth(
+                healthy=True,
+                status=(
+                    "connected"
+                    if capabilities == list(adapter.default_capabilities())
+                    else "limited"
+                ),
+            ),
+            checked_at=_now(),
+        ),
+    }
+    updated = await social_accounts.update_connection(
+        session,
+        expected.workspace_id,
+        expected.connection_id,
+        values,
+    )
+    if updated is None:
+        raise ExecutionConnectionError("connection_changed")
+    await _publish_health_recovered_event(
+        session,
+        workspace_id=expected.workspace_id,
+        actor=None,
+        connection=updated,
+        previous_status=previous_status,
+        changed_fields=sorted(values),
+    )
+    snapshot = _execution_snapshot(updated)
+    await session.commit()
+    return snapshot
+
+
 MAX_SOCIAL_ACCOUNT_LIST_LIMIT = 500
 
 SOCIAL_ACCOUNT_CAPABILITY_CONTENT_PUBLISH = "content_publish"
@@ -92,6 +346,7 @@ HEALTH_RECONNECT_REQUIRED_CODES = frozenset(
     {
         SocialAccountProviderErrorCode.authorization_failed,
         SocialAccountProviderErrorCode.credential_missing,
+        SocialAccountProviderErrorCode.credential_expired,
         SocialAccountProviderErrorCode.credential_revoked,
         SocialAccountProviderErrorCode.refresh_failed,
         SocialAccountProviderErrorCode.account_not_found,
@@ -613,6 +868,19 @@ def _resolved_destination(
         if profile is None or profile.artist_id != artist_id:
             reasons.append(DestinationUnavailableReason.wrong_artist)
     status_reason = _destination_status_reason(connection)
+    if (
+        desired_capability == SOCIAL_ACCOUNT_CAPABILITY_CONTENT_PUBLISH
+        and connection.status in {"connected", "limited"}
+        and connection.last_error_code
+        in {
+            None,
+            "",
+            *HEALTH_RETAIN_CURRENT_STATUS_CODES,
+        }
+    ):
+        # Limited grants can still authorize this specific operation. Transient
+        # health failures must allow the execution-time credential check to retry.
+        status_reason = None
     if status_reason is not None:
         reasons.append(status_reason)
     if desired_capability is not None and not supports_capability(
@@ -1700,7 +1968,7 @@ async def _publish_health_recovered_event(
         changed_fields=changed_fields,
         previous_status=previous_status,
     )
-    payload["healthStatus"] = "connected"
+    payload["healthStatus"] = _status_value(connection.status)
     payload["healthy"] = True
     await _publish_social_account_event(
         session,

@@ -659,8 +659,11 @@ export async function startSocialAccountOAuthConnection(
   );
 }
 
-export function navigateToSocialAccountAuthorization(authorizationUrl: string): void {
-  window.location.assign(authorizationUrl);
+export function navigateToSocialAccountAuthorization(
+  authorizationUrl: string,
+  target: Window = window,
+): void {
+  target.location.assign(authorizationUrl);
 }
 
 export async function checkSocialAccountConnectionHealth(

@@ -11,6 +11,7 @@ import {
 import { Badge, Button, Card, EmptyState, LoadingState, PageHeader, cn } from "@label-os/ui";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { PreparedMediaUpload } from "./prepared-media-upload";
 
 import { can, capabilities } from "../../lib/authorization";
 import {
@@ -69,11 +70,14 @@ import {
 import { useActiveWorkspace, useActiveWorkspaceProfile } from "../../lib/workspace-context";
 import { SchedulingJobState } from "../../components/scheduling-job-state";
 import { ChannelScheduling } from "./channel-scheduling";
+import { PublicationHistory } from "./publication-history";
 
 type MarketingTab = "calendar" | "drafts" | "approvals" | "accounts";
 type CalendarView = "month" | "list";
 
 export type MarketingScheduleInstance = {
+  eventId?: string;
+  publication?: NonNullable<MarketingContentItem["publications"]>[number];
   item: MarketingContentItem;
   scheduledAt: string | null;
   dateKey: string | null;
@@ -186,7 +190,25 @@ export function toScheduleInstances(
   timeZone = planningFallbackTimeZone,
 ): MarketingScheduleInstance[] {
   return items
-    .map((item) => toScheduleInstance(item, rangeStart, rangeEnd, timeZone))
+    .flatMap((item) => {
+      const planned = toScheduleInstance(item, rangeStart, rangeEnd, timeZone);
+      const published = (item.publications ?? [])
+        .filter((fact) => isWithinRange(fact.published_at, rangeStart, rangeEnd))
+        .map((fact): MarketingScheduleInstance => ({
+          eventId: `publication:${fact.publication_id}:marketing.content.channel_published`,
+          publication: fact,
+          item,
+          scheduledAt: fact.published_at,
+          dateKey: dateKeyInTimeZone(fact.published_at, timeZone),
+          hasMultipleChannelTimes: false,
+        }));
+      return [
+        ...(planned.scheduledAt && !isWithinRange(planned.scheduledAt, rangeStart, rangeEnd)
+          ? []
+          : [planned]),
+        ...published,
+      ];
+    })
     .sort((left, right) => {
       const leftTime = left.scheduledAt ? new Date(left.scheduledAt).getTime() : Infinity;
       const rightTime = right.scheduledAt ? new Date(right.scheduledAt).getTime() : Infinity;
@@ -786,6 +808,7 @@ function ContentEditor({
   );
   const [clientError, setClientError] = useState<string | null>(null);
   const [schedulingBusy, setSchedulingBusy] = useState(false);
+  const [uploadBusy, setUploadBusy] = useState(false);
   const [publishNowNotice, setPublishNowNotice] = useState<string | null>(null);
   const profile = useActiveWorkspaceProfile();
   const canSchedule = Boolean(
@@ -820,7 +843,7 @@ function ContentEditor({
     item?.campaign_id ?? null,
     item?.id ?? null,
   );
-  const isEditable = (mode === "create" || canEdit) && !schedulingBusy;
+  const isEditable = (mode === "create" || canEdit) && !schedulingBusy && !uploadBusy;
   const artistOptions = selectedCampaign
     ? [
         ...(selectedCampaign.primary_artist ? [selectedCampaign.primary_artist] : []),
@@ -850,7 +873,8 @@ function ContentEditor({
     update.isMutating ||
     submitApproval.isMutating ||
     archive.isMutating ||
-    schedulingBusy;
+    schedulingBusy ||
+    uploadBusy;
   const approvalState = item?.approval_state?.state ?? item?.status;
   const isCurrentlyApproved = item ? approvedRevisionIsCurrent(item) : false;
   const isDraftSurface = surface === "drafts";
@@ -1128,10 +1152,37 @@ function ContentEditor({
             className="min-h-20 rounded-md border border-slate-300 bg-white px-3 py-2 font-mono text-xs text-slate-950"
             disabled={!isEditable}
             onChange={(event) => setField({ assetRefsJson: event.target.value })}
-            placeholder='[{"id":"asset_01","type":"image"}]'
+            placeholder="[]"
             value={form.assetRefsJson}
           />
         </label>
+        <PreparedMediaUpload
+          workspaceId={workspaceId}
+          contentId={item?.id ?? null}
+          disabled={!isEditable}
+          label="Upload shared media"
+          onBusy={setUploadBusy}
+          onUploaded={(reference) =>
+            setField({
+              assetRefsJson: JSON.stringify(
+                [
+                  ...parseAssetRefs(form.assetRefsJson, "Asset references").filter(
+                    (ref) =>
+                      !(
+                        ref &&
+                        typeof ref === "object" &&
+                        "sha256" in ref &&
+                        ref.sha256 === reference.sha256
+                      ),
+                  ),
+                  reference,
+                ],
+                null,
+                2,
+              ),
+            })
+          }
+        />
       </div>
 
       <div className="grid gap-3">
@@ -1391,6 +1442,36 @@ function ContentEditor({
                       value={channel.assetRefsJson}
                     />
                   </label>
+                  <PreparedMediaUpload
+                    workspaceId={workspaceId}
+                    contentId={item?.id ?? null}
+                    disabled={!isEditable}
+                    label={`Upload media for target ${index + 1}`}
+                    onBusy={setUploadBusy}
+                    onUploaded={(reference) =>
+                      setChannel(channel.id, {
+                        assetRefsJson: JSON.stringify(
+                          [
+                            ...parseAssetRefs(
+                              channel.assetRefsJson,
+                              "Channel asset references",
+                            ).filter(
+                              (ref) =>
+                                !(
+                                  ref &&
+                                  typeof ref === "object" &&
+                                  "sha256" in ref &&
+                                  ref.sha256 === reference.sha256
+                                ),
+                            ),
+                            reference,
+                          ],
+                          null,
+                          2,
+                        ),
+                      })
+                    }
+                  />
                   <p className="text-xs text-slate-500">Target {index + 1}</p>
                   {item && item.channels.find((saved) => saved.id === channel.persistedId) && (
                     <ChannelScheduling
@@ -1410,6 +1491,14 @@ function ContentEditor({
           </fieldset>
         ))}
       </div>
+
+      {item && (
+        <PublicationHistory
+          item={item}
+          campaignName={campaignName(campaigns, item.campaign_id)}
+          artistName={artistOptions.find((artist) => artist.id === item.artist_id)?.name}
+        />
+      )}
 
       {publishNowNotice && (
         <p role="status" className="text-sm text-amber-800">
@@ -1666,7 +1755,7 @@ function MonthCalendar({
                 {dayItems.slice(0, 3).map((instance) => (
                   <button
                     className="grid gap-1 rounded-md border border-slate-200 bg-slate-50 px-2 py-1.5 text-left transition hover:border-slate-400 hover:bg-white"
-                    key={instance.item.id}
+                    key={instance.eventId ?? instance.item.id}
                     onClick={() => onItemClick(instance.item)}
                     type="button"
                   >
@@ -1674,10 +1763,15 @@ function MonthCalendar({
                       {instance.item.title}
                     </span>
                     <span className="truncate text-xs text-slate-500">
-                      {channelSummary(instance.item)}
+                      {instance.publication
+                        ? humanize(instance.publication.provider)
+                        : channelSummary(instance.item)}
                     </span>
                     <span className="grid gap-0.5">
-                      {channelDestinationSummaries(instance.item).map((summary, index) => (
+                      {(instance.publication
+                        ? [humanize(instance.publication.placement)]
+                        : channelDestinationSummaries(instance.item)
+                      ).map((summary, index) => (
                         <span className="truncate text-xs text-slate-600" key={index}>
                           {summary}
                         </span>
@@ -1686,11 +1780,13 @@ function MonthCalendar({
                     <span className="flex flex-wrap items-center gap-1">
                       <Badge
                         className="max-w-full truncate"
-                        variant={approvalStateVariant(instance.item)}
+                        variant={
+                          instance.publication ? "success" : approvalStateVariant(instance.item)
+                        }
                       >
-                        {approvalStateLabel(instance.item)}
+                        {instance.publication ? "Published" : approvalStateLabel(instance.item)}
                       </Badge>
-                      {instance.item.channels.map((channel) => (
+                      {(instance.publication ? [] : instance.item.channels).map((channel) => (
                         <SchedulingJobState key={channel.id} job={channel.scheduling_job} />
                       ))}
                       {instance.hasMultipleChannelTimes ? (
@@ -1734,19 +1830,22 @@ function CalendarList({
       <div className="grid gap-1 border-b border-slate-200 bg-slate-50 px-4 py-3">
         <h2 className="text-base font-semibold text-slate-950">Chronological content</h2>
         <p className="text-sm text-slate-500">
-          Planned date uses the parent schedule first, then the earliest relevant channel schedule.
+          Planned dates follow content schedules. Published dates reflect confirmed external
+          publication.
         </p>
       </div>
       <div className="divide-y divide-slate-100">
         {instances.map((instance) => (
           <button
             className="grid gap-3 px-4 py-4 text-left transition hover:bg-slate-50 md:grid-cols-[190px_minmax(0,1fr)_170px_170px]"
-            key={instance.item.id}
+            key={instance.eventId ?? instance.item.id}
             onClick={() => onItemClick(instance.item)}
             type="button"
           >
             <div>
-              <p className="text-xs font-semibold uppercase text-slate-500">Planned</p>
+              <p className="text-xs font-semibold uppercase text-slate-500">
+                {instance.publication ? "Published" : "Planned"}
+              </p>
               <p className="mt-1 text-sm font-medium text-slate-900">
                 {formatCalendarListDate(instance.scheduledAt, timeZone)}
               </p>
@@ -1759,18 +1858,25 @@ function CalendarList({
                 <h3 className="truncate text-sm font-semibold text-slate-950">
                   {instance.item.title}
                 </h3>
-                <Badge variant={approvalStateVariant(instance.item)}>
-                  {approvalStateLabel(instance.item)}
+                <Badge
+                  variant={instance.publication ? "success" : approvalStateVariant(instance.item)}
+                >
+                  {instance.publication ? "Published" : approvalStateLabel(instance.item)}
                 </Badge>
               </div>
               <p className="mt-1 text-sm text-slate-500">
-                {humanize(instance.item.content_type)} - {channelSummary(instance.item)}
+                {humanize(instance.item.content_type)} -{" "}
+                {instance.publication
+                  ? humanize(instance.publication.provider)
+                  : channelSummary(instance.item)}
               </p>
-              {instance.item.channels.map((channel) => (
+              {(instance.publication ? [] : instance.item.channels).map((channel) => (
                 <SchedulingJobState key={channel.id} job={channel.scheduling_job} />
               ))}
               <div className="mt-2 flex flex-wrap gap-1">
-                {instance.item.channels.length ? (
+                {instance.publication ? (
+                  <Badge variant="success">{humanize(instance.publication.placement)}</Badge>
+                ) : instance.item.channels.length ? (
                   instance.item.channels.map((channel) => {
                     const readiness = channel.destination_readiness;
                     return (
@@ -3104,6 +3210,7 @@ function SocialAccountsTab({
   const accountItems = accounts.data?.social_account_connections ?? [];
   const artistOptions = campaignArtistOptions(campaigns);
   const youtubeDirectOAuthEnabled = isYouTubeDirectOAuthEnabled();
+  const oauthResult = useSearchParams().get("oauth");
 
   function updateCapability(capability: SocialAccountCapability, checked: boolean) {
     setForm((current) => ({
@@ -3155,6 +3262,17 @@ function SocialAccountsTab({
 
   return (
     <section className="grid gap-4" aria-label="Social account connections">
+      {oauthResult === "connected" && (
+        <p role="status" className="text-sm text-indigo-800">
+          Account connection updated. If recovering a publication, return to its delivery details
+          and refresh. Reconnection does not publish; request Retry when ready.
+        </p>
+      )}
+      {oauthResult === "failed" && (
+        <p role="alert" className="text-sm text-red-800">
+          Account connection could not be completed. Try reconnecting again.
+        </p>
+      )}
       <Card className="grid gap-1">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
@@ -3764,8 +3882,18 @@ export function MarketingWorkspace() {
   const calendarContent = useWorkspaceCalendarContent(activeWorkspace?.id ?? null, calendarOptions);
   const items = calendarContent.data?.marketing_content ?? [];
   const scheduleInstances = useMemo(
-    () => toScheduleInstances(items, range.start, range.end, timeZone),
-    [items, range.end, range.start, timeZone],
+    () =>
+      toScheduleInstances(items, range.start, range.end, timeZone).filter(
+        (instance) =>
+          (!filters.status ||
+            filters.status !== "published" ||
+            Boolean(instance.publication) ||
+            instance.item.status === "published") &&
+          (!instance.publication ||
+            !filters.channel ||
+            instance.publication.provider === filters.channel),
+      ),
+    [items, range.end, range.start, timeZone, filters.status, filters.channel],
   );
   const currentMonthDays = useMemo(() => monthDays(monthDate, timeZone), [monthDate, timeZone]);
   const instancesByDay = useMemo(() => {

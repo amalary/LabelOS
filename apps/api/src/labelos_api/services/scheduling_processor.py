@@ -36,6 +36,7 @@ from labelos_api.scheduling.events import job_correlation_id
 from labelos_api.scheduling.metrics import scheduling_metrics
 from labelos_api.scheduling.payload import InvalidHandoffPayload, prepare_request
 from labelos_api.scheduling.receivers import UnavailableDeliveryReceiver
+from labelos_api.services.marketing_media import load_approved_assets
 from labelos_api.services.scheduling_destination import lock_destination
 from labelos_api.services.scheduling_eligibility import (
     SchedulingExecutionMode,
@@ -111,8 +112,9 @@ class SchedulingDueJobProcessor:
         self.window = lateness_window_seconds
         self.batch_size = batch_size
         self.lease_duration = lease_duration
-        # Already materialized immutable content bytes. No credential/storage I/O.
-        self.asset_bytes = dict(asset_bytes or {})
+        # Trusted callers may supply bytes; production resolves content-scoped
+        # prepared media in the existing source-locked database transaction.
+        self.asset_bytes = dict(asset_bytes) if asset_bytes is not None else None
 
     def _repository(self, session, workspace_id):
         return SchedulingRepository(
@@ -278,6 +280,11 @@ class SchedulingDueJobProcessor:
                     assert source.channel is not None
                     assert job.social_account_connection_id is not None
                     try:
+                        assets = self.asset_bytes
+                        if assets is None:
+                            assets = await load_approved_assets(
+                                session, workspace_id, source.item, source.channel
+                            )
                         request = prepare_request(
                             snapshot=snapshot_for(job),
                             job_id=job.id,
@@ -287,7 +294,7 @@ class SchedulingDueJobProcessor:
                             correlation_id=job_correlation_id(job),
                             item=source.item,
                             channel=source.channel,
-                            asset_bytes=self.asset_bytes,
+                            asset_bytes=assets,
                         )
                     except InvalidHandoffPayload:
                         reason = Reason.handoff_contract_violation

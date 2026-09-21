@@ -2,7 +2,11 @@
 
 import { useCallback, useEffect, useSyncExternalStore } from "react";
 
-import type { SchedulingEligibility, SchedulingJobProjection } from "./marketing-content";
+import type {
+  PublishedCalendarFact,
+  SchedulingEligibility,
+  SchedulingJobProjection,
+} from "./marketing-content";
 
 export type CampaignCalendarApiErrorCode =
   "unauthorized" | "forbidden" | "not_found" | "validation" | "network_failure";
@@ -93,6 +97,7 @@ export type CampaignCalendarApprovalContext = {
 };
 
 export type CampaignCalendarEvent = {
+  publication?: PublishedCalendarFact | null;
   id: string;
   event_type: CampaignCalendarEventType | string;
   source_type: CampaignCalendarSourceType;
@@ -453,7 +458,19 @@ export function invalidateCampaignCalendarCache(predicate?: (key: string) => boo
     entry.data = null;
     entry.error = null;
     if (entry.fetcher) {
-      void loadResource(key, entry.fetcher).catch(() => undefined);
+      // A publication can commit while an earlier calendar snapshot is in flight.
+      // Refresh after that request settles so its stale result cannot consume the invalidation.
+      if (entry.promise) {
+        void entry.promise
+          .finally(() => {
+            if (cache.get(key) === entry && entry.fetcher) {
+              void loadResource(key, entry.fetcher).catch(() => undefined);
+            }
+          })
+          .catch(() => undefined);
+      } else {
+        void loadResource(key, entry.fetcher).catch(() => undefined);
+      }
     } else {
       emit(entry);
     }

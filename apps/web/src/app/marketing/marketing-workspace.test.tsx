@@ -681,7 +681,9 @@ describe("MarketingWorkspace", () => {
                 execution_enabled: false,
                 delivery_receiver_configured: false,
               }
-            : { jobs: [], limit: 100, next_cursor: null },
+            : path.includes("/publications?")
+              ? { publications: [], next_after_id: null }
+              : { jobs: [], limit: 100, next_cursor: null },
         ),
       ),
     );
@@ -879,6 +881,36 @@ describe("MarketingWorkspace", () => {
     expect(screen.getByText("Youtube @mira Reconnect Required")).toBeInTheDocument();
     expect(screen.getByText("Facebook No Account Selected")).toBeInTheDocument();
     expect(screen.getByText("X @mira_x Disconnected")).toBeInTheDocument();
+  });
+
+  it("renders a confirmed publication on its actual date while content remains approved", () => {
+    const content = item({
+      status: "approved",
+      title: "Confirmed delivery",
+      scheduled_at: "2026-08-01T12:00:00Z",
+    });
+    content.publications = [
+      {
+        publication_id: "publication-1",
+        workspace_id: content.workspace_id,
+        content_item_id: content.id,
+        channel_id: "channel-1",
+        social_account_connection_id: "destination-1",
+        provider: "youtube",
+        channel: "youtube",
+        placement: "video",
+        published_at: "2026-09-15T12:00:00Z",
+        external_post_id: "video-1",
+        provider_url: "https://www.youtube.com/watch/video-1",
+      },
+    ];
+    mockCalendar([content]);
+    render(<MarketingWorkspace />);
+    const card = screen.getByRole("button", { name: /Confirmed delivery/ });
+    expect(within(card).getByText("Published")).toBeInTheDocument();
+    expect(within(card).getByText("Youtube")).toBeInTheDocument();
+    expect(within(card).queryByText("No Account Selected")).not.toBeInTheDocument();
+    expect(content.status).toBe("approved");
   });
 
   it("uses the earliest relevant channel date when the parent schedule is missing", () => {
@@ -1286,6 +1318,8 @@ describe("MarketingWorkspace", () => {
       return detail;
     });
     const requests = vi.fn(async (path: string, init: RequestInit) => {
+      if (path.includes("/publications?"))
+        return Response.json({ publications: [], next_after_id: null });
       if (init.method === "POST") {
         if (path.endsWith("/cancel")) {
           jobs[0] = { ...jobs[0], status: "cancelled" };
@@ -1517,6 +1551,8 @@ describe("MarketingWorkspace", () => {
     });
     let jobs: unknown[] = [];
     const fetchScheduling = vi.fn(async (path: string, init: RequestInit) => {
+      if (path.includes("/publications?"))
+        return Response.json({ publications: [], next_after_id: null });
       if (init.method === "POST") {
         jobs = [
           {
@@ -3342,5 +3378,41 @@ describe("MarketingWorkspace", () => {
         workspaceId: "workspace_01",
       }),
     ).toBe(true);
+  });
+});
+
+describe("Publication calendar projections", () => {
+  it("keeps authoritative channel events stable across reloads and DST without changing authoring", () => {
+    const content = item({ status: "approved", scheduled_at: "2026-10-01T12:00:00Z" });
+    content.publications = ["2026-11-01T08:30:00Z", "2026-11-01T09:30:00Z"].map(
+      (published_at, index) => ({
+        publication_id: `publication-${index}`,
+        channel: index ? "youtube" : "instagram",
+        placement: "feed",
+        workspace_id: content.workspace_id,
+        content_item_id: content.id,
+        channel_id: `channel-${index}`,
+        social_account_connection_id: `destination-${index}`,
+        provider: index ? "youtube" : "instagram",
+        published_at,
+        external_post_id: `external-${index}`,
+        provider_url: null,
+      }),
+    );
+    const project = () =>
+      toScheduleInstances(
+        [content],
+        "2026-11-01T07:00:00Z",
+        "2026-11-02T07:59:59Z",
+        "America/Los_Angeles",
+      );
+    const events = project();
+    expect(events).toHaveLength(2);
+    expect(events.map((event) => event.dateKey)).toEqual(["2026-11-01", "2026-11-01"]);
+    expect(new Set(events.map((event) => event.eventId)).size).toBe(2);
+    expect(project().map((event) => event.eventId)).toEqual(events.map((event) => event.eventId));
+    expect(events.map((event) => event.publication?.provider)).toEqual(["instagram", "youtube"]);
+    expect(content.status).toBe("approved");
+    expect(content.scheduled_at).toBe("2026-10-01T12:00:00Z");
   });
 });

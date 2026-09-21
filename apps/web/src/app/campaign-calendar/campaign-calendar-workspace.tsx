@@ -187,7 +187,7 @@ export function campaignCalendarEventHref(event: CampaignCalendarEvent): string 
   const campaignId =
     event.campaign?.id ??
     (event.source_type === "campaign" ? event.source_id : null) ??
-    event.source_parent_id;
+    (event.source_type === "publication" ? null : event.source_parent_id);
   if (event.event_type.startsWith("campaign.") && campaignId) {
     return `/campaigns/${campaignId}`;
   }
