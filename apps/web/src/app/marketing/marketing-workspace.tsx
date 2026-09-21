@@ -11,6 +11,7 @@ import {
 import { Badge, Button, Card, EmptyState, LoadingState, PageHeader, cn } from "@label-os/ui";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { PreparedMediaUpload } from "./prepared-media-upload";
 
 import { can, capabilities } from "../../lib/authorization";
 import {
@@ -807,6 +808,7 @@ function ContentEditor({
   );
   const [clientError, setClientError] = useState<string | null>(null);
   const [schedulingBusy, setSchedulingBusy] = useState(false);
+  const [uploadBusy, setUploadBusy] = useState(false);
   const [publishNowNotice, setPublishNowNotice] = useState<string | null>(null);
   const profile = useActiveWorkspaceProfile();
   const canSchedule = Boolean(
@@ -841,7 +843,7 @@ function ContentEditor({
     item?.campaign_id ?? null,
     item?.id ?? null,
   );
-  const isEditable = (mode === "create" || canEdit) && !schedulingBusy;
+  const isEditable = (mode === "create" || canEdit) && !schedulingBusy && !uploadBusy;
   const artistOptions = selectedCampaign
     ? [
         ...(selectedCampaign.primary_artist ? [selectedCampaign.primary_artist] : []),
@@ -871,7 +873,8 @@ function ContentEditor({
     update.isMutating ||
     submitApproval.isMutating ||
     archive.isMutating ||
-    schedulingBusy;
+    schedulingBusy ||
+    uploadBusy;
   const approvalState = item?.approval_state?.state ?? item?.status;
   const isCurrentlyApproved = item ? approvedRevisionIsCurrent(item) : false;
   const isDraftSurface = surface === "drafts";
@@ -1149,10 +1152,37 @@ function ContentEditor({
             className="min-h-20 rounded-md border border-slate-300 bg-white px-3 py-2 font-mono text-xs text-slate-950"
             disabled={!isEditable}
             onChange={(event) => setField({ assetRefsJson: event.target.value })}
-            placeholder='[{"id":"asset_01","type":"image"}]'
+            placeholder="[]"
             value={form.assetRefsJson}
           />
         </label>
+        <PreparedMediaUpload
+          workspaceId={workspaceId}
+          contentId={item?.id ?? null}
+          disabled={!isEditable}
+          label="Upload shared media"
+          onBusy={setUploadBusy}
+          onUploaded={(reference) =>
+            setField({
+              assetRefsJson: JSON.stringify(
+                [
+                  ...parseAssetRefs(form.assetRefsJson, "Asset references").filter(
+                    (ref) =>
+                      !(
+                        ref &&
+                        typeof ref === "object" &&
+                        "sha256" in ref &&
+                        ref.sha256 === reference.sha256
+                      ),
+                  ),
+                  reference,
+                ],
+                null,
+                2,
+              ),
+            })
+          }
+        />
       </div>
 
       <div className="grid gap-3">
@@ -1412,6 +1442,36 @@ function ContentEditor({
                       value={channel.assetRefsJson}
                     />
                   </label>
+                  <PreparedMediaUpload
+                    workspaceId={workspaceId}
+                    contentId={item?.id ?? null}
+                    disabled={!isEditable}
+                    label={`Upload media for target ${index + 1}`}
+                    onBusy={setUploadBusy}
+                    onUploaded={(reference) =>
+                      setChannel(channel.id, {
+                        assetRefsJson: JSON.stringify(
+                          [
+                            ...parseAssetRefs(
+                              channel.assetRefsJson,
+                              "Channel asset references",
+                            ).filter(
+                              (ref) =>
+                                !(
+                                  ref &&
+                                  typeof ref === "object" &&
+                                  "sha256" in ref &&
+                                  ref.sha256 === reference.sha256
+                                ),
+                            ),
+                            reference,
+                          ],
+                          null,
+                          2,
+                        ),
+                      })
+                    }
+                  />
                   <p className="text-xs text-slate-500">Target {index + 1}</p>
                   {item && item.channels.find((saved) => saved.id === channel.persistedId) && (
                     <ChannelScheduling

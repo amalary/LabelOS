@@ -481,8 +481,8 @@ def test_migration_round_trip(postgres_test_engine):
             str(Path(__file__).resolve().parents[3] / "packages/database/alembic.ini")
         )
     )
-    assert scripts.get_heads() == ["202609170500"]
-    projection = scripts.get_revision("head")
+    assert scripts.get_heads() == ["202609210100"]
+    projection = scripts.get_revision("202609170500")
     assert projection.down_revision == "202609170400"
     invalidation = scripts.get_revision("202609170400")
     assert invalidation.down_revision == "202609170300"

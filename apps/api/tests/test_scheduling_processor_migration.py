@@ -16,7 +16,7 @@ def test_execution_control_migration_round_trip(database_test_engine):
         Config(str(root / "packages/database/alembic.ini"))
     )
     revision = scripts.get_revision("202609152100")
-    assert scripts.get_heads() == ["202609170500"]
+    assert scripts.get_heads() == ["202609210100"]
     assert scripts.get_revision("202609162200").down_revision == revision.revision
     assert revision.down_revision == "202609152000"
 

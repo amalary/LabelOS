@@ -34,8 +34,9 @@ does not start or enable the Publishing job. A Publishing process outage safely
 leaves committed work pending; no worker liveness probe is required for durable
 acceptance. Monitor pending Publications and each worker's fixed outcome counts.
 Existing provider capability and payload rules still apply: only YouTube has a
-production adapter, and media bytes must already meet Scheduling's immutable
-payload contract. This composition does not add asset loading or provider support.
+production adapter. Content uploads now persist prepared media in PostgreSQL;
+Scheduling loads the approved, content-scoped bytes before building its immutable
+payload. See [prepared media](prepared-media.md) for authoring, limits and rollout.
 
 ## Transactions, failure and replay
 
