@@ -46,19 +46,13 @@ class PublicationLeaseRepository:
     def __init__(self, session, workspace_id):
         self.session, self.workspace_id = session, workspace_id
 
-    async def claim_next(self, *, owner_id: UUID, duration: timedelta, exclude=()):
-        if not isinstance(owner_id, UUID) or not owner_id.int:
-            raise ValueError("invalid_publication_worker")
-        if not timedelta(seconds=1) <= duration <= timedelta(hours=1):
-            raise ValueError("invalid_publication_lease_duration")
-        now = await database_now(self.session)
+    def _claimable(self, now):
         available, eligible = action_filters(now)
-        row = await self.session.scalar(
+        return (
             select(Publication)
             .join(PublicationLease, PublicationLease.publication_id == Publication.id)
             .where(
                 Publication.workspace_id == self.workspace_id,
-                Publication.id.not_in(exclude),
                 available,
                 or_(
                     PublicationLease.owner_id.is_(None),
@@ -77,6 +71,17 @@ class PublicationLeaseRepository:
                     ),
                 ),
             )
+        )
+
+    async def claim_next(self, *, owner_id: UUID, duration: timedelta, exclude=()):
+        if not isinstance(owner_id, UUID) or not owner_id.int:
+            raise ValueError("invalid_publication_worker")
+        if not timedelta(seconds=1) <= duration <= timedelta(hours=1):
+            raise ValueError("invalid_publication_lease_duration")
+        now = await database_now(self.session)
+        row = await self.session.scalar(
+            self._claimable(now)
+            .where(Publication.id.not_in(exclude))
             # Cancelled (including invalidated approval) is terminal and excluded.
             # Rotate transient preflight refusals so later work remains reachable.
             .order_by(
@@ -87,6 +92,18 @@ class PublicationLeaseRepository:
             .limit(1)
         )
         if row is None:
+            return None
+        # The locking SELECT's snapshot can predate another worker's committed
+        # lease change. Only Publication is locked, so PostgreSQL need not refresh
+        # the joined lease or action rows. Recheck all eligibility in a fresh
+        # READ COMMITTED statement while holding the publication lock.
+        now = await database_now(self.session)
+        current = await self.session.scalar(
+            self._claimable(now)
+            .with_only_columns(Publication.id)
+            .where(Publication.id == row.id)
+        )
+        if current is None:
             return None
         lease = await self.session.get(PublicationLease, row.id, populate_existing=True)
         recovering = row.status in ("processing", "retrying")

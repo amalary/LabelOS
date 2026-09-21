@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import pytest
 from labelos_database.models import Organization, Publication, PublicationLease
-from sqlalchemy import func, select, update
+from sqlalchemy import event, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSessionTransaction
 
 from labelos_api.publishing.providers import (
@@ -26,6 +26,7 @@ from labelos_api.repositories.publishing import (
 from labelos_api.services.delivery_orchestrator import DeliveryIneligible
 from labelos_api.services.publishing_processor import PublishingProcessor
 from test_delivery_orchestrator import accepted
+from test_marketing_content_postgres import wait_until_blocked
 from test_publishing_idempotency_postgres import Provider, command, setup, stored
 from test_scheduling_repository import sessions as repository_sessions  # noqa: F401
 
@@ -426,6 +427,92 @@ def test_due_retry_consumed_once_by_simultaneous_processors(sessions, monkeypatc
         assert provider.calls[0].idempotency_key == provider.calls[1].idempotency_key
         row = await stored(sessions, scope, identifier)
         assert row.status == "published" and len(row.attempts) == 2
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("retry", [False, True])
+def test_claim_snapshot_cannot_steal_a_newly_committed_lease(
+    sessions, monkeypatch, retry
+):
+    from labelos_api.repositories import publishing
+
+    async def run():
+        scope, identifier = await setup(sessions)
+        provider = Provider(ProviderOutcome.retryable_failure)
+        first = worker(sessions, scope, provider)
+        if retry:
+            original = publishing.retry_decision
+
+            def immediately_due(*args, **kwargs):
+                return replace(
+                    original(*args, **kwargs), next_retry_at=kwargs["observed_at"]
+                )
+
+            monkeypatch.setattr(publishing, "retry_decision", immediately_due)
+            assert (await first.run()).claimed == 1
+        provider.outcome = ProviderOutcome.published
+        other_owner = uuid4()
+        gate = uuid4().int % (2**63)
+        async with sessions() as observer, sessions.begin() as contender:
+            await observer.execute(
+                text("SELECT pg_advisory_lock(:gate)"), {"gate": gate}
+            )
+            pid = await contender.scalar(select(func.pg_backend_pid()))
+            connection = await contender.connection()
+
+            def pause_snapshot(
+                conn, cursor, statement, parameters, context, executemany
+            ):
+                if "FOR UPDATE OF publications SKIP LOCKED" in statement:
+                    # Pause this SELECT inside PostgreSQL after its READ COMMITTED
+                    # snapshot is taken, before it acquires the publication lock.
+                    statement = (
+                        "WITH claim_gate AS MATERIALIZED "
+                        f"(SELECT pg_advisory_xact_lock({gate})) "
+                        + statement.replace(
+                            "FROM publications JOIN",
+                            "FROM claim_gate CROSS JOIN publications JOIN",
+                        )
+                    )
+                return statement, parameters
+
+            event.listen(
+                connection.sync_connection,
+                "before_cursor_execute",
+                pause_snapshot,
+                retval=True,
+            )
+            task = asyncio.create_task(
+                PublicationLeaseRepository(contender, scope).claim_next(
+                    owner_id=other_owner, duration=first.lease_duration
+                )
+            )
+            try:
+                await wait_until_blocked(observer, pid, task)
+                winner = await first.claim_next()
+                assert winner is not None
+                await observer.execute(
+                    text("SELECT pg_advisory_unlock(:gate)"), {"gate": gate}
+                )
+                assert await asyncio.wait_for(task, 5) is None
+            finally:
+                await observer.execute(
+                    text("SELECT pg_advisory_unlock(:gate)"), {"gate": gate}
+                )
+                if not task.done():
+                    task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                event.remove(
+                    connection.sync_connection, "before_cursor_execute", pause_snapshot
+                )
+        lease = await lease_for(sessions, identifier)
+        assert (
+            lease.owner_id == winner.owner_id
+            and lease.fencing_token == winner.fencing_token
+        )
+        assert (await first.process_claim(winner)).status == "published"
+        assert len(provider.calls) == (2 if retry else 1)
 
     asyncio.run(run())
 
