@@ -62,6 +62,8 @@ class Capability(StrEnum):
     finance_report_view = "finance.report.view"
     finance_payment_view = "finance.payment.view"
     finance_payment_approve = "finance.payment.approve"
+    governance_view = "governance.view"
+    governance_manage = "governance.manage"
     analytics_view = "analytics.view"
     analytics_create = "analytics.create"
 
@@ -106,6 +108,16 @@ def _definition(
 
 
 CAPABILITY_REGISTRY: tuple[CapabilityDefinition, ...] = (
+    _definition(
+        Capability.governance_view,
+        "View data governance",
+        "Read cross-department dataset documentation and lineage.",
+    ),
+    _definition(
+        Capability.governance_manage,
+        "Manage data governance",
+        "Register sources, document datasets and record collection provenance.",
+    ),
     _definition(
         Capability.workspace_view,
         "View workspace",

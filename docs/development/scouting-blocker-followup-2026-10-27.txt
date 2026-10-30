@@ -1,0 +1,84 @@
+Scouting blocker follow-up -- October 27, 2026 (America/Los_Angeles)
+
+Historical checkpoint. Current evidence, fixes, and remaining browser acceptance:
+scouting-checklist-closeout-2026-10-27.txt in this directory.
+
+Resolved
+
+- Diagnosed the real onboarding failure using read-only WorkOS/local state:
+  WorkOS had member/admin roles but no owner role. Organization creation had
+  succeeded, leaving two Calebasse organizations without a membership.
+- With the user's explicit approval, created the missing WorkOS owner role
+  definition. No default role, existing permissions, or memberships were changed
+  by that administrative script. The user retried the normal onboarding flow.
+  Read-only verification then confirmed one local workspace and an active WorkOS
+  owner membership.
+- Onboarding now checks the role before organization creation. Retries reuse a
+  matching LabelOS creator/name organization only if it is empty or the caller
+  still has active owner membership. Old creator metadata cannot reclaim an
+  occupied organization. Raw SDK exceptions are no longer logged by this action.
+  Leftover empty WorkOS organizations were not deleted.
+- Added a local research-session setup button and authenticated API endpoint.
+  Governance managers can explicitly prepare a non-production YouTube session
+  through the existing audited governance service. It creates draft documentation,
+  records no invented license/privacy approval, and changes no user grants.
+  Concurrent setup reuses one run. Production/staging requests return 404;
+  ordinary scouting members cannot create sessions.
+- Added public /privacy and /terms pages for the local research workflow, using
+  the user-provided privacy/deletion contact amalary@bu.edu. The user approved
+  Calebasse as operator and approved activating these documents for local use.
+  Their configured pages return 200 with correct details and without a draft banner.
+- Enabled discovery and reviewed bundled policies in the ignored local profiles.
+  Relative bundled policy URLs work only with explicit APP_ENV=local, complete
+  operator/contact details, and an approval flag. Public deployments still need
+  HTTPS policy URLs and their own operational/policy review.
+- Restarted only the verified guarded local API/web processes to load the changes.
+  API/database health is OK. New local-session endpoint appears in live OpenAPI.
+- Read actual Google project quota allocation: 100 search calls/day and 10,000
+  general units/day. App limits of 80 and 8,000 fit within those allocations.
+  No quota, API key, billing, or project configuration was changed. Other project
+  consumers were not inventoried; Google quota failures remain authoritative.
+- Documented setup, role prerequisites, policy activation and manual acceptance
+  steps in workos-environment.md and youtube-research-api.md.
+
+Validation
+
+- New setup/scouting SQLite HTTP tests: 10 passed, 3 PostgreSQL skips.
+- New setup PostgreSQL suite: 6 passed, no skips. Includes six concurrent setup
+  requests creating one session, permission denial, production/staging refusal,
+  workspace isolation, immutable draft approval fields, audit and idempotency.
+- Focused frontend suite: 42 passed across seven files. One additional ownership
+  recovery regression was then added; the complete onboarding file passed all
+  15 tests. TypeScript typecheck passed after the final onboarding change.
+- Scoped ESLint and Ruff passed. Python formatting was applied, but repeated
+  Black verification processes stalled on this Windows host and were stopped;
+  no final full formatting-gate pass is claimed.
+- Local database remains at migration 202610270200 with zero metadata drift.
+- No production build, deployment, production database migration, fake login,
+  permission downgrade, or synthetic development-workspace data was introduced.
+
+Still awaiting browser acceptance
+
+Browser inventory is empty and attempting an in-app browser reports unavailable.
+The user was asked to open http://localhost:3000/scouting, prepare the local session,
+agree to the policies, search/open/save a candidate, edit notes/status, reload and
+reopen it. At the last read-only checkpoint there was one workspace, zero collection
+runs and zero candidates. This report therefore does not certify that browser flow.
+
+The current signed-in user is an owner. A successful owner walkthrough also does
+not certify a real ordinary A&R member walkthrough; automated authorization tests
+cover that boundary. A separately authorized member session is still needed for
+that particular browser acceptance check. No invitation was sent or role changed.
+
+Operational limits
+
+The user's approval is for these local documents and the stated local workflow.
+It is not independent legal certification, a YouTube audit, a shared deployment
+approval, or a guarantee of backup/log retention in another environment. Local
+API source sweeping runs while the service is running. The operator accepted
+responsibility for applicable deletion requests and retained copies.
+
+Official references consulted
+https://workos.com/docs/reference/roles/role
+https://developers.google.com/youtube/terms/developer-policies
+https://developers.google.com/youtube/data/determine_quota_cost

@@ -38,14 +38,14 @@ function inviteErrorMessage(error: unknown): string {
       return "An active invitation already exists for this email. Use the existing invite or wait for it to expire.";
     }
     if (error.status === 403) {
-      return "You do not have permission to send this invitation. Ask a workspace owner or admin for help.";
+      return "You do not have permission to create this invitation. Ask a workspace owner or admin for help.";
     }
     if (error.status === 410) {
       return "This invitation is no longer available. Create a new invite and send the fresh link.";
     }
   }
 
-  return "We could not send the invitation. Check the email and your workspace access, then try again.";
+  return "We could not create the invitation link. Check the email and your workspace access, then try again.";
 }
 
 export async function createWorkspaceInviteAction(
@@ -58,7 +58,7 @@ export async function createWorkspaceInviteAction(
   if (typeof organizationId !== "string" || organizationId.length === 0) {
     return {
       ...initialInviteState,
-      error: "Choose an active workspace before sending an invite.",
+      error: "Choose an active workspace before creating an invite.",
       status: "error",
     };
   }

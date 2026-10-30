@@ -37,6 +37,39 @@ const invite: WorkspaceInvite = {
 };
 
 describe("InviteOnboardingFlow", () => {
+  it.each(["inactive", "revoked", "expired", "exhausted"] as const)(
+    "prevents acceptance of %s invites",
+    async (status) => {
+      const { InviteOnboardingFlow } = await import("./invite-onboarding-flow");
+      render(
+        <InviteOnboardingFlow
+          hasInviteError={false}
+          initialStep="accept"
+          invite={{ ...invite, status }}
+        />,
+      );
+      expect(screen.getByRole("button", { name: "Join Workspace" })).toBeDisabled();
+      expect(
+        screen.queryByRole("button", { name: "Accept Workspace Invitation" }),
+      ).not.toBeInTheDocument();
+    },
+  );
+
+  it("identifies self-selected roles as descriptive job titles", async () => {
+    const { InviteOnboardingFlow } = await import("./invite-onboarding-flow");
+    render(
+      <InviteOnboardingFlow
+        hasInviteError={false}
+        initialStep="accept"
+        invite={{ ...invite, professional_roles: [], workspace_roles: [] }}
+      />,
+    );
+    fireEvent.click(screen.getByRole("checkbox", { name: "Legal" }));
+    expect(screen.getByText(/These job titles describe your work/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Accept Workspace Invitation" })).toBeEnabled();
+    expect(document.querySelector('[name="workspace_roles"]')).toBeNull();
+  });
+
   it("starts with the general invite prompt", async () => {
     const { InviteOnboardingFlow } = await import("./invite-onboarding-flow");
 

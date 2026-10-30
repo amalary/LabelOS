@@ -1,6 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useSyncExternalStore } from "react";
+import { createResourceCache, useCachedResource } from "./resource-cache";
+
+import { useCallback, useSyncExternalStore } from "react";
 
 export type MarketingContentApiErrorCode =
   "unauthorized" | "forbidden" | "not_found" | "conflict" | "validation" | "network_failure";
@@ -240,17 +242,20 @@ export type MarketingContentMutationState<TData, TVariables> = {
   reset: () => void;
 };
 
-type CacheEntry<T> = {
-  data: T | null;
-  error: MarketingContentApiError | null;
-  fetcher: (() => Promise<T>) | null;
-  isLoading: boolean;
-  listeners: Set<() => void>;
-  promise: Promise<T> | null;
-  version: number;
-};
-
-const cache = new Map<string, CacheEntry<unknown>>();
+const cache = createResourceCache({
+  toError: (error: unknown) =>
+    error instanceof MarketingContentApiError
+      ? error
+      : new MarketingContentApiError(
+          "network_failure",
+          "Marketing content could not be loaded.",
+          undefined,
+          { cause: error },
+        ),
+  missingKeyError: () =>
+    new MarketingContentApiError("not_found", "A marketing content resource key is required."),
+});
+const { entryFor } = cache;
 const mutationListeners = new Set<() => void>();
 let mutationVersion = 0;
 let activeMutationCount = 0;
@@ -302,30 +307,6 @@ function normalizeMarketingContentListOptions(
   delete normalized.artist;
   delete normalized.release;
   return normalized;
-}
-
-function entryFor<T>(key: string): CacheEntry<T> {
-  let entry = cache.get(key) as CacheEntry<T> | undefined;
-  if (!entry) {
-    entry = {
-      data: null,
-      error: null,
-      fetcher: null,
-      isLoading: false,
-      listeners: new Set(),
-      promise: null,
-      version: 0,
-    };
-    cache.set(key, entry as CacheEntry<unknown>);
-  }
-  return entry;
-}
-
-function emit(entry: CacheEntry<unknown>) {
-  entry.version += 1;
-  for (const listener of entry.listeners) {
-    listener();
-  }
 }
 
 function emitMutationChange() {
@@ -429,45 +410,6 @@ async function marketingContentJson<T>(path: string, init?: RequestInit): Promis
   return (await response.json()) as T;
 }
 
-async function loadResource<T>(key: string, fetcher: () => Promise<T>): Promise<T> {
-  const entry = entryFor<T>(key);
-  entry.fetcher = fetcher;
-  if (entry.promise) {
-    return entry.promise;
-  }
-
-  entry.error = null;
-  entry.isLoading = true;
-  emit(entry);
-
-  entry.promise = fetcher()
-    .then((data) => {
-      entry.data = data;
-      entry.error = null;
-      return data;
-    })
-    .catch((error) => {
-      entry.error =
-        error instanceof MarketingContentApiError
-          ? error
-          : new MarketingContentApiError(
-              "network_failure",
-              "Marketing content could not be loaded.",
-              undefined,
-              { cause: error },
-            );
-      throw entry.error;
-    })
-    .finally(() => {
-      entry.isLoading = false;
-      entry.promise = null;
-      emit(entry);
-    });
-
-  emit(entry);
-  return entry.promise;
-}
-
 function marketingContentQuery(
   options?: MarketingContentListOptions | MarketingContentCampaignListOptions,
 ): string {
@@ -486,52 +428,7 @@ function useMarketingContentResource<T>(
   key: string | null,
   fetcher: (() => Promise<T>) | null,
 ): MarketingContentResourceState<T> {
-  const subscribe = useCallback(
-    (listener: () => void) => {
-      if (!key) {
-        return () => undefined;
-      }
-      const entry = entryFor<T>(key);
-      entry.listeners.add(listener);
-      return () => {
-        entry.listeners.delete(listener);
-      };
-    },
-    [key],
-  );
-
-  const getSnapshot = useCallback(() => (key ? entryFor<T>(key).version : 0), [key]);
-  useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
-
-  useEffect(() => {
-    if (!key || !fetcher) {
-      return;
-    }
-    const entry = entryFor<T>(key);
-    entry.fetcher = fetcher;
-    if (entry.data === null && !entry.isLoading) {
-      void loadResource(key, fetcher).catch(() => undefined);
-    }
-  }, [fetcher, key]);
-
-  const reload = useCallback(async () => {
-    if (!key || !fetcher) {
-      throw new MarketingContentApiError(
-        "not_found",
-        "A marketing content resource key is required.",
-      );
-    }
-    return loadResource(key, fetcher);
-  }, [fetcher, key]);
-
-  const entry = key ? entryFor<T>(key) : null;
-  return {
-    data: entry?.data ?? null,
-    error: entry?.error ?? null,
-    isLoading: entry?.isLoading ?? false,
-    isMutating: activeMutationCount > 0,
-    reload,
-  };
+  return { ...useCachedResource(cache, key, fetcher), isMutating: activeMutationCount > 0 };
 }
 
 function useMarketingContentMutation<TData, TVariables>(
@@ -596,30 +493,7 @@ function useMarketingContentMutation<TData, TVariables>(
 }
 
 export function invalidateMarketingContentCache(predicate?: (key: string) => boolean) {
-  for (const [key, entry] of cache.entries()) {
-    if (predicate && !predicate(key)) {
-      continue;
-    }
-    entry.data = null;
-    entry.error = null;
-    if (entry.fetcher) {
-      // A publication can commit while an earlier calendar snapshot is in flight.
-      // Refresh after that request settles so its stale result cannot consume the invalidation.
-      if (entry.promise) {
-        void entry.promise
-          .finally(() => {
-            if (cache.get(key) === entry && entry.fetcher) {
-              void loadResource(key, entry.fetcher).catch(() => undefined);
-            }
-          })
-          .catch(() => undefined);
-      } else {
-        void loadResource(key, entry.fetcher).catch(() => undefined);
-      }
-    } else {
-      emit(entry);
-    }
-  }
+  cache.invalidate(predicate);
 }
 
 export function shouldInvalidateMarketingContentRealtimeCacheKey({

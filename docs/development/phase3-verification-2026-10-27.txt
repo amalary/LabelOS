@@ -1,0 +1,123 @@
+LabelOS Phase 3 implementation gap report
+Verified October 27, 2026 (America/Los_Angeles)
+
+Decision: stop for approval. The governance foundation and provider adapters are
+present, but the A&R product workflow is incomplete. Fix the onboarding ownership
+authorization gap before treating local onboarding as ready.
+
+Baseline: HEAD a15bca5, plus the existing uncommitted YouTube research API work.
+The five previously modified files and six previously untracked files were
+preserved. No application feature, migration, or existing environment file was
+changed. This report and ignored verification artifacts are the only additions.
+
+Current capabilities
+
+- Implemented: workspace source registry; datasets and immutable versions;
+  datasheet review/eligibility; collection lifecycle, retries and checkpoints;
+  dataset and record lineage; activity/outbox composition; persisted governance
+  capability checks and workspace isolation. Artist/profile CRUD and Analytics
+  observations/series exist as adjacent foundations.
+- Implemented: typed provider contracts, normalized records, provenance/expiry,
+  credential references, cancellation/deadlines, sanitized errors, bounded pages,
+  fixed-origin GET transports and optional provider search fan-out.
+- Partial: YouTube has authenticated search, lookup and observations routes in the
+  uncommitted tree. They require governance.manage and a running YouTube collection,
+  enforce workspace/run binding and production documentation eligibility, and
+  return display-only data. They do not persist observations, checkpoint or finish
+  collection runs. Only the shared local secret reference is configured; no
+  workspace-specific YouTube credential bindings exist locally.
+- Partial: MusicBrainz, SoundCloud, Last.fm, Songkick and Wikidata have narrower
+  adapter capabilities and access gates, without research HTTP/UI integration.
+  Spotify is deliberately disabled in the current implementation. This review
+  confirms code behavior, not a fresh legal/provider-policy assessment.
+- Absent: research/governance frontend pages and proxy routes; durable scouting
+  shortlists, evaluation/scoring and signing workflows; automatic artist identity
+  resolution; governed ingestion worker and delivery deduplication; distributed
+  project quota budgets; retention/deletion execution and abandoned-run recovery.
+  The scouting agent is deterministic mock output. Generic lineage primitives do
+  not implement an artist-resolution workflow. Current YouTube contracts explicitly
+  restrict returned counters to display, so they are not a scoring input.
+
+Verified environment and migration state
+
+- Inspected scripts/local_database.py before use. Its dedicated profile overrides
+  inherited DATABASE_URL/PG variables and pins execution controls off.
+- Read-only identity checks before service startup and again after verification:
+  127.0.0.1:55432/labelos_ar_dev, user labelos, PostgreSQL 18.6, 66 public tables.
+  Repository has 57 revisions and one head, 202610130100; database revision matches.
+  Alembic metadata comparison including types found no differences. Governance and
+  provenance triggers are present and enabled. PostgreSQL trigger behavior and
+  migration rollback/concurrency were not exercised against this existing database.
+- Users, organizations, workspace memberships, providers, datasets, versions,
+  documentation and collection runs remained empty. No migrations, resets, restores,
+  drops or database overwrites ran against existing databases. No chessapp access,
+  cloud resource startup or deployment occurred. Recovery databases, volumes and
+  archives were untouched.
+- Guarded API startup on 127.0.0.1:4000 succeeded. /health and /health/database
+  returned 200/ok; /api/v1/me rejected anonymous access with 401. OpenAPI exposes all
+  three YouTube research routes.
+- Frontend discrepancy: root .env uses web/API 3000/4000; apps/web/.env.local uses
+  3100/4100, including its WorkOS callback. Verification deliberately loaded the
+  root profile and used process-local API_BASE_URL and NEXT_PUBLIC_API_URL overrides
+  to http://127.0.0.1:4000, with web/callback localhost:3000. Existing env files were
+  preserved. A normal unqualified web launch still needs configuration reconciliation.
+- The temporary API and frontend servers were stopped after verification; their
+  ports are no longer listening. The pre-existing database listener is unchanged.
+
+Live verification versus mocked verification
+
+- LIVE: local API/database health and frontend /login returned 200. Sign-in and
+  protected onboarding redirected to WorkOS with localhost:3000 callback. The
+  hosted AuthKit login form and a read-only WorkOS credential check returned 200.
+  No browser session or end-user credentials were available to complete login,
+  callback/session creation, or workspace onboarding. Those steps remain unverified.
+- LIVE: exactly one YouTube channel lookup returned Google for Developers
+  (UC_x5XG1OV2P6uZZ5FSM9Ttw) with expiry metadata. Used the configured Secret Manager
+  reference, bounded secret access and provider timeout, with no search, retry,
+  storage or resource creation. Diagnostic context IDs were ephemeral, not persisted
+  governance records. This verifies the adapter/credential/network path, not a
+  WorkOS-authenticated research request against a real workspace/run.
+- MOCKED: focused frontend auth, token refresh, API client, redirects, and workspace/
+  profile onboarding checks passed: 42 tests across 10 files. Backend provider and
+  research route tests use injected transports/credentials and SQLite. The test
+  named test_live_routes_return_public_data_with_real_provenance is also mocked.
+- Backend focused suite: 537 passed, 48 skipped, zero failures/errors in 337.95s.
+  Skips: 39 undeclared adapter operations and 9 PostgreSQL-only checks. Coverage
+  includes provider contracts/adapters, YouTube routes, governance audit/lifecycle,
+  documentation/versioning, collection runs, lineage, auth and capability guards.
+- Focused Ruff checks and git diff --check passed.
+
+Blocking finding: onboarding can grant ownership to an existing guest
+
+apps/api/src/labelos_api/api/v1/onboarding.py only rejects a conflicting non-null
+principal organization ID. For a matching organization, it assigns owner_user_id
+to the caller and sets their membership permission/role to owner, accepting the
+submitted membership status without verifying WorkOS owner authority.
+
+A disposable in-memory SQLite HTTP probe with a mocked authenticated guest in the
+same workspace returned 200 and persisted both organization ownership and owner
+membership for that guest. No live account or development database was modified.
+The existing focused suites do not prevent this behavior. Reproduction artifact:
+.tmp/phase3_onboarding_probe_20261027.py. Fix and add a negative authorization
+regression check only after approval.
+
+Test harness finding
+
+The first focused run tried to disable PostgreSQL with an empty TEST_POSTGRES_URL
+in a child process. Windows dropped that empty variable, allowing conftest.py to
+reload .env.test.local (127.0.0.1:55438/labelos_test). Connections were refused before
+schema creation. That run was stopped. The replacement runner executes pytest in
+process, preserves the explicit empty value, and blocks asyncpg connections.
+All database mutations in the completed verification use disposable SQLite.
+Do not reuse the default PostgreSQL fixtures without verifying a disposable target.
+
+Evidence and next approval
+
+The local helper is .tmp/phase3_verify_20261027.py; its tests mode isolates the test
+environment. JUnit: test-results/phase3-verification-20261027-safe.xml. Both are
+ignored local artifacts. The repository's prior audits are historical evidence;
+their PostgreSQL test counts are not claimed as results of this verification.
+
+Proposed next scope: correct onboarding ownership authorization and test isolation,
+then verify a real authenticated workspace/run flow before approving A&R feature
+implementation. No fixes or new features were implemented during this stage.

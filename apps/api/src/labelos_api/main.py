@@ -7,6 +7,7 @@ from labelos_api.exceptions import register_exception_handlers
 from labelos_api.logging import configure_logging, request_logging_middleware
 from labelos_api.models import RootResponse
 from labelos_api.routes.health import router as health_router
+from labelos_api.services.scouting_retention import scouting_lifespan
 
 
 def create_app() -> FastAPI:
@@ -21,6 +22,7 @@ def create_app() -> FastAPI:
     )
 
     app = FastAPI(
+        lifespan=scouting_lifespan,
         title=settings.app_name,
         version=settings.app_version,
         docs_url="/docs" if settings.is_development else None,

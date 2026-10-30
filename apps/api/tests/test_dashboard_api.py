@@ -387,7 +387,7 @@ def test_dashboard_summary_omits_unauthorized_sensitive_cards(
         workos_organization_id="org_ALPHA",
         role=MembershipRole.member,
         permissions=("artists:view", "releases:view"),
-        department_access=(),
+        department_access=("artist", "release_operations"),
     )
 
     response = client.get("/api/v1/dashboard/summary")

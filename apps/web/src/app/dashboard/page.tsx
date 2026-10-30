@@ -8,6 +8,7 @@ import { profileCompletionViewModel } from "../../lib/profile-completion";
 import { getCurrentUniversalProfile } from "../../lib/profiles.server";
 import { DashboardGrid } from "./_components/dashboard-grid";
 import { DashboardHeader } from "./_components/dashboard-header";
+import { CurrentWorkspaceRoles } from "./_components/current-workspace-roles";
 import { getDashboardData, getEmptyDashboardData } from "./dashboard-data";
 
 export default async function DashboardPage() {
@@ -35,6 +36,10 @@ export default async function DashboardPage() {
         <div className="pointer-events-none absolute inset-x-8 top-0 h-px bg-gradient-to-r from-transparent via-cyan-200/45 to-transparent" />
         <div className="flex flex-col gap-6">
           <DashboardHeader organizationName={organization?.name ?? "selected workspace"} />
+          <CurrentWorkspaceRoles
+            workspaceId={organization?.id ?? null}
+            workspaceName={organization?.name}
+          />
           {completionPrompt ? (
             <section
               aria-live="polite"

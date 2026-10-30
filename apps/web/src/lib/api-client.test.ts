@@ -30,6 +30,18 @@ describe("authenticated backend API client", () => {
     vi.stubGlobal("fetch", vi.fn());
   });
 
+  it("uses an explicitly refreshed token without reading the stale request session", async () => {
+    const { apiFetchWithAccessToken } = await import("./api-client");
+    vi.mocked(fetch).mockResolvedValue(new Response("{}", { status: 200 }));
+    await apiFetchWithAccessToken("/api/v1/onboarding/workspace", "new_owner_token", {
+      method: "POST",
+    });
+    const headers = vi.mocked(fetch).mock.calls[0]?.[1]?.headers as Headers;
+    expect(headers.get("Authorization")).toBe("Bearer new_owner_token");
+    expect(tokenHelpers.requireAccessTokenForApi).not.toHaveBeenCalled();
+    expect(tokenHelpers.refreshAccessTokenForApi).not.toHaveBeenCalled();
+  });
+
   it("adds the WorkOS access token as a bearer Authorization header", async () => {
     const { apiFetch } = await import("./api-client");
     tokenHelpers.requireAccessTokenForApi.mockResolvedValue("server_access_token");

@@ -1,6 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useSyncExternalStore } from "react";
+import { createResourceCache, useCachedResource } from "./resource-cache";
+
+import { useCallback, useMemo, useSyncExternalStore } from "react";
 
 import type {
   ArtistProfileCreate,
@@ -44,17 +46,16 @@ export type MutationState<TData, TVariables> = {
   reset: () => void;
 };
 
-type CacheEntry<T> = {
-  data: T | null;
-  error: ProfileApiError | null;
-  isLoading: boolean;
-  promise: Promise<T> | null;
-  listeners: Set<() => void>;
-  fetcher: (() => Promise<T>) | null;
-  version: number;
-};
-
-const cache = new Map<string, CacheEntry<unknown>>();
+const cache = createResourceCache({
+  toError: (error: unknown) =>
+    error instanceof ProfileApiError
+      ? error
+      : new ProfileApiError("network_failure", "Profile data could not be loaded.", undefined, {
+          cause: error,
+        }),
+  missingKeyError: () => new ProfileApiError("not_found", "A profile resource key is required."),
+});
+const { entryFor, emit } = cache;
 const mutationListeners = new Set<() => void>();
 let mutationVersion = 0;
 let activeMutationCount = 0;
@@ -71,30 +72,6 @@ export const profileQueryKeys = {
   artistProfile: (workspaceId: string, artistProfileId: string) =>
     `profiles:artist-profile:${workspaceId}:${artistProfileId}`,
 };
-
-function entryFor<T>(key: string): CacheEntry<T> {
-  let entry = cache.get(key) as CacheEntry<T> | undefined;
-  if (!entry) {
-    entry = {
-      data: null,
-      error: null,
-      isLoading: false,
-      promise: null,
-      listeners: new Set(),
-      fetcher: null,
-      version: 0,
-    };
-    cache.set(key, entry as CacheEntry<unknown>);
-  }
-  return entry;
-}
-
-function emit(entry: CacheEntry<unknown>) {
-  entry.version += 1;
-  for (const listener of entry.listeners) {
-    listener();
-  }
-}
 
 function emitMutationChange() {
   mutationVersion += 1;
@@ -151,112 +128,15 @@ async function profileJson<T>(path: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T;
 }
 
-async function loadResource<T>(key: string, fetcher: () => Promise<T>): Promise<T> {
-  const entry = entryFor<T>(key);
-  entry.fetcher = fetcher;
-  if (entry.promise) {
-    return entry.promise;
-  }
-
-  entry.isLoading = true;
-  entry.error = null;
-  emit(entry);
-
-  entry.promise = fetcher()
-    .then((data) => {
-      entry.data = data;
-      entry.error = null;
-      return data;
-    })
-    .catch((error) => {
-      entry.error =
-        error instanceof ProfileApiError
-          ? error
-          : new ProfileApiError("network_failure", "Profile data could not be loaded.", undefined, {
-              cause: error,
-            });
-      throw entry.error;
-    })
-    .finally(() => {
-      entry.isLoading = false;
-      entry.promise = null;
-      emit(entry);
-    });
-
-  emit(entry);
-  return entry.promise;
-}
-
 function useProfileResource<T>(
   key: string | null,
   fetcher: (() => Promise<T>) | null,
 ): AsyncResourceState<T> {
-  const subscribe = useCallback(
-    (listener: () => void) => {
-      if (!key) {
-        return () => undefined;
-      }
-      const entry = entryFor<T>(key);
-      entry.listeners.add(listener);
-      return () => {
-        entry.listeners.delete(listener);
-      };
-    },
-    [key],
-  );
-
-  const getSnapshot = useCallback(() => {
-    if (!key) {
-      return 0;
-    }
-    const entry = entryFor<T>(key);
-    return entry.version;
-  }, [key]);
-
-  useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
-
-  useEffect(() => {
-    if (!key || !fetcher) {
-      return;
-    }
-
-    const entry = entryFor<T>(key);
-    entry.fetcher = fetcher;
-    if (entry.data === null && !entry.isLoading) {
-      void loadResource(key, fetcher).catch(() => undefined);
-    }
-  }, [fetcher, key]);
-
-  const reload = useCallback(async () => {
-    if (!key || !fetcher) {
-      throw new ProfileApiError("not_found", "A profile resource key is required.");
-    }
-    return loadResource(key, fetcher);
-  }, [fetcher, key]);
-
-  const entry = key ? entryFor<T>(key) : null;
-  return {
-    data: entry?.data ?? null,
-    error: entry?.error ?? null,
-    isLoading: entry?.isLoading ?? false,
-    isMutating: activeMutationCount > 0,
-    reload,
-  };
+  return { ...useCachedResource(cache, key, fetcher), isMutating: activeMutationCount > 0 };
 }
 
 export function invalidateProfileCache(predicate?: (key: string) => boolean) {
-  for (const [key, entry] of cache.entries()) {
-    if (predicate && !predicate(key)) {
-      continue;
-    }
-    entry.data = null;
-    entry.error = null;
-    if (entry.fetcher) {
-      void loadResource(key, entry.fetcher).catch(() => undefined);
-    } else {
-      emit(entry);
-    }
-  }
+  cache.invalidate(predicate);
 }
 
 export function clearProfileCache() {

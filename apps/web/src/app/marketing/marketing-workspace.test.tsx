@@ -687,7 +687,7 @@ describe("MarketingWorkspace", () => {
         ),
       ),
     );
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-09-15T12:00:00Z"));
     searchParamString = "";
     getParam.mockImplementation((key: string) => (key === "campaignId" ? "" : null));
@@ -761,6 +761,7 @@ describe("MarketingWorkspace", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    vi.restoreAllMocks();
     vi.unstubAllEnvs();
     vi.unstubAllGlobals();
   });
@@ -999,7 +1000,6 @@ describe("MarketingWorkspace", () => {
   });
 
   it("creates a draft with campaign, optional relationships, planned time, and channel override", async () => {
-    vi.useRealTimers();
     const reload = vi.fn();
     mockWorkspaceProfile(["marketing.content.view", "marketing.content.create"]);
     vi.mocked(marketingContent.useWorkspaceCalendarContent).mockReturnValue({
@@ -1054,7 +1054,6 @@ describe("MarketingWorkspace", () => {
   });
 
   it("requires campaign before creating content", async () => {
-    vi.useRealTimers();
     mockWorkspaceProfile(["marketing.content.view", "marketing.content.create"]);
     vi.mocked(campaignsLib.useCampaigns).mockReturnValue({
       data: { campaigns: [], total: 0, limit: 500, offset: 0 },
@@ -1074,7 +1073,6 @@ describe("MarketingWorkspace", () => {
   });
 
   it("creates content with multiple channels and optional artist/release omitted", async () => {
-    vi.useRealTimers();
     mockWorkspaceProfile(["marketing.content.view", "marketing.content.create"]);
     mockCalendar([]);
     render(<MarketingWorkspace />);
@@ -1106,7 +1104,6 @@ describe("MarketingWorkspace", () => {
   });
 
   it("blocks duplicate channel and placement selections before the API call", async () => {
-    vi.useRealTimers();
     mockWorkspaceProfile(["marketing.content.view", "marketing.content.create"]);
     mockCalendar([]);
     render(<MarketingWorkspace />);
@@ -1128,7 +1125,6 @@ describe("MarketingWorkspace", () => {
   });
 
   it("edits an existing content item with populated channel values", async () => {
-    vi.useRealTimers();
     mockWorkspaceProfile(["marketing.content.view", "marketing.content.edit"]);
     render(<MarketingWorkspace />);
 
@@ -1151,7 +1147,6 @@ describe("MarketingWorkspace", () => {
   });
 
   it("submits draft content for review through the lifecycle action", async () => {
-    vi.useRealTimers();
     mockWorkspaceProfile([
       "marketing.content.view",
       "marketing.content.edit",
@@ -1237,7 +1232,6 @@ describe("MarketingWorkspace", () => {
   });
 
   it("completes channel authoring, approval, activation, cancellation, material rescheduling, reapproval, and replacement", async () => {
-    vi.useRealTimers();
     mockWorkspaceProfile([
       "marketing.content.view",
       "marketing.content.edit",
@@ -1450,7 +1444,6 @@ describe("MarketingWorkspace", () => {
   ])(
     "rejects invalid scheduling input %s / %s without saving",
     async (zone, localTime, message) => {
-      vi.useRealTimers();
       mockWorkspaceProfile(["marketing.content.view", "marketing.content.create"]);
       render(<MarketingWorkspace />);
       fireEvent.click(screen.getByRole("button", { name: "Create Content" }));
@@ -1514,7 +1507,6 @@ describe("MarketingWorkspace", () => {
   );
 
   it("Publish Now prepares a material edit and cannot bypass saving, approval, or activation", async () => {
-    vi.useRealTimers();
     mockWorkspaceProfile([
       "marketing.content.view",
       "marketing.content.edit",
@@ -1540,7 +1532,6 @@ describe("MarketingWorkspace", () => {
   });
 
   it("uses the scheduling capability and approved revision guards instead of parent status changes", async () => {
-    vi.useRealTimers();
     mockWorkspaceProfile(["marketing.content.view", "marketing.content.schedule"]);
     const approved = item({
       approval_request_id: "approval_01",
@@ -1640,7 +1631,6 @@ describe("MarketingWorkspace", () => {
   });
 
   it("warns before material edits to currently approved content", async () => {
-    vi.useRealTimers();
     const confirm = vi
       .spyOn(window, "confirm")
       .mockReturnValueOnce(false)
@@ -1694,7 +1684,6 @@ describe("MarketingWorkspace", () => {
   });
 
   it("renders API error states from create mutations", async () => {
-    vi.useRealTimers();
     mutationMocks.create.mockRejectedValueOnce(
       new marketingContent.MarketingContentApiError(
         "conflict",
@@ -1924,7 +1913,6 @@ describe("MarketingWorkspace", () => {
   });
 
   it("submits approve decisions through the generic approval action", async () => {
-    vi.useRealTimers();
     mockApprovalQueue([approvalSummary()]);
     approvalHookState.detail = approvalDetail({ available_actions: ["approved"] });
 
@@ -1961,7 +1949,6 @@ describe("MarketingWorkspace", () => {
   });
 
   it("submits requested changes and rejection with required reasons", async () => {
-    vi.useRealTimers();
     mockApprovalQueue([approvalSummary()]);
     approvalHookState.detail = approvalDetail({
       available_actions: ["changes_requested", "rejected"],
@@ -2129,7 +2116,6 @@ describe("MarketingWorkspace", () => {
   });
 
   it("creates a channel-aware draft from Draft Posts with the existing marketing content mutation", async () => {
-    vi.useRealTimers();
     const calendarReload = vi.fn();
     const draftsReload = vi.fn();
     mockWorkspaceProfile(["marketing.content.view", "marketing.content.create"]);
@@ -2200,7 +2186,6 @@ describe("MarketingWorkspace", () => {
   });
 
   it("creates a multi-channel draft with channel overrides from Draft Posts", async () => {
-    vi.useRealTimers();
     mockWorkspaceProfile(["marketing.content.view", "marketing.content.create"]);
 
     render(<MarketingWorkspace />);
@@ -2260,7 +2245,6 @@ describe("MarketingWorkspace", () => {
   it.each(["earlier", "later"] as const)(
     "requires an explicit %s DST occurrence and retains invalid input",
     async (choice) => {
-      vi.useRealTimers();
       mockWorkspaceProfile(["marketing.content.view", "marketing.content.create"]);
       render(<MarketingWorkspace />);
       fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
@@ -2297,7 +2281,6 @@ describe("MarketingWorkspace", () => {
   );
 
   it("retains authoring input after a server validation error", async () => {
-    vi.useRealTimers();
     mockWorkspaceProfile(["marketing.content.view", "marketing.content.create"]);
     mutationMocks.create.mockRejectedValueOnce(
       new Error("The timestamp does not match the selected local time and timezone."),
@@ -2321,7 +2304,6 @@ describe("MarketingWorkspace", () => {
   });
 
   it("preserves legacy timestamps on an unchanged save without guessing their timezone", async () => {
-    vi.useRealTimers();
     mockWorkspaceProfile(["marketing.content.view", "marketing.content.edit"]);
     mockCalendar([item()]);
     render(<MarketingWorkspace />);
@@ -2343,7 +2325,6 @@ describe("MarketingWorkspace", () => {
   });
 
   it("edits a persisted authoring timezone independently of the calendar display zone", async () => {
-    vi.useRealTimers();
     mockWorkspaceProfile(["marketing.content.view", "marketing.content.edit"]);
     mockCalendar([
       item({
@@ -2371,7 +2352,6 @@ describe("MarketingWorkspace", () => {
   });
 
   it("shows Draft Posts validation errors before creating", () => {
-    vi.useRealTimers();
     mockWorkspaceProfile(["marketing.content.view", "marketing.content.create"]);
 
     render(<MarketingWorkspace />);
@@ -2384,7 +2364,6 @@ describe("MarketingWorkspace", () => {
   });
 
   it("shows Draft Posts API errors from the existing create mutation", async () => {
-    vi.useRealTimers();
     mutationMocks.create.mockRejectedValueOnce(
       new marketingContent.MarketingContentApiError(
         "validation",
@@ -2409,7 +2388,6 @@ describe("MarketingWorkspace", () => {
   });
 
   it("loads a canonical draft detail and updates it with the existing marketing content mutation", async () => {
-    vi.useRealTimers();
     const calendarReload = vi.fn();
     const draftsReload = vi.fn();
     const draft = item({
@@ -2553,7 +2531,6 @@ describe("MarketingWorkspace", () => {
   });
 
   it("shows validation failures from draft detail saves", async () => {
-    vi.useRealTimers();
     const draft = item({ id: "content_draft_01", status: "draft", title: "Draft Caption" });
     mockWorkspaceProfile(["marketing.content.view", "marketing.content.edit"]);
     mockDrafts([draft]);
@@ -2576,7 +2553,6 @@ describe("MarketingWorkspace", () => {
   });
 
   it("shows save failures from draft detail saves", async () => {
-    vi.useRealTimers();
     const draft = item({ id: "content_draft_01", status: "draft", title: "Draft Caption" });
     mockWorkspaceProfile(["marketing.content.view", "marketing.content.edit"]);
     mockDrafts([draft]);
@@ -2677,7 +2653,6 @@ describe("MarketingWorkspace", () => {
   });
 
   it("resubmits returned draft content with the current revision from Draft Posts", async () => {
-    vi.useRealTimers();
     const draft = item({
       approval_request_id: "approval_02",
       approval_state: {
@@ -2723,7 +2698,6 @@ describe("MarketingWorkspace", () => {
   });
 
   it("submits eligible draft rows through the existing approval request action", async () => {
-    vi.useRealTimers();
     const draftsReload = vi.fn();
     const draft = item({
       content_revision: 5,
@@ -2764,7 +2738,6 @@ describe("MarketingWorkspace", () => {
   });
 
   it("archives a draft row after confirmation and removes it from active Draft Posts", async () => {
-    vi.useRealTimers();
     const confirm = vi.spyOn(window, "confirm").mockReturnValueOnce(true);
     const calendarReload = vi.fn().mockResolvedValue({ marketing_content: [], total: 0 });
     const draftsReload = vi.fn().mockResolvedValue({ marketing_content: [], total: 0 });
@@ -2838,7 +2811,6 @@ describe("MarketingWorkspace", () => {
   });
 
   it("surfaces draft archive API failures clearly", async () => {
-    vi.useRealTimers();
     vi.spyOn(window, "confirm").mockReturnValueOnce(true);
     contentHookState.archiveError = new marketingContent.MarketingContentApiError(
       "forbidden",
@@ -2861,7 +2833,6 @@ describe("MarketingWorkspace", () => {
   });
 
   it("archives from the draft detail action using the same lifecycle path", async () => {
-    vi.useRealTimers();
     vi.spyOn(window, "confirm").mockReturnValueOnce(true);
     const draft = item({ id: "content_detail_archive", status: "draft", title: "Detail Draft" });
     mockWorkspaceProfile([
@@ -3018,7 +2989,6 @@ describe("MarketingWorkspace", () => {
   });
 
   it("selects draft post destination accounts and surfaces account warnings", async () => {
-    vi.useRealTimers();
     mockWorkspaceProfile(["marketing.content.view", "marketing.content.create"]);
     mockSocialAccounts([
       socialConnection({
@@ -3107,6 +3077,40 @@ describe("MarketingWorkspace", () => {
     );
   });
 
+  it("paginates approvals and resets the page when changing views", () => {
+    mockApprovalQueue([approvalSummary()]);
+    approvalHookState.queue!.total = 101;
+    render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Approvals" }));
+    const previous = screen.getByRole("button", { name: "Previous approvals" });
+    const next = screen.getByRole("button", { name: "Next approvals" });
+    expect(previous).toBeDisabled();
+    fireEvent.click(next);
+    expect(approvalHookState.submittedOptions.at(-1)).toMatchObject({ limit: 50, offset: 50 });
+    expect(previous).toBeEnabled();
+    fireEvent.click(next);
+    expect(approvalHookState.submittedOptions.at(-1)).toMatchObject({ offset: 100 });
+    expect(next).toBeDisabled();
+    fireEvent.click(previous);
+    expect(approvalHookState.submittedOptions.at(-1)).toMatchObject({ offset: 50 });
+    fireEvent.click(screen.getByRole("tab", { name: "Approved" }));
+    expect(approvalHookState.submittedOptions.at(-1)).toMatchObject({
+      offset: 0,
+      status: "approved",
+    });
+  });
+
+  it("returns to the last available approval page when the queue shrinks", () => {
+    mockApprovalQueue([approvalSummary()]);
+    approvalHookState.queue!.total = 51;
+    const { rerender } = render(<MarketingWorkspace />);
+    fireEvent.click(screen.getByRole("button", { name: "Approvals" }));
+    fireEvent.click(screen.getByRole("button", { name: "Next approvals" }));
+    approvalHookState.queue = { approvals: [], total: 50, offset: 50, limit: 50 };
+    rerender(<MarketingWorkspace />);
+    expect(approvalHookState.submittedOptions.at(-1)).toMatchObject({ offset: 0 });
+  });
+
   it("keeps calendar and approval queue navigation working after visiting drafts", () => {
     mockApprovalQueue([]);
 
@@ -3146,7 +3150,6 @@ describe("MarketingWorkspace", () => {
   });
 
   it("starts configured direct YouTube OAuth from social accounts", async () => {
-    vi.useRealTimers();
     vi.stubEnv("NEXT_PUBLIC_YOUTUBE_DIRECT_OAUTH_ENABLED", "true");
     mockWorkspaceProfile([
       "marketing.content.view",
@@ -3171,7 +3174,6 @@ describe("MarketingWorkspace", () => {
   });
 
   it("registers an assisted social account with safe metadata", async () => {
-    vi.useRealTimers();
     mockWorkspaceProfile([
       "marketing.content.view",
       "marketing.account.view",
@@ -3250,7 +3252,6 @@ describe("MarketingWorkspace", () => {
   });
 
   it("edits social account metadata without changing connection mode", async () => {
-    vi.useRealTimers();
     mockWorkspaceProfile([
       "marketing.content.view",
       "marketing.account.view",
@@ -3282,7 +3283,6 @@ describe("MarketingWorkspace", () => {
   });
 
   it("disconnects an account and keeps it visible as disconnected history", async () => {
-    vi.useRealTimers();
     const confirm = vi.spyOn(window, "confirm").mockReturnValueOnce(true);
     mockWorkspaceProfile([
       "marketing.content.view",

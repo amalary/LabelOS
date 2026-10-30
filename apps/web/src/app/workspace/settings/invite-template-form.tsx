@@ -5,17 +5,24 @@ import { useFormStatus } from "react-dom";
 
 import { createWorkspaceInviteAction, type CreateWorkspaceInviteState } from "./actions";
 
-type RoleName = "Artist" | "Manager" | "Producer" | "Marketing" | "Legal";
+type RoleName = "A&R" | "Artist" | "Manager" | "Producer" | "Marketing" | "Legal";
 
 type InviteRole = {
   label: RoleName;
-  professionalRole: "Artist" | "Management" | "Producer" | "Marketing" | "Legal";
-  workspaceRole: "artist" | "manager" | "producer" | "marketing" | "legal";
+  professionalRole: "A&R" | "Artist" | "Management" | "Producer" | "Marketing" | "Legal";
+  workspaceRole: "a_and_r" | "artist" | "manager" | "producer" | "marketing" | "legal";
   description: string;
   departments: readonly string[];
 };
 
 const INVITE_ROLES: readonly InviteRole[] = [
+  {
+    label: "A&R",
+    professionalRole: "A&R",
+    workspaceRole: "a_and_r",
+    description: "For scouting candidates and recording artist reviews.",
+    departments: ["a&r"],
+  },
   {
     label: "Artist",
     professionalRole: "Artist",
@@ -75,7 +82,7 @@ function SubmitButton({ disabled }: { disabled: boolean }) {
       disabled={disabled || pending}
       type="submit"
     >
-      {pending ? "Sending invite..." : "Send invitation"}
+      {pending ? "Creating link..." : "Create invitation link"}
     </button>
   );
 }
@@ -169,6 +176,9 @@ export function InviteTemplateForm({
       {state.status === "success" && state.inviteLink ? (
         <div className="grid gap-2 rounded-md border border-emerald-200 bg-emerald-50 p-4">
           <div className="text-sm font-semibold text-emerald-950">Invitation ready</div>
+          <p className="text-sm text-emerald-900">
+            No email has been sent. Copy this link and share it with the invited person.
+          </p>
           <div className="break-all font-mono text-sm text-emerald-900">{state.inviteLink}</div>
         </div>
       ) : null}
@@ -188,7 +198,8 @@ export function InviteTemplateForm({
                   Invite person
                 </h3>
                 <p className="mt-1 text-sm leading-6 text-slate-600" id={dialogDescriptionId}>
-                  Choose one or more friendly roles. Detailed access is handled by workspace policy.
+                  Choose one or more friendly roles. Detailed access is handled by workspace policy.{" "}
+                  This creates a link for you to share; it does not send an email.
                 </p>
               </div>
               <button
@@ -339,7 +350,12 @@ export function InviteTemplateForm({
                   className="grid gap-2 rounded-md border border-emerald-200 bg-emerald-50 p-4"
                   role="status"
                 >
-                  <div className="text-sm font-semibold text-emerald-950">Invitation sent</div>
+                  <div className="text-sm font-semibold text-emerald-950">
+                    Invitation link ready
+                  </div>
+                  <p className="text-sm text-emerald-900">
+                    No email has been sent. Copy this link and share it with the invited person.
+                  </p>
                   <div className="break-all font-mono text-sm text-emerald-900">
                     {state.inviteLink}
                   </div>

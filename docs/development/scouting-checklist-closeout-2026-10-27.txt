@@ -1,0 +1,190 @@
+Scouting checklist -- current local verification, October 27, 2026
+
+Scope: the guarded local LabelOS app and isolated test databases. This report
+supersedes the initial account/policy/browser checkpoints in the other reports.
+All eleven checklist items are complete for this local build. Automated checks
+pass, and the user confirmed final ordinary-member browser acceptance. This is
+local acceptance, within the evidence and operational limits recorded below.
+
+Additional blocker found during that browser check: the accepted invitation had
+created a local membership but no WorkOS membership, so Calebasse could not become
+the active workspace. Added an authenticated activation repair for accepted
+invitations: verify local membership/inviter/identity, connect only an ordinary
+WorkOS member, persist its ID and audit event, then let AuthKit switch the session.
+Inactive/pending, mismatched or privileged remote memberships are not adopted or
+reactivated; already linked memberships are not recreated. Added dashboard text
+showing the active account's workspace roles, and sanitized workspace-switch
+error logging. The user confirmed the incognito dashboard now shows Member and A&R.
+Read-only verification confirms the actual member has scouting view/create and
+does not have governance.manage. The user confirmed member search/save/reload,
+notes/status persistence and absence of the privileged local-session setup button.
+
+1. Ordinary A&R access without governance.manage
+   PASS automated. Owner settings can atomically assign the A&R role and explicit
+   A&R department approval. Tests load persisted grants, allow scouting view/create,
+   deny governance.manage, and deny scouting after department approval is removed.
+   Nonowners cannot change departments; invalid/foreign-member requests change no
+   roles. New invitations offer A&R with the correct grants. Role-only requests
+   preserve departments. Department changes record the approver and audit event.
+   PASS real persisted member: the owner assigned A&R and approved its department.
+   The account remains a member, with Artist and A&R roles, both scouting grants,
+   and governance.manage=false. User confirmed activation and dashboard role display.
+
+2. Live channel lookup and bounded keyword search
+   PASS. A fresh live lookup returned the expected Google for Developers channel;
+   keyword search returned 3 results at limit 3 with no automatic pagination.
+   Uses the configured credential reference and SQL quota ledger. This diagnostic
+   does not impersonate a user and stores no provider payload. Member browser
+   search/lookup was also confirmed by the user in item 10 acceptance.
+
+3. Candidates save and reopen after reload
+   PASS API/component/PostgreSQL; user confirmed persistence in the owner browser.
+   Final read-only local check confirms two saved candidates/sources and one run.
+
+4. Human notes and review statuses persist
+   PASS. Automated edits, filters, optimistic conflicts and fresh SQL/HTTP reads.
+   User confirmed browser persistence in both owner and incognito member accounts.
+   Both final records have notes and revision 3; their current status is new.
+   Notes/content were not printed or copied to logs.
+
+5. Concurrent duplicate protection
+   PASS on disposable PostgreSQL. Twelve concurrent HTTP saves return one new
+   candidate and the same ID to every caller; concurrent SQL saves also deduplicate.
+   Uniqueness lasts while the workspace/channel source reference exists. After
+   expiry/deletion no hidden channel hash is retained, so a later save may be new.
+
+6. Workspace isolation
+   PASS. Foreign-workspace access is denied; foreign candidate IDs inside an
+   authorized workspace return 404. Independent workspace saves stay independent.
+   Department/role mutation also rejects a member from another workspace.
+
+7. Missing, stale, expired and deleted provider data
+   PASS covered paths. Hidden/missing/zero counts remain distinct. Display expiry,
+   cache eviction, source expiry/read suppression/sweep, deleted-channel handling,
+   late-response cancellation and preservation of human review are tested.
+
+8. YouTube quota and policy requirements
+   PASS implemented local controls and approved local disclosures; operational
+   compliance is bounded by the scope below. Daily app limits are 80 searches and
+   8,000 channel requests. Earlier read-only project inspection confirmed actual
+   allocations of 100 searches and 10,000 general units. Shared reservation,
+   contention, bounded retries, cooldowns, Pacific reset/DST and quota failures pass.
+   Current official docs were rechecked. Reviewed local privacy/terms identify
+   Calebasse and amalary@bu.edu, require agreement before discovery, disclose API
+   use/cookies/storage/sharing/deletion, and link the required Google/YouTube terms.
+   Provider display is temporary, source references expire in 29 days, provider
+   payloads are not copied into notes, and no derived YouTube scores are calculated.
+   Operator approved applicable deletion requests including retained copies within
+   seven days. Public deployment, external project consumers, backup deletion and
+   continuous retention-worker uptime are not independently certified by this run.
+
+9. Secrets and restricted logging
+   PASS inspected scope after correction. Expanded scan found the ignored local
+   WORKOS_WEBHOOK_SECRET equaled the published example value. Cleared that value
+   only; no real credentials or remote WorkOS settings changed. Restarted API;
+   unconfigured webhook endpoint now returns 503 before processing any event.
+   Zero configured WorkOS secret matches in tracked diff, 783 tracked/untracked
+   repository files, browser JS and 46 local logs. Production build's 121 browser
+   JS files had no matches; after dev restart the fresh scan covered 17 JS files.
+   Zero Google key, bearer-material or raw-counter-payload patterns in those logs.
+   A further callback/invitation-path scan found credential-bearing URLs in two
+   older diagnostic logs. Redacted those values, suppressed sensitive Next dev
+   request URLs, used route templates in API request/exception logs, and disabled
+   duplicate unsanitized Uvicorn access logging in the local launcher. A live
+   invalid-invitation probe through API and web produced zero token-marker log
+   matches. Logging regressions and TypeScript checks pass.
+   Final expanded scan: zero matches across 791 repository files, 31 current dev
+   browser JS files and 58 local logs, including OAuth-code/JWT/invitation patterns.
+   Sanitized provider/proxy error tests pass. This does not inventory external
+   telemetry, backups, crash dumps or secrets not configured in these local profiles.
+
+10. PostgreSQL, backend, frontend and browser workflow
+    PASS backend: 508 passed, 44 expected skips in the synthetic runner.
+    PASS disposable PostgreSQL: 39 passed, no skips, including new member setup.
+    PASS frontend: 75 tests in 12 files, TypeScript typecheck, scoped ESLint/Ruff.
+    PASS optimized Next.js production build, including lint/type checks.
+    Subsequent dashboard/activation frontend tests: 15 passed across four files;
+    a second optimized build including the role display passed lint/type checks.
+    Activation/organization regression in disposable PostgreSQL runner: 113 passed
+    (SQLite/PostgreSQL fixture parametrizations, no skips). Final remote identity,
+    role/status rejection and error-sanitization tests: 9 passed. Logging tests:
+    3 backend and 1 frontend passed; final TypeScript check passed.
+    PASS live local PostgreSQL 18: migration 202610270200, 69 tables, zero drift.
+    PASS restarted API/database health, web login, correct WorkOS callback redirects.
+    PASS user-attested owner persistence, accepted invitation, and incognito
+    member workspace activation with displayed A&R roles.
+    PASS user-attested ordinary A&R browser workflow: search, save/open candidate,
+    edit notes/status, Save review, reload and reopen; edits persist and Prepare
+    local YouTube session is absent. Browser inventory is empty. No automated
+    browser run, borrowed token or synthetic login against the local app is claimed.
+
+    Runtime repair: the local API exited with a Windows access-violation code after
+    connection-cleanup warnings. A regression reproduced an unclosed nested async
+    session generator when a request dependency is cancelled. The dependency now
+    explicitly closes it inside a cancellation shield. Auth/realtime/logging tests:
+    66 passed; a fresh PostgreSQL cancellation test confirms immediate connection
+    check-in (2 tests passed). The native crash then recurred, so the first fix alone
+    did not resolve the runtime blocker. Added regressions reproducing a second
+    lifecycle bug: a failed streaming send left the generator suspended after its
+    request session closed. A later finalizer could reopen that session with no
+    request left to close it. RealtimeStreamingResponse now explicitly closes its
+    generator before request dependencies unwind. Short polling transactions and
+    presence cleanup are cancellation-shielded, with no shield across yield/sleep.
+    Cleanup resets interrupted transactions; logging uses a captured actor ID and
+    sanitized exception type, avoiding expired ORM attributes and SQL payloads.
+    Final disposable PostgreSQL/SQLite stream and session regressions: 22 passed,
+    no skips. Covers failed sends, ASGI disconnects, task cancellation, cancellation
+    during polling, membership revocation and immediate connection return.
+    Scoped lint and formatting pass. Restarted API/database and policy-page checks
+    pass; sensitive invitation URL probe produces zero log matches. Native fault
+    diagnostics are enabled on this local process. These fixes close demonstrated
+    leaks; the exact native-crash causal chain was not independently proven.
+    After the user confirmed the authenticated incognito walkthrough, database
+    health returned HTTP 200 and this process's stderr had zero SAWarning,
+    access-violation, traceback or fatal-Python markers. This confirms stability
+    through acceptance, not a long-duration reliability certification.
+
+11. Local startup instructions
+    PASS. README links youtube-mvp-validation.md for guarded DB/API/web startup.
+    youtube-research-api.md documents local session/policy activation, A&R invites,
+    existing-member role+department approval, manual browser steps and API behavior.
+    Invitation UI correctly says links must be shared; it does not claim email sent.
+
+Completed user acceptance
+
+COMPLETED: owner selected A&R and A&R department access and saved the member.
+COMPLETED: invited account selected Calebasse and confirmed its dashboard roles.
+COMPLETED: user selected the affirmative answer for the final incognito A&R
+search/save/review/reload walkthrough. Both edits persist and Prepare local
+YouTube session is absent. Follow-up read-only verification confirms two saved
+candidates, both with notes/revision 3, scouting view/create=true for the member,
+and governance.manage=false. API/database health is HTTP 200 with no recurrence
+of cleanup/crash markers in the updated process log. No local acceptance items
+remain open; production operational limits in items 8-10 still apply.
+For future invites, if the workspace is not active, refresh /dashboard and click the workspace menu
+at the top, then select Calebasse even if that name is already on the button.
+Activation connects the accepted invitation to WorkOS, and the dashboard shows
+Your roles in Calebasse. Confirm A&R appears before testing scouting.
+
+Reproduction
+
+apps/api/.venv/Scripts/python.exe -B apps/api/scripts/youtube_reliability_tests.py tests/test_scouting.py tests/test_scouting_setup.py tests/test_scouting_member_access.py tests/test_organizations_api.py tests/test_invitation_security.py tests/test_youtube_reliability.py tests/test_youtube_research_api.py tests/test_public_music_adapters.py tests/test_research_providers.py tests/test_governance_authorization.py tests/test_authorization_permission_matrix.py -q --tb=short --show-capture=no --junitxml=../../test-results/scouting-final-api.xml
+
+apps/api/.venv/Scripts/python.exe -B apps/api/scripts/invitation_postgres_tests.py 'C:/Program Files/PostgreSQL/17/bin' tests/test_scouting.py tests/test_scouting_setup.py tests/test_scouting_member_access.py tests/test_youtube_reliability.py --junitxml=../../test-results/scouting-final-postgres.xml
+
+apps/api/.venv/Scripts/python.exe -B apps/api/scripts/invitation_postgres_tests.py 'C:/Program Files/PostgreSQL/17/bin' tests/test_realtime.py tests/test_session_cleanup.py -q --tb=short --show-capture=no --junitxml=../../test-results/realtime-disconnect-postgres.xml
+
+pnpm.cmd --filter @label-os/web exec vitest run src/components/scouting-workspace.test.tsx src/components/youtube-research-panel.test.tsx src/components/local-research-setup.test.tsx src/app/api/workspaces/scouting-proxy.test.ts src/app/api/workspaces/youtube-research-proxy.test.ts src/lib/workspace-navigation.test.ts src/lib/server-logging.test.ts src/lib/research-policy.test.ts src/app/onboarding/workspace/actions.test.ts src/app/workspace/settings/member-role-assignment-panel.test.tsx src/app/workspace/settings/invite-template-form.test.tsx src/lib/workspace-capabilities.test.tsx
+
+pnpm.cmd --filter @label-os/web typecheck
+apps/api/.venv/Scripts/python.exe -B scripts/validate_local_workflow.py schema
+apps/api/.venv/Scripts/python.exe -B scripts/validate_local_workflow.py http
+apps/api/.venv/Scripts/python.exe -B scripts/validate_local_workflow.py youtube
+apps/api/.venv/Scripts/python.exe -B scripts/validate_local_workflow.py secrets
+
+Stop only the verified guarded web process before running local_database.py build,
+because Next dev/build share .next. Restart local_database.py web afterward.
+
+Official references rechecked
+https://developers.google.com/youtube/terms/developer-policies
+https://developers.google.com/youtube/data/determine_quota_cost

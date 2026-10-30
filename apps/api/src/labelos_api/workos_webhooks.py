@@ -438,15 +438,6 @@ async def _synchronize_membership_event(
     status = _str_or_none(data.get("status")) or "active"
     professional_roles = _string_list_from_membership_data(data, "professional_roles")
     department_access = _string_list_from_membership_data(data, "department_access")
-    requested_department_access = _string_list_from_membership_data(
-        data,
-        "requested_department_access",
-    )
-    if not requested_department_access:
-        requested_department_access = await _suggested_department_access_for_roles(
-            session,
-            professional_roles,
-        )
     existing_profile_id = await session.scalar(
         select(UniversalProfile.id).where(UniversalProfile.user_id == user.id)
     )
@@ -525,7 +516,6 @@ async def _synchronize_membership_event(
         session,
         membership=membership,
         invitation_department_slugs=department_access,
-        role_default_department_slugs=requested_department_access,
         workspace_owner=membership.workspace_permission.value == "owner",
     )
     if professional_roles or role != previous_role:
@@ -574,7 +564,6 @@ async def _replace_membership_department_access(
     *,
     membership: OrganizationMembership,
     invitation_department_slugs: list[str],
-    role_default_department_slugs: list[str],
     workspace_owner: bool,
 ) -> None:
     await session.execute(
@@ -595,20 +584,9 @@ async def _replace_membership_department_access(
             )
         )
         granted.add(department_slug)
-    for department_slug in role_default_department_slugs:
-        if department_slug in granted:
-            continue
-        department = await _get_or_create_department(session, department_slug)
-        session.add(
-            MembershipDepartmentAccess(
-                membership_id=membership.id,
-                department_id=department.id,
-                access_level="member",
-                source="role_default",
-                approved_at=datetime.now(UTC),
-            )
-        )
-        granted.add(department_slug)
+    # Professional titles and requested access are descriptive metadata, not
+    # grants. Only explicit access in the verified provider event (or its owner
+    # authorization decision below) can approve departments.
     if workspace_owner:
         for default_department in DEFAULT_DEPARTMENTS:
             if default_department.slug in granted:

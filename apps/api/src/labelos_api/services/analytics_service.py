@@ -749,9 +749,27 @@ def _value_values(
         if payload.value_numeric is None:
             raise AnalyticsRelationshipError("value_numeric is required")
         try:
-            values["value_numeric"] = Decimal(str(payload.value_numeric))
+            numeric = Decimal(str(payload.value_numeric))
         except (InvalidOperation, ValueError) as exc:
             raise AnalyticsRelationshipError("value_numeric must be numeric") from exc
+        if not numeric.is_finite():
+            raise AnalyticsRelationshipError("value_numeric must be finite")
+        # The persisted column is Numeric(24, 6). Validate before fingerprinting
+        # or writing so invalid numbers produce a domain error, not a 500.
+        if numeric.copy_abs() >= Decimal("1e18"):
+            raise AnalyticsRelationshipError(
+                "value_numeric must have fewer than 19 integer digits"
+            )
+        if (
+            value_type == AnalyticsMetricValueType.integer
+            and numeric != numeric.to_integral_value()
+        ):
+            raise AnalyticsRelationshipError("value_numeric must be an integer")
+        if numeric != numeric.quantize(Decimal("0.000001")):
+            raise AnalyticsRelationshipError(
+                "value_numeric must have at most 6 decimal places"
+            )
+        values["value_numeric"] = numeric
         return values
     if value_type == AnalyticsMetricValueType.string:
         values["value_text"] = _normalize_text(payload.value_text, "value_text")
@@ -912,6 +930,14 @@ def _bulk_error_code(exc: AnalyticsServiceError) -> str:
     return "analytics_error"
 
 
+def _require_storable_provider(metric_definition):
+    if metric_definition.provider.key.lower() == "youtube":
+        raise AnalyticsRelationshipError(
+            "YouTube research is display-only; analytics retention requires "
+            "a separately approved policy and lifecycle"
+        )
+
+
 async def _create_observation_result_uncommitted(
     session: AsyncSession,
     workspace_id: UUID,
@@ -924,6 +950,7 @@ async def _create_observation_result_uncommitted(
     )
     if metric_definition is None:
         raise AnalyticsNotFoundError("Metric definition not found")
+    _require_storable_provider(metric_definition)
 
     target_values = _target_values(payload)
     if target_values["target_type"] == "workspace":
@@ -1064,6 +1091,8 @@ async def ingest_observations_bulk(
                 if metric_definition is None:
                     raise AnalyticsNotFoundError("Metric definition not found")
                 metric_definitions[payload.metric_definition_id] = metric_definition
+
+            _require_storable_provider(metric_definition)
 
             idempotency_key = _normalize_optional_text(payload.idempotency_key)
             if idempotency_key is not None:

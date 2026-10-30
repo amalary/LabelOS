@@ -36,7 +36,7 @@ export async function switchOrganization(
       };
     }
 
-    logServerError("Organization switch failed", error, {
+    logServerError("Organization switch failed", new Error("Workspace activation failed"), {
       operation: "organization_switch",
     });
     return {

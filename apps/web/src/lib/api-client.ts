@@ -134,6 +134,22 @@ export async function apiFetch(path: string, init: ApiFetchInit = {}): Promise<R
   return assertAuthorizedResponse(await fetchWithToken(url, fetchInit, refreshedAccessToken));
 }
 
+// Use the token returned by an explicit organization switch. Reading withAuth()
+// again in the same server action can still return the previous request session.
+export async function apiFetchWithAccessToken(
+  path: string,
+  accessToken: string,
+  init: BackendFetchInit = {},
+): Promise<Response> {
+  validateWebServerEnv();
+  if (!accessToken) {
+    throw new ApiClientError("missing_session", "A signed-in WorkOS session is required.");
+  }
+  return assertAuthorizedResponse(
+    await fetchWithToken(new URL(path, apiBaseUrl), init, accessToken),
+  );
+}
+
 export async function getCurrentApiUser(): Promise<CurrentApiUser> {
   const response = await apiFetch("/api/v1/me", {
     headers: {

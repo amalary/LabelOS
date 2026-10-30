@@ -7,6 +7,19 @@ vi.mock("./actions", () => ({
 }));
 
 describe("InviteTemplateForm", () => {
+  it("includes scouting role and department grants for an A&R invitation", async () => {
+    const user = userEvent.setup();
+    const { InviteTemplateForm } = await import("./invite-template-form");
+    render(<InviteTemplateForm canAssignInviteRoles canInviteMembers organizationId="org_01" />);
+    await user.click(screen.getByRole("button", { name: "Invite person" }));
+    await user.click(screen.getByRole("checkbox", { name: "Role Artist" }));
+    await user.click(screen.getByRole("checkbox", { name: "Role A&R" }));
+    const form = screen.getByRole("button", { name: "Create invitation link" }).closest("form")!;
+    const data = new FormData(form);
+    expect(data.getAll("professionalRoles")).toEqual(["A&R"]);
+    expect(data.getAll("workspaceRoles")).toEqual(["a_and_r"]);
+    expect(data.getAll("departmentAccess")).toEqual(["a&r"]);
+  });
   it("opens a role-aware invitation dialog with friendly role explanations", async () => {
     const user = userEvent.setup();
     const { InviteTemplateForm } = await import("./invite-template-form");
@@ -20,7 +33,7 @@ describe("InviteTemplateForm", () => {
     expect(screen.getByRole("checkbox", { name: "Role Artist" })).toBeChecked();
     expect(screen.getByRole("checkbox", { name: "Role Manager" })).not.toBeChecked();
     expect(screen.getByText("For campaign, launch, and audience growth work.")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Send invitation" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Create invitation link" })).toBeEnabled();
   });
 
   it("allows one or more invited roles", async () => {
@@ -67,7 +80,7 @@ describe("InviteTemplateForm", () => {
 
     expect(screen.queryByRole("checkbox", { name: "Role Artist" })).not.toBeInTheDocument();
     expect(screen.queryByRole("group", { name: "Invite as" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Send invitation" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Create invitation link" })).toBeEnabled();
     expect(
       screen.getByText("This invitation will use the workspace default starting access."),
     ).toBeInTheDocument();

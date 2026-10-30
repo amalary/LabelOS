@@ -11,6 +11,7 @@ import type {
 const mocks = vi.hoisted(() => ({
   authorization: {
     can: vi.fn(),
+    roles: [{ key: "owner", name: "Owner" }],
   },
   assignmentsReload: vi.fn(),
   replaceMemberWorkspaceRoles: vi.fn(),
@@ -161,6 +162,7 @@ describe("MemberRoleAssignmentPanel", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.authorization.can.mockReturnValue(true);
+    mocks.authorization.roles = [{ key: "owner", name: "Owner" }];
     mocks.assignmentsReload.mockResolvedValue(memberRoleAssignments);
     mocks.replaceMemberWorkspaceRoles.mockResolvedValue({ roles: [] });
     mocks.workspaceMembers = workspaceMembers;
@@ -201,6 +203,35 @@ describe("MemberRoleAssignmentPanel", () => {
     expect(screen.getByText("View only")).toBeInTheDocument();
     expect(screen.getByRole("checkbox", { name: "Anthony Malary role Artist" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Save roles" })).toBeDisabled();
+  });
+
+  it("saves explicit A&R department approval together with the role", async () => {
+    const user = userEvent.setup();
+    const { MemberRoleAssignmentPanel } = await import("./member-role-assignment-panel");
+    render(<MemberRoleAssignmentPanel />);
+    await user.click(screen.getByRole("checkbox", { name: "Anthony Malary role A&R" }));
+    await user.click(
+      screen.getByRole("checkbox", { name: "Anthony Malary A&R department access" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Save roles" }));
+    await waitFor(() =>
+      expect(mocks.replaceMemberWorkspaceRoles).toHaveBeenCalledWith(
+        "workspace_01",
+        "member_01",
+        ["role_ar", "role_artist"],
+        ["a&r"],
+      ),
+    );
+  });
+
+  it("restricts department approval to owners", async () => {
+    mocks.authorization.roles = [{ key: "admin", name: "Admin" }];
+    const { MemberRoleAssignmentPanel } = await import("./member-role-assignment-panel");
+    render(<MemberRoleAssignmentPanel />);
+    expect(
+      screen.getByRole("checkbox", { name: "Anthony Malary A&R department access" }),
+    ).toBeDisabled();
+    expect(screen.getByRole("checkbox", { name: "Anthony Malary role A&R" })).toBeEnabled();
   });
 
   it("restores previous role selections when saving fails", async () => {

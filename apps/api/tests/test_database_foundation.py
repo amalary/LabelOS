@@ -1567,6 +1567,7 @@ def test_default_role_capability_mapping_references_configured_registries() -> N
     assert "contract.execute" not in DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS["admin"]
     assert "role.assign" not in DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS["artist"]
     assert DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS["legal"] == (
+        "governance.view",
         "profile.view",
         "profile.edit",
         "contract.view",

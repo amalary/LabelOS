@@ -336,10 +336,6 @@ def test_workos_webhook_synchronizes_membership_event(
     assert membership.approved_department_access == (
         "artists",
         "marketing",
-        "a&r",
-        "discovery",
-        "artist",
-        "evaluations",
     )
     assert membership.pending_department_access == ()
     assert {
@@ -348,10 +344,6 @@ def test_workos_webhook_synchronizes_membership_event(
     } == {
         "artists": "invitation",
         "marketing": "invitation",
-        "a&r": "role_default",
-        "discovery": "role_default",
-        "artist": "role_default",
-        "evaluations": "role_default",
     }
     assert membership.status == "active"
     workspace_membership = asyncio.run(
@@ -418,14 +410,7 @@ def test_workos_webhook_requests_department_access_from_professional_roles(
     assert membership is not None
     assert list(membership.professional_roles) == ["Artist", "Management"]
     assert membership.department_access == []
-    assert membership.approved_department_access == (
-        "artist",
-        "creative",
-        "releases",
-        "analytics",
-        "management",
-        "marketing",
-    )
+    assert membership.approved_department_access == ()
     assert membership.pending_department_access == ()
 
 
@@ -521,12 +506,9 @@ def test_workos_webhook_separates_requested_roles_from_granted_access(
         "management",
         "artist",
         "releases",
-        "legal",
-        "finance",
     )
     assert membership.pending_department_access == ()
-    assert finance_grant is not None
-    assert finance_grant.source == "role_default"
+    assert finance_grant is None
 
 
 def test_workos_webhook_skips_out_of_order_resource_event(

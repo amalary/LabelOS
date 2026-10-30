@@ -3555,6 +3555,12 @@ class AnalyticsProvider(Base, TimestampMixin, OrganizationOwnedMixin):
         return _json_object(value, key)
 
     __table_args__ = (
+        Index(
+            "uq_analytics_providers_id_organization",
+            "id",
+            "organization_id",
+            unique=True,
+        ),
         UniqueConstraint(
             "organization_id",
             "key",
@@ -3815,3 +3821,22 @@ from labelos_database.publishing_models import (  # noqa: F401
     PublicationListMetadata,
     PublicationTransition,
 )
+
+# Register cross-department governance after its canonical source registry.
+from labelos_database.governance_models import (  # noqa: E402, F401
+    CollectionRun,
+    Dataset,
+    DatasetDocumentation,
+    DatasetLineage,
+    DatasetTransformation,
+    DatasetVersion,
+    GovernanceActivity,
+)
+
+from labelos_database.provenance_models import (  # noqa: E402, F401
+    ProvenanceEdge,
+    ProvenanceRecord,
+    ProvenanceTransformation,
+)
+
+from labelos_database.research_models import YouTubeQuotaBucket  # noqa: E402, F401

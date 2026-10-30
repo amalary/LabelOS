@@ -1,4 +1,6 @@
+import json
 import os
+import re
 from functools import lru_cache
 from typing import Literal
 from uuid import UUID
@@ -22,6 +24,7 @@ class Settings(DatabaseSettings):
     )
     auth_provider: str = "workos"
     workos_client_id: str | None = None
+    workos_api_key: str | None = Field(default=None, repr=False)
     workos_issuer_url: str = "https://api.workos.com"
     workos_jwks_url: str | None = None
     workos_audience: str | None = None
@@ -31,6 +34,10 @@ class Settings(DatabaseSettings):
     credential_store_secret_prefix: str = "labelos-credential"
     youtube_oauth_client_id: str | None = None
     youtube_oauth_client_secret: str | None = None
+    youtube_research_credentials: dict[UUID, str] = Field(
+        default_factory=dict, repr=False
+    )
+    youtube_research_local_credential_ref: str | None = Field(default=None, repr=False)
     delivery_receiver_backend: str = "unavailable"
     scheduling_execution_enabled: bool = False
     scheduling_authoring_enabled: bool = True
@@ -78,6 +85,7 @@ class Settings(DatabaseSettings):
 
     def validate_startup_environment(self) -> None:
         self.validate_delivery_receiver()
+        self.validate_youtube_research_configuration()
         if not self.requires_strict_startup_validation:
             return
 
@@ -126,6 +134,30 @@ class Settings(DatabaseSettings):
             raise RuntimeError(
                 "YOUTUBE_OAUTH_CLIENT_ID and YOUTUBE_OAUTH_CLIENT_SECRET must be "
                 "configured together for YouTube direct OAuth"
+            )
+
+    def validate_youtube_research_configuration(self) -> None:
+        refs = list(self.youtube_research_credentials.values())
+        if self.youtube_research_local_credential_ref:
+            if not self.is_development and not self.is_test:
+                raise RuntimeError(
+                    "The shared YouTube research reference is local-only"
+                )
+            refs.append(self.youtube_research_local_credential_ref)
+        if not refs:
+            return
+        project = self.resolved_credential_store_gcp_project_id
+        if self.credential_store_backend != "gcp-secret-manager" or not project:
+            raise RuntimeError(
+                "YouTube research requires a configured GCP credential store"
+            )
+        pattern = (
+            rf"gcp-secret-manager://projects/{re.escape(project)}/secrets/"
+            r"[A-Za-z0-9_-]{1,255}"
+        )
+        if any(not re.fullmatch(pattern, ref) for ref in refs):
+            raise RuntimeError(
+                "YouTube research references must use the configured project"
             )
 
     def validate_credential_store_backend(self) -> None:
@@ -183,6 +215,7 @@ def get_settings() -> Settings:
         ),
         auth_provider=os.getenv("AUTH_PROVIDER", "workos"),
         workos_client_id=os.getenv("WORKOS_CLIENT_ID") or None,
+        workos_api_key=os.getenv("WORKOS_API_KEY") or None,
         workos_issuer_url=os.getenv("WORKOS_ISSUER_URL", "https://api.workos.com"),
         workos_jwks_url=os.getenv("WORKOS_JWKS_URL") or None,
         workos_audience=os.getenv("WORKOS_AUDIENCE") or None,
@@ -197,6 +230,13 @@ def get_settings() -> Settings:
         ),
         youtube_oauth_client_id=os.getenv("YOUTUBE_OAUTH_CLIENT_ID") or None,
         youtube_oauth_client_secret=os.getenv("YOUTUBE_OAUTH_CLIENT_SECRET") or None,
+        youtube_research_credentials=json.loads(
+            os.getenv("YOUTUBE_RESEARCH_CREDENTIALS", "{}")
+        ),
+        youtube_research_local_credential_ref=os.getenv(
+            "YOUTUBE_RESEARCH_LOCAL_CREDENTIAL_REF"
+        )
+        or None,
         delivery_receiver_backend=os.getenv("DELIVERY_RECEIVER_BACKEND", "unavailable"),
         **scheduling_settings,
     )
