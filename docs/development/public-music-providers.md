@@ -6,8 +6,9 @@ for endpoint, licensing, authentication and quota sources, and the
 
 The implementation lives in `apps/api/src/labelos_api/research/adapters` and uses
 the [Prompt 10 contracts](research-provider-contracts.md). YouTube is now exposed
-through the authenticated [research API](youtube-research-api.md). Other providers
-still require explicit composition. There is no collection worker or automatic
+through the authenticated [research API](youtube-research-api.md). MusicBrainz has
+authenticated research routes described below. Other providers still require
+explicit composition. There is no collection worker or automatic
 provider-data persistence.
 Every outbound request uses a fixed official HTTPS API origin and GET. No HTML
 scraping, alternate keys, CAPTCHA solving, proxy rotation or authentication bypass
@@ -100,6 +101,93 @@ provider rejection is reported through a typed `ProviderFailure` on invocation.
 Search fan-out returns results/failures per configured provider; omitted contexts
 are not invoked. It does not combine artist identities or metric values. External
 cancellation propagates and individual calls have independent deadlines.
+
+## Local backend environment
+
+The existing `scripts/local_database.py api` launcher loads the repository-root
+`.env` before constructing the API's Pydantic `Settings`. Use that ignored file;
+an `apps/api/.env` would not be read by this launcher. The API settings loader
+continues to read process environment variables and does not implicitly read
+dotenv files in production or tests. Direct `python scripts/dev.py` and Uvicorn
+invocations require the environment to be supplied by the caller.
+
+```dotenv
+MUSICBRAINZ_BASE_URL=https://musicbrainz.org/ws/2
+MUSICBRAINZ_USER_AGENT=LabelOS/0.1 (REPLACE_WITH_CONTACT_EMAIL)
+MUSICBRAINZ_APPROVAL_REF=
+LASTFM_API_KEY=
+```
+
+Replace the contact placeholder with a real operator contact before live use.
+The MusicBrainz base URL is restricted to the public Web Service v2 endpoint,
+matching the existing adapter's fixed URL (which adds the trailing slash).
+Public metadata requests use no authentication; a MetaBrainz supporter/Live Data
+Feed token is not used. Follow the official [API identification and rate limits](https://musicbrainz.org/doc/MusicBrainz_API):
+a meaningful User-Agent and at most one request per second.
+
+MusicBrainz's API routes compose the existing adapter with these settings through
+`build_musicbrainz_client`. An actual contact and permitted-use reference are
+required; placeholders fail before provider I/O. Settings alone do not create
+collection records or start requests. The adapter retains its fixed official
+origin, unauthenticated public GET requests and shared process-wide rate limiter.
+
+On 2026-11-06 the operator confirmed personal, non-commercial local testing.
+The ignored local environment records that declaration as
+`MUSICBRAINZ_APPROVAL_REF=local-noncommercial-testing`, referring to the free
+non-commercial access described in the official API documentation. This is not
+a commercial license or production approval. The application rejects this local
+reference in production-like environments. A commercial deployment must supply
+its actual permitted-use reference and eligible collection documentation.
+
+### MusicBrainz API routes
+
+The prefix is
+`/api/v1/workspaces/{workspace_id}/research/musicbrainz/runs/{run_id}`.
+All routes require the existing WorkOS/session authentication and A&R research
+permissions. Use the existing governance API to register a `musicbrainz` source,
+create its dataset/version and documentation, and start a collection run. The
+service checks workspace ownership, source, running status, version eligibility
+and production documentation before any outbound request.
+
+| Method | Suffix     | JSON body                                                                             |
+| ------ | ---------- | ------------------------------------------------------------------------------------- |
+| POST   | `/search`  | `{"query":"The Beatles","limit":5}`                                                   |
+| POST   | `/lookup`  | `{"artist_id":"b10bbbfc-cf9e-42e0-be17-e2c3e1d2600d"}`                                |
+| POST   | `/catalog` | `{"artist_id":"b10bbbfc-cf9e-42e0-be17-e2c3e1d2600d","resource":"release","limit":5}` |
+
+Search and catalog support the returned numeric `cursor` and limits of 1–100.
+Catalog supports `release` and `track`. Responses use the existing normalized
+provider contracts and provenance, with `Cache-Control: no-store`. Provider
+failures expose only a safe error code and, when appropriate, `Retry-After`.
+No metadata is persisted or automatically linked to artists by these routes.
+The routes are backend capabilities; no MusicBrainz frontend panel is added.
+
+Run one explicit, read-only live smoke check from the repository root:
+
+```powershell
+& .\apps\api\.venv\Scripts\python.exe apps/api/scripts/musicbrainz_smoke.py
+```
+
+It uses the same settings-to-adapter composition as the API, checks The Beatles'
+public MBID, and reports the normalized identity without printing the User-Agent
+or other environment values. It does not access a database or Secret Manager.
+Do not run concurrent smoke checks; retain MusicBrainz's one-request/second limit.
+Multiple deployed workers still require the shared egress limiter described below.
+
+An absent or empty `LASTFM_API_KEY` becomes `None` and does not block startup.
+A supplied key uses Pydantic `SecretStr`, is hidden from settings representations,
+and is excluded from settings serialization. Keep it server-side; do not add a
+`NEXT_PUBLIC_` variant, return settings from an API, or log secret values.
+Last.fm still requires explicit provider composition with a credential-store
+reference; the environment variable alone does not activate the adapter.
+
+For future production configuration, supply the MusicBrainz URL and real
+User-Agent through the existing deployment environment. Store future Last.fm
+credentials as an `api_key` payload in the existing Google Cloud Secret Manager
+credential store and pass its reference through `ProviderConfiguration`, as
+other authenticated providers do. Do not copy raw credentials into provider
+records or use the local placeholder as production configuration. Existing
+YouTube secrets, WorkOS settings, IAM and deployment resources remain unchanged.
 
 ## Data and provenance
 

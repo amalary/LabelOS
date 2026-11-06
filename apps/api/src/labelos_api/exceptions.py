@@ -27,10 +27,15 @@ class YouTubeResearchError(HTTPException):
     """Provider error with an allowlisted code and optional retry hint."""
 
 
+class MusicBrainzResearchError(HTTPException):
+    """Public metadata failure with no upstream response or identifying headers."""
+
+
 def register_exception_handlers(app: FastAPI) -> None:
+    @app.exception_handler(MusicBrainzResearchError)
     @app.exception_handler(YouTubeResearchError)
     async def youtube_research_error_handler(
-        request: Request, exc: YouTubeResearchError
+        request: Request, exc: YouTubeResearchError | MusicBrainzResearchError
     ) -> JSONResponse:
         return JSONResponse(
             status_code=exc.status_code,
@@ -71,7 +76,7 @@ def register_exception_handlers(app: FastAPI) -> None:
         request: Request, exc: RequestValidationError
     ) -> JSONResponse:
         logger.info("Validation error", extra={"path": request_log_path(request)})
-        if {"scheduling", "YouTube research"}.intersection(
+        if {"scheduling", "YouTube research", "MusicBrainz research"}.intersection(
             getattr(request.scope.get("route"), "tags", [])
         ):
             # Never reflect caller input or Pydantic context (which may contain
