@@ -86,6 +86,8 @@ DEFAULT_CAPABILITIES: tuple[DefaultCapability, ...] = CAPABILITY_REGISTRY
 DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS: dict[str, tuple[str, ...]] = {
     "owner": tuple(capability.value for capability in Capability),
     "admin": (
+        Capability.governance_view.value,
+        Capability.governance_manage.value,
         Capability.workspace_view.value,
         Capability.workspace_update.value,
         Capability.workspace_member_view.value,
@@ -129,6 +131,7 @@ DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS: dict[str, tuple[str, ...]] = {
         Capability.analytics_create.value,
     ),
     "member": (
+        Capability.governance_view.value,
         Capability.profile_view.value,
         Capability.profile_edit.value,
         Capability.artist_profile_view.value,
@@ -151,6 +154,7 @@ DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS: dict[str, tuple[str, ...]] = {
         Capability.analytics_view.value,
     ),
     "a_and_r": (
+        Capability.governance_view.value,
         Capability.profile_view.value,
         Capability.profile_edit.value,
         Capability.artist_profile_view.value,
@@ -168,6 +172,7 @@ DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS: dict[str, tuple[str, ...]] = {
         Capability.analytics_view.value,
     ),
     "manager": (
+        Capability.governance_view.value,
         Capability.profile_view.value,
         Capability.profile_edit.value,
         Capability.artist_profile_view.value,
@@ -189,6 +194,7 @@ DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS: dict[str, tuple[str, ...]] = {
         Capability.analytics_view.value,
     ),
     "legal": (
+        Capability.governance_view.value,
         Capability.profile_view.value,
         Capability.profile_edit.value,
         Capability.contract_view.value,
@@ -198,6 +204,7 @@ DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS: dict[str, tuple[str, ...]] = {
         Capability.contract_approve.value,
     ),
     "marketing": (
+        Capability.governance_view.value,
         Capability.profile_view.value,
         Capability.profile_edit.value,
         Capability.artist_profile_view.value,
@@ -219,6 +226,7 @@ DEFAULT_ROLE_CAPABILITY_ASSOCIATIONS: dict[str, tuple[str, ...]] = {
         Capability.analytics_create.value,
     ),
     "finance": (
+        Capability.governance_view.value,
         Capability.profile_view.value,
         Capability.profile_edit.value,
         Capability.contract_view.value,

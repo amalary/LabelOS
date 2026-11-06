@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Annotated
 from uuid import UUID
 
+from anyio import CancelScope
 from fastapi import Depends, HTTPException, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from labelos_database.models import (
@@ -217,8 +218,15 @@ def principal_from_token(token: str, settings: Settings) -> AuthenticatedPrincip
 async def get_session(
     settings: SettingsDep,
 ):
-    async for session in get_async_session(settings):
-        yield session
+    sessions = get_async_session(settings)
+    try:
+        async for session in sessions:
+            yield session
+    finally:
+        # Closing the outer yield dependency does not close a nested async
+        # generator. Finish rollback/close even when an SSE client disconnects.
+        with CancelScope(shield=True):
+            await sessions.aclose()
 
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
@@ -247,18 +255,56 @@ async def get_current_principal(
 async def resolve_current_user(
     session: AsyncSession,
     principal: AuthenticatedPrincipal,
+    *,
+    sync_organization: bool = True,
 ) -> CurrentUserContext:
     identity = await _load_auth_identity(session, principal)
     if identity is None:
         identity = await _create_auth_identity(session, principal)
     user = identity.user
 
-    if principal.organization_id is not None:
+    if sync_organization and principal.organization_id is not None:
+        membership_role = max(
+            principal.membership_roles,
+            key=lambda role: ROLE_ORDER[role],
+            default=MembershipRole.member,
+        )
         organization = await session.scalar(
             select(Organization).where(
                 Organization.workos_organization_id == principal.organization_id
             )
         )
+        membership = (
+            await session.scalar(
+                select(OrganizationMembership)
+                .where(OrganizationMembership.organization_id == organization.id)
+                .where(OrganizationMembership.user_id == user.id)
+            )
+            if organization is not None
+            else None
+        )
+        # A signed session can outlive a local revocation. Tombstones apply to
+        # every claim role, not just owner bootstrap.
+        from labelos_api.authorization import authorization_service
+
+        workspace_active = (
+            organization is None
+            or await authorization_service.is_workspace_membership_active_or_absent(
+                session, user.id, organization.id
+            )
+        )
+        if not workspace_active:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Workspace membership is not active",
+            )
+        if membership is None and membership_role == MembershipRole.owner:
+            # Use the same bootstrap boundary as onboarding. Import locally since
+            # authorization consumes the context types defined in this module.
+            await authorization_service.require_workspace_creation(
+                session,
+                CurrentUserContext(user=user, principal=principal, memberships=()),
+            )
         if organization is None:
             organization = Organization(
                 name=principal.organization_id,
@@ -269,16 +315,6 @@ async def resolve_current_user(
             session.add(organization)
             await session.flush()
 
-        membership = await session.scalar(
-            select(OrganizationMembership)
-            .where(OrganizationMembership.organization_id == organization.id)
-            .where(OrganizationMembership.user_id == user.id)
-        )
-        membership_role = max(
-            principal.membership_roles,
-            key=lambda role: ROLE_ORDER[role],
-            default=MembershipRole.member,
-        )
         if membership is None:
             session.add(
                 OrganizationMembership(
@@ -291,15 +327,17 @@ async def resolve_current_user(
                 )
             )
             await session.commit()
-        elif membership.workspace_permission != workspace_permission_from_role(
-            membership_role
-        ):
-            membership.role = membership_role
-            membership.workspace_permission = workspace_permission_from_role(
-                membership_role
-            )
-            await session.commit()
+        # Existing membership permissions are authoritative. Changes arrive via
+        # authorized writes/webhooks, never opportunistic session-claim sync.
 
+    memberships = await load_membership_contexts(session, user.id)
+    return CurrentUserContext(user=user, principal=principal, memberships=memberships)
+
+
+async def load_membership_contexts(
+    session: AsyncSession, user_id: UUID
+) -> tuple[MembershipContext, ...]:
+    """Load persisted authorization state without identity or claim side effects."""
     rows = await session.execute(
         select(OrganizationMembership, Organization)
         .options(
@@ -317,7 +355,7 @@ async def resolve_current_user(
             .selectinload(RoleCapability.capability),
         )
         .join(Organization, Organization.id == OrganizationMembership.organization_id)
-        .where(OrganizationMembership.user_id == user.id)
+        .where(OrganizationMembership.user_id == user_id)
     )
     memberships = tuple(
         MembershipContext(
@@ -326,20 +364,30 @@ async def resolve_current_user(
             organization_slug=organization.slug,
             workos_organization_id=organization.workos_organization_id,
             workspace_permission=membership.workspace_permission,
-            status=membership.status,
+            status=(
+                membership.workspace_membership.status
+                if membership.workspace_membership is not None
+                and membership.workspace_membership.status != "active"
+                else membership.status
+            ),
             professional_roles=tuple(membership.professional_roles),
             department_access=tuple(membership.approved_department_access),
             pending_department_access=tuple(membership.pending_department_access),
             capability_permissions=tuple(membership.capability_permissions),
             role_capabilities=(
-                tuple(membership.workspace_membership.capability_keys)
+                tuple(
+                    capability.key
+                    for role in membership.workspace_membership.roles
+                    if role.workspace_id in {None, organization.id}
+                    for capability in role.capabilities
+                )
                 if membership.workspace_membership is not None
                 else ()
             ),
         )
         for membership, organization in rows.all()
     )
-    return CurrentUserContext(user=user, principal=principal, memberships=memberships)
+    return memberships
 
 
 async def _load_auth_identity(
@@ -371,7 +419,10 @@ async def _create_auth_identity(
             session.add(user)
             await session.flush()
         identity = AuthIdentity(
-            user_id=user.id,
+            # Keep the relationship loaded for the async caller. Setting only
+            # the FK leaves identity.user to perform an implicit database read
+            # after this function returns, which raises MissingGreenlet.
+            user=user,
             provider=principal.provider,
             subject=principal.subject,
             email=principal.email,
@@ -393,6 +444,23 @@ async def get_current_user_context(
     principal: Annotated[AuthenticatedPrincipal, Depends(get_current_principal)],
 ) -> CurrentUserContext:
     return await resolve_current_user(session, principal)
+
+
+async def get_workspace_creation_context(
+    session: SessionDep,
+    principal: Annotated[AuthenticatedPrincipal, Depends(get_current_principal)],
+) -> CurrentUserContext:
+    # Creation must authorize against persisted membership before token sync can
+    # create or modify it. Identity resolution itself grants no workspace rights.
+    return await resolve_current_user(session, principal, sync_organization=False)
+
+
+async def get_invitation_acceptance_context(
+    session: SessionDep,
+    principal: Annotated[AuthenticatedPrincipal, Depends(get_current_principal)],
+) -> CurrentUserContext:
+    """Authenticate without granting claim-derived membership before invite checks."""
+    return await resolve_current_user(session, principal, sync_organization=False)
 
 
 def _workspace_permission_from_value(
@@ -426,7 +494,9 @@ def require_active_workspace_id(context: CurrentUserContext) -> UUID:
 
 
 def require_permission(permission: str, context: CurrentUserContext) -> None:
-    if permission in context.principal.permissions:
+    from labelos_api.authorization import authorization_service
+
+    if authorization_service.can_permission(context, permission):
         return
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,

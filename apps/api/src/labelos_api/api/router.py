@@ -8,15 +8,20 @@ from labelos_api.api.v1.artists import router as artists_router
 from labelos_api.api.v1.campaign_calendar import router as campaign_calendar_router
 from labelos_api.api.v1.campaigns import router as campaigns_router
 from labelos_api.api.v1.dashboard import router as dashboard_router
+from labelos_api.api.v1.governance import router as governance_router
 from labelos_api.api.v1.marketing_content import router as marketing_content_router
 from labelos_api.api.v1.marketing_media import router as marketing_media_router
 from labelos_api.api.v1.me import router as me_router
+from labelos_api.api.v1.musicbrainz_research import (
+    router as musicbrainz_research_router,
+)
 from labelos_api.api.v1.onboarding import router as onboarding_router
 from labelos_api.api.v1.organizations import router as organizations_router
 from labelos_api.api.v1.profiles import router as profiles_router
 from labelos_api.api.v1.publications import router as publications_router
 from labelos_api.api.v1.realtime import router as realtime_router
 from labelos_api.api.v1.scheduling import router as scheduling_router
+from labelos_api.api.v1.scouting import router as scouting_router
 from labelos_api.api.v1.social_account_connections import (
     oauth_router as social_account_connections_oauth_router,
 )
@@ -25,8 +30,10 @@ from labelos_api.api.v1.social_account_connections import (
 )
 from labelos_api.api.v1.status import router as status_router
 from labelos_api.api.v1.webhooks import router as webhooks_router
+from labelos_api.api.v1.youtube_research import router as youtube_research_router
 
 api_router = APIRouter()
+api_router.include_router(governance_router)
 api_router.include_router(analytics_router)
 api_router.include_router(approvals_router)
 api_router.include_router(artist_profiles_router)
@@ -38,6 +45,7 @@ api_router.include_router(dashboard_router)
 api_router.include_router(marketing_content_router)
 api_router.include_router(marketing_media_router)
 api_router.include_router(me_router)
+api_router.include_router(musicbrainz_research_router)
 api_router.include_router(onboarding_router)
 api_router.include_router(organizations_router)
 api_router.include_router(profiles_router)
@@ -48,3 +56,5 @@ api_router.include_router(social_account_connections_oauth_router)
 api_router.include_router(social_account_connections_router)
 api_router.include_router(status_router)
 api_router.include_router(webhooks_router)
+api_router.include_router(youtube_research_router)
+api_router.include_router(scouting_router)

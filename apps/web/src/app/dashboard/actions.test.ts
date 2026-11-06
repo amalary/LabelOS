@@ -110,4 +110,18 @@ describe("switchOrganization", () => {
 
     expect(organizations.verifyOrganizationActivation).not.toHaveBeenCalled();
   });
+
+  it("does not log raw WorkOS failures during switching", async () => {
+    authkit.refreshSession.mockRejectedValue(new Error("PRIVATE_TOKEN"));
+    const { switchOrganization } = await import("./actions");
+    const { logServerError } = await import("../../lib/server-logging");
+    await expect(switchOrganization({ error: null }, formData("local_org_beta"))).resolves.toEqual({
+      error: "We could not switch organizations. Try again.",
+    });
+    expect(logServerError).toHaveBeenCalledWith(
+      "Organization switch failed",
+      expect.objectContaining({ message: "Workspace activation failed" }),
+      { operation: "organization_switch" },
+    );
+  });
 });

@@ -27,15 +27,16 @@ from labelos_database.models import (
     WorkspacePermission,
 )
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from labelos_api.auth import (
     AuthenticatedPrincipal,
     CurrentUserContext,
     MembershipContext,
     get_current_user_context,
+    get_invitation_acceptance_context,
     get_session,
+    get_workspace_creation_context,
 )
 from labelos_api.main import create_app
 
@@ -60,13 +61,10 @@ class SeededOrganizations:
 @pytest.fixture
 def organizations_client(
     monkeypatch: pytest.MonkeyPatch,
+    database_test_engine,
 ) -> Iterator[tuple[TestClient, async_sessionmaker[AsyncSession], SeededOrganizations]]:
     monkeypatch.setenv("APP_ENV", "test")
-    engine = create_async_engine(
-        "sqlite+aiosqlite://",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
+    engine = database_test_engine
     sessionmaker = async_sessionmaker(bind=engine, expire_on_commit=False)
 
     async def prepare_database() -> SeededOrganizations:
@@ -293,8 +291,6 @@ def organizations_client(
     with TestClient(app) as client:
         yield client, sessionmaker, seeded
 
-    asyncio.run(engine.dispose())
-
 
 def _set_context(
     client: TestClient,
@@ -347,6 +343,10 @@ def _set_context(
         )
 
     client.app.dependency_overrides[get_current_user_context] = override_context
+    client.app.dependency_overrides[get_workspace_creation_context] = override_context
+    client.app.dependency_overrides[get_invitation_acceptance_context] = (
+        override_context
+    )
 
 
 def _set_joiner_context(client: TestClient, seeded: SeededOrganizations) -> None:
@@ -366,6 +366,9 @@ def _set_joiner_context(client: TestClient, seeded: SeededOrganizations) -> None
         )
 
     client.app.dependency_overrides[get_current_user_context] = override_context
+    client.app.dependency_overrides[get_invitation_acceptance_context] = (
+        override_context
+    )
 
 
 async def _membership_role(
@@ -1730,6 +1733,17 @@ def test_create_workspace_invite_returns_general_join_link(
         json={
             "email": "Sarah@Example.com",
             "professional_roles": ["Legal", "Management"],
+            "workspace_roles": ["legal", "manager"],
+            "department_access": [
+                "legal",
+                "contracts",
+                "agreements",
+                "management",
+                "artist",
+                "releases",
+                "marketing",
+                "analytics",
+            ],
             "expires_in_days": 14,
             "maximum_uses": 5,
         },
@@ -1874,7 +1888,7 @@ def test_create_workspace_invite_requires_role_assign_for_selected_roles(
 
     response = client.post(
         f"/api/v1/organizations/{seeded.org_a_id}/invites",
-        json={"email": "artist@example.com", "professional_roles": ["Artist"]},
+        json={"email": "artist@example.com", "workspace_roles": ["artist"]},
     )
 
     assert response.status_code == 403
@@ -2024,8 +2038,9 @@ def test_accept_workspace_invite_assigns_invitation_professional_roles(
     invite_response = client.post(
         f"/api/v1/organizations/{seeded.org_a_id}/invites",
         json={
-            "email": "sarah@example.com",
+            "email": "joiner@example.com",
             "professional_roles": ["Legal", "Management"],
+            "workspace_roles": ["legal", "manager"],
             "maximum_uses": 1,
         },
     )
@@ -2079,6 +2094,20 @@ def test_accept_workspace_invite_for_existing_user_adds_second_workspace_roles(
     ],
 ) -> None:
     client, sessionmaker, seeded = organizations_client
+
+    async def authorize_inviter() -> None:
+        async with sessionmaker() as session:
+            membership = await session.scalar(
+                select(OrganizationMembership).where(
+                    OrganizationMembership.organization_id == seeded.org_b_id,
+                    OrganizationMembership.user_id == seeded.user_id,
+                )
+            )
+            membership.role = MembershipRole.admin
+            membership.workspace_permission = WorkspacePermission.admin
+            await session.commit()
+
+    asyncio.run(authorize_inviter())
     _set_context(
         client,
         seeded,
@@ -2090,6 +2119,7 @@ def test_accept_workspace_invite_for_existing_user_adds_second_workspace_roles(
         json={
             "email": "joiner@example.com",
             "professional_roles": ["Artist", "Producer"],
+            "workspace_roles": ["artist", "producer"],
             "maximum_uses": 1,
         },
     )
@@ -2121,6 +2151,7 @@ def test_accept_workspace_invite_is_idempotent_for_existing_active_member(
         json={
             "email": "joiner@example.com",
             "professional_roles": ["Artist"],
+            "workspace_roles": ["artist"],
             "maximum_uses": 2,
         },
     )
@@ -2148,7 +2179,7 @@ def test_accept_workspace_invite_grants_invitation_department_access(
     invite_response = client.post(
         f"/api/v1/organizations/{seeded.org_a_id}/invites",
         json={
-            "email": "sarah@example.com",
+            "email": "joiner@example.com",
             "professional_roles": ["Legal", "Management"],
             "department_access": ["contracts", "agreements", "artist", "releases"],
             "maximum_uses": 1,

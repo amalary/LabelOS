@@ -45,6 +45,10 @@ store provider sync cursors in adapter-owned state, and keep credentials out of
 analytics rows. Provider-specific behavior should not branch inside the core
 analytics service unless it is a shared correctness rule.
 
+The [A&R provider adapter contracts](research-provider-contracts.md) now define
+the typed discovery/collection boundary, including normalized records, safe errors,
+credential references and collection provenance. No live provider is registered.
+
 ## Validation And Security
 
 Analytics API routes require authentication and then enforce capabilities

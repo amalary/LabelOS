@@ -155,6 +155,10 @@ export function InviteOnboardingFlow({
               {requiresRoleSelection ? (
                 <fieldset className="grid gap-3">
                   <legend className="text-sm font-semibold text-slate-950">Select your role</legend>
+                  <p className="text-sm text-slate-600">
+                    These job titles describe your work. Workspace permissions are assigned by your
+                    inviter.
+                  </p>
                   <div className="grid gap-2 sm:grid-cols-2">
                     {selectableProfessionalRoles.map((role) => (
                       <label

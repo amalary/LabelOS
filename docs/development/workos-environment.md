@@ -18,6 +18,24 @@ Logout URI: http://localhost:3000/login
 Use your deployed web origin for production. Do not invent production values in
 the repository.
 
+## Workspace creator role
+
+The configured WorkOS environment must have an environment role with slug `owner`.
+Workspace onboarding creates an owner membership, refreshes the organization
+session, then synchronizes local records using that verified owner token. Do not
+substitute `admin` or grant ownership based on organization names.
+
+Onboarding checks for the role before creating an organization. On a retry it
+can reuse an organization with matching LabelOS creator metadata and name only
+when it is empty or the creator still has an active owner membership. It refuses
+to reclaim an occupied workspace based on historical creator metadata alone.
+Existing inactive or non-owner memberships are never upgraded by this path.
+
+If creation previously failed because the role was missing, configure the role
+in the intended WorkOS environment, refresh `/onboarding/workspace`, and submit
+the same workspace name. Review leftover empty organizations separately; the
+application does not delete them automatically.
+
 ## Server-Only Variables
 
 These values must only be available to server runtimes or a secret manager:
@@ -33,7 +51,29 @@ API_BASE_URL=http://localhost:4000
 ```
 
 `WORKOS_API_KEY` must never use a `NEXT_PUBLIC_*` prefix. The API key is read by
-the WorkOS SDK on the Next.js server.
+the WorkOS SDK on the Next.js server and by the API's accepted-invitation
+connection service. The API never returns the key to a client.
+
+When an invited member first selects a workspace, the API verifies the active
+local invitation membership, its inviter's current authority, and the member's
+verified WorkOS identity. If the membership is not yet linked, it looks up all
+WorkOS membership statuses and creates only an ordinary `member` membership when
+none exists. Inactive/pending or privileged existing memberships require review;
+this path does not reactivate, upgrade or downgrade them. Successful connection
+stores the WorkOS membership ID and an audit event before AuthKit switches the
+session. Linked memberships are never recreated by workspace activation.
+The same path repairs an already accepted local invitation whose WorkOS link was
+missing. It does not require a new invite or a new user account.
+
+Leave `WORKOS_WEBHOOK_SECRET` empty locally until a real webhook signing secret
+is configured. A documented example value is not a signing secret. With no real
+value the local webhook endpoint deliberately returns 503; deployed environments
+require the real value through strict startup validation.
+
+Next development logging excludes authentication, invitation and OAuth routes.
+The guarded API launcher uses structured request logs with route templates and
+disables Uvicorn's duplicate access log, which otherwise records invitation tokens.
+Do not enable full URL logging for these routes in external proxies or telemetry.
 
 ## Public Variables
 

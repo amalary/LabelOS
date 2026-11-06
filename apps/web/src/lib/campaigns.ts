@@ -1,6 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useSyncExternalStore } from "react";
+import { createResourceCache, useCachedResource } from "./resource-cache";
+
+import { useCallback, useSyncExternalStore } from "react";
 
 export type CampaignApiErrorCode =
   "unauthorized" | "forbidden" | "not_found" | "conflict" | "network_failure";
@@ -158,17 +160,16 @@ export type CampaignMutationState<TData, TVariables> = {
   reset: () => void;
 };
 
-type CacheEntry<T> = {
-  data: T | null;
-  error: CampaignApiError | null;
-  fetcher: (() => Promise<T>) | null;
-  isLoading: boolean;
-  listeners: Set<() => void>;
-  promise: Promise<T> | null;
-  version: number;
-};
-
-const cache = new Map<string, CacheEntry<unknown>>();
+const cache = createResourceCache({
+  toError: (error: unknown) =>
+    error instanceof CampaignApiError
+      ? error
+      : new CampaignApiError("network_failure", "Campaign data could not be loaded.", undefined, {
+          cause: error,
+        }),
+  missingKeyError: () => new CampaignApiError("not_found", "A campaign resource key is required."),
+});
+const { entryFor, emit } = cache;
 const mutationListeners = new Set<() => void>();
 let mutationVersion = 0;
 let activeMutationCount = 0;
@@ -188,30 +189,6 @@ export const campaignQueryKeys = {
   milestones: (workspaceId: string, campaignId: string) =>
     `campaigns:milestones:${workspaceId}:${campaignId}`,
 };
-
-function entryFor<T>(key: string): CacheEntry<T> {
-  let entry = cache.get(key) as CacheEntry<T> | undefined;
-  if (!entry) {
-    entry = {
-      data: null,
-      error: null,
-      fetcher: null,
-      isLoading: false,
-      listeners: new Set(),
-      promise: null,
-      version: 0,
-    };
-    cache.set(key, entry as CacheEntry<unknown>);
-  }
-  return entry;
-}
-
-function emit(entry: CacheEntry<unknown>) {
-  entry.version += 1;
-  for (const listener of entry.listeners) {
-    listener();
-  }
-}
 
 function emitMutationChange() {
   mutationVersion += 1;
@@ -267,115 +244,15 @@ async function campaignJson<T>(path: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T;
 }
 
-async function loadResource<T>(key: string, fetcher: () => Promise<T>): Promise<T> {
-  const entry = entryFor<T>(key);
-  entry.fetcher = fetcher;
-  if (entry.promise) {
-    return entry.promise;
-  }
-
-  entry.error = null;
-  entry.isLoading = true;
-  emit(entry);
-
-  entry.promise = fetcher()
-    .then((data) => {
-      entry.data = data;
-      entry.error = null;
-      return data;
-    })
-    .catch((error) => {
-      entry.error =
-        error instanceof CampaignApiError
-          ? error
-          : new CampaignApiError(
-              "network_failure",
-              "Campaign data could not be loaded.",
-              undefined,
-              {
-                cause: error,
-              },
-            );
-      throw entry.error;
-    })
-    .finally(() => {
-      entry.isLoading = false;
-      entry.promise = null;
-      emit(entry);
-    });
-
-  emit(entry);
-  return entry.promise;
-}
-
 function useCampaignResource<T>(
   key: string | null,
   fetcher: (() => Promise<T>) | null,
 ): CampaignResourceState<T> {
-  const subscribe = useCallback(
-    (listener: () => void) => {
-      if (!key) {
-        return () => undefined;
-      }
-      const entry = entryFor<T>(key);
-      entry.listeners.add(listener);
-      return () => {
-        entry.listeners.delete(listener);
-      };
-    },
-    [key],
-  );
-
-  const getSnapshot = useCallback(() => {
-    if (!key) {
-      return 0;
-    }
-    return entryFor<T>(key).version;
-  }, [key]);
-
-  useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
-
-  useEffect(() => {
-    if (!key || !fetcher) {
-      return;
-    }
-    const entry = entryFor<T>(key);
-    entry.fetcher = fetcher;
-    if (entry.data === null && !entry.isLoading) {
-      void loadResource(key, fetcher).catch(() => undefined);
-    }
-  }, [fetcher, key]);
-
-  const reload = useCallback(async () => {
-    if (!key || !fetcher) {
-      throw new CampaignApiError("not_found", "A campaign resource key is required.");
-    }
-    return loadResource(key, fetcher);
-  }, [fetcher, key]);
-
-  const entry = key ? entryFor<T>(key) : null;
-  return {
-    data: entry?.data ?? null,
-    error: entry?.error ?? null,
-    isLoading: entry?.isLoading ?? false,
-    isMutating: activeMutationCount > 0,
-    reload,
-  };
+  return { ...useCachedResource(cache, key, fetcher), isMutating: activeMutationCount > 0 };
 }
 
 export function invalidateCampaignCache(predicate?: (key: string) => boolean) {
-  for (const [key, entry] of cache.entries()) {
-    if (predicate && !predicate(key)) {
-      continue;
-    }
-    entry.data = null;
-    entry.error = null;
-    if (entry.fetcher) {
-      void loadResource(key, entry.fetcher).catch(() => undefined);
-    } else {
-      emit(entry);
-    }
-  }
+  cache.invalidate(predicate);
 }
 
 export function shouldInvalidateCampaignRealtimeCacheKey({

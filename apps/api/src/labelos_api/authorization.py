@@ -21,6 +21,7 @@ from labelos_database.models import (
     OrganizationMembership,
     Role,
     RoleCapability,
+    UniversalProfile,
     User,
     WorkspaceMembership,
     WorkspaceMembershipRole,
@@ -63,6 +64,25 @@ class ActorKind(StrEnum):
     user = "user"
     service_account = "service_account"
     ai_agent = "ai_agent"
+
+
+# Legacy provider permissions can constrain persisted authority, never extend it.
+PERMISSION_CAPABILITIES: dict[Permission, Capability] = {
+    Permission.organization_manage: Capability.workspace_update,
+    Permission.members_manage: Capability.workspace_member_roles_manage,
+    Permission.artists_view: Capability.artist_profile_view,
+    Permission.artists_manage: Capability.artist_profile_edit,
+    Permission.releases_view: Capability.release_view,
+    Permission.releases_manage: Capability.release_edit,
+    Permission.campaigns_view: Capability.marketing_campaign_view,
+    Permission.campaigns_manage: Capability.marketing_campaign_edit,
+    Permission.analytics_view: Capability.analytics_view,
+    Permission.royalties_view: Capability.royalty_view,
+    Permission.royalties_manage: Capability.royalty_calculate,
+    Permission.contracts_view: Capability.contract_view,
+    Permission.contracts_manage: Capability.contract_edit,
+    Permission.settings_manage: Capability.workspace_update,
+}
 
 
 class ResourceKind(StrEnum):
@@ -125,6 +145,8 @@ INITIAL_ROLE_CAPABILITIES: dict[MembershipRole, frozenset[Capability]] = {
     MembershipRole.admin: frozenset(
         {
             Capability.workspace_view,
+            Capability.governance_view,
+            Capability.governance_manage,
             Capability.workspace_update,
             Capability.workspace_member_view,
             Capability.workspace_member_invite,
@@ -173,6 +195,7 @@ INITIAL_ROLE_CAPABILITIES: dict[MembershipRole, frozenset[Capability]] = {
     ),
     MembershipRole.member: frozenset(
         {
+            Capability.governance_view,
             Capability.artist_profile_view,
             Capability.marketing_campaign_view,
             Capability.marketing_account_view,
@@ -186,6 +209,8 @@ INITIAL_ROLE_CAPABILITIES: dict[MembershipRole, frozenset[Capability]] = {
 }
 
 CAPABILITY_DEPARTMENTS: dict[Capability, frozenset[str]] = {
+    Capability.governance_view: frozenset(),
+    Capability.governance_manage: frozenset(),
     Capability.workspace_view: frozenset({"administration", "management"}),
     Capability.workspace_update: frozenset({"administration"}),
     Capability.workspace_member_view: frozenset({"administration", "management"}),
@@ -375,6 +400,61 @@ def actor_from_current_user(context: CurrentUserContext) -> AuthorizationActor:
 
 
 class AuthorizationService:
+    async def is_workspace_membership_active_or_absent(
+        self, session: AsyncSession, user_id: UUID, workspace_id: UUID
+    ) -> bool:
+        membership_status = await session.scalar(
+            select(WorkspaceMembership.status)
+            .join(
+                UniversalProfile, UniversalProfile.id == WorkspaceMembership.profile_id
+            )
+            .where(UniversalProfile.user_id == user_id)
+            .where(WorkspaceMembership.workspace_id == workspace_id)
+        )
+        return membership_status is None or membership_status == "active"
+
+    async def require_workspace_creation(
+        self, session: AsyncSession, context: CurrentUserContext
+    ) -> None:
+        """Bootstrap new users; existing users must already be active owners."""
+        memberships = (
+            await session.scalars(
+                select(OrganizationMembership).where(
+                    OrganizationMembership.user_id == context.user.id
+                )
+            )
+        ).all()
+        for membership in memberships:
+            if (
+                membership.status == "active"
+                and membership.workspace_permission == WorkspacePermission.owner
+                and await self.is_workspace_membership_active_or_absent(
+                    session, context.user.id, membership.organization_id
+                )
+            ):
+                return
+        # Retained/removed profile memberships must not look like first-time users.
+        workspace_membership = await session.scalar(
+            select(WorkspaceMembership.id)
+            .join(
+                UniversalProfile, UniversalProfile.id == WorkspaceMembership.profile_id
+            )
+            .where(UniversalProfile.user_id == context.user.id)
+            .limit(1)
+        )
+        principal = context.principal
+        if (
+            memberships
+            or workspace_membership is not None
+            or (
+                principal.organization_id is not None
+                and "owner" not in (principal.role, *principal.roles)
+            )
+        ):
+            raise _forbidden(
+                "Workspace creation requires a new user or an active owner"
+            )
+
     async def has_capability(
         self,
         session: AsyncSession,
@@ -566,7 +646,7 @@ class AuthorizationService:
                 reason="unknown_action",
             )
         if isinstance(action, Permission):
-            allowed = self.can_permission(actor, action)
+            allowed = self.can_permission(actor, action, workspace=workspace)
             return AuthorizationDecision(
                 actor=actor_ref,
                 action=action,
@@ -594,11 +674,27 @@ class AuthorizationService:
         self,
         actor: WorkspaceAuthorizationContext,
         permission: Permission | str,
+        *,
+        workspace: AuthorizationWorkspace = None,
     ) -> bool:
         required = self._normalize_permission(permission)
-        if required is None:
+        membership = self._resolve_workspace_membership(actor, workspace)
+        active_membership = self._resolve_workspace_membership(actor, None)
+        if (
+            required is None
+            or membership is None
+            or active_membership is None
+            or membership.workspace_id != active_membership.workspace_id
+            or required.value not in actor.principal.permissions
+        ):
             return False
-        return required.value in actor.principal.permissions
+        capability = PERMISSION_CAPABILITIES.get(required)
+        if capability is not None:
+            return self.can_capability(actor, capability, workspace=membership)
+        # Legacy agent permissions have no capability equivalent yet.
+        return required in INITIAL_ROLE_PERMISSIONS.get(
+            _workspace_role(membership.workspace_permission), frozenset()
+        )
 
     def can_access_department(
         self,

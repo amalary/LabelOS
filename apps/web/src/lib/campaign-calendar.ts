@@ -1,6 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useSyncExternalStore } from "react";
+import { createResourceCache, useCachedResource } from "./resource-cache";
+
+import { useCallback } from "react";
 
 import type {
   PublishedCalendarFact,
@@ -154,17 +156,19 @@ export type CampaignCalendarResourceState<T> = {
   reload: () => Promise<T>;
 };
 
-type CacheEntry<T> = {
-  data: T | null;
-  error: CampaignCalendarApiError | null;
-  fetcher: (() => Promise<T>) | null;
-  isLoading: boolean;
-  listeners: Set<() => void>;
-  promise: Promise<T> | null;
-  version: number;
-};
-
-const cache = new Map<string, CacheEntry<unknown>>();
+const cache = createResourceCache({
+  toError: (error: unknown) =>
+    error instanceof CampaignCalendarApiError
+      ? error
+      : new CampaignCalendarApiError(
+          "network_failure",
+          "Campaign calendar could not be loaded.",
+          undefined,
+          { cause: error },
+        ),
+  missingKeyError: () =>
+    new CampaignCalendarApiError("not_found", "A campaign calendar resource key is required."),
+});
 
 export const campaignCalendarQueryKeys = {
   all: "campaign-calendar",
@@ -217,30 +221,6 @@ export function campaignCalendarQuery(options?: CampaignCalendarQueryOptions): s
   }
   const query = params.toString();
   return query ? `?${query}` : "";
-}
-
-function entryFor<T>(key: string): CacheEntry<T> {
-  let entry = cache.get(key) as CacheEntry<T> | undefined;
-  if (!entry) {
-    entry = {
-      data: null,
-      error: null,
-      fetcher: null,
-      isLoading: false,
-      listeners: new Set(),
-      promise: null,
-      version: 0,
-    };
-    cache.set(key, entry as CacheEntry<unknown>);
-  }
-  return entry;
-}
-
-function emit(entry: CacheEntry<unknown>) {
-  entry.version += 1;
-  for (const listener of entry.listeners) {
-    listener();
-  }
 }
 
 function errorDetailMessage(detail: unknown): string | null {
@@ -359,122 +339,15 @@ function normalizeCampaignCalendarResponse(
   };
 }
 
-async function loadResource<T>(key: string, fetcher: () => Promise<T>): Promise<T> {
-  const entry = entryFor<T>(key);
-  entry.fetcher = fetcher;
-  if (entry.promise) {
-    return entry.promise;
-  }
-
-  entry.error = null;
-  entry.isLoading = true;
-  emit(entry);
-
-  entry.promise = fetcher()
-    .then((data) => {
-      entry.data = data;
-      entry.error = null;
-      return data;
-    })
-    .catch((error) => {
-      entry.error =
-        error instanceof CampaignCalendarApiError
-          ? error
-          : new CampaignCalendarApiError(
-              "network_failure",
-              "Campaign calendar could not be loaded.",
-              undefined,
-              { cause: error },
-            );
-      throw entry.error;
-    })
-    .finally(() => {
-      entry.isLoading = false;
-      entry.promise = null;
-      emit(entry);
-    });
-
-  emit(entry);
-  return entry.promise;
-}
-
 function useCampaignCalendarResource<T>(
   key: string | null,
   fetcher: (() => Promise<T>) | null,
 ): CampaignCalendarResourceState<T> {
-  const subscribe = useCallback(
-    (listener: () => void) => {
-      if (!key) {
-        return () => undefined;
-      }
-      const entry = entryFor<T>(key);
-      entry.listeners.add(listener);
-      return () => {
-        entry.listeners.delete(listener);
-      };
-    },
-    [key],
-  );
-
-  const getSnapshot = useCallback(() => (key ? entryFor<T>(key).version : 0), [key]);
-  useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
-
-  useEffect(() => {
-    if (!key || !fetcher) {
-      return;
-    }
-    const entry = entryFor<T>(key);
-    entry.fetcher = fetcher;
-    if (entry.data === null && !entry.isLoading) {
-      void loadResource(key, fetcher).catch(() => undefined);
-    }
-  }, [fetcher, key]);
-
-  const reload = useCallback(async () => {
-    if (!key || !fetcher) {
-      throw new CampaignCalendarApiError(
-        "not_found",
-        "A campaign calendar resource key is required.",
-      );
-    }
-    return loadResource(key, fetcher);
-  }, [fetcher, key]);
-
-  const entry = key ? entryFor<T>(key) : null;
-  return {
-    data: entry?.data ?? null,
-    error: entry?.error ?? null,
-    isLoading: entry?.isLoading ?? false,
-    isMutating: false,
-    reload,
-  };
+  return { ...useCachedResource(cache, key, fetcher), isMutating: false };
 }
 
 export function invalidateCampaignCalendarCache(predicate?: (key: string) => boolean) {
-  for (const [key, entry] of cache.entries()) {
-    if (predicate && !predicate(key)) {
-      continue;
-    }
-    entry.data = null;
-    entry.error = null;
-    if (entry.fetcher) {
-      // A publication can commit while an earlier calendar snapshot is in flight.
-      // Refresh after that request settles so its stale result cannot consume the invalidation.
-      if (entry.promise) {
-        void entry.promise
-          .finally(() => {
-            if (cache.get(key) === entry && entry.fetcher) {
-              void loadResource(key, entry.fetcher).catch(() => undefined);
-            }
-          })
-          .catch(() => undefined);
-      } else {
-        void loadResource(key, entry.fetcher).catch(() => undefined);
-      }
-    } else {
-      emit(entry);
-    }
-  }
+  cache.invalidate(predicate);
 }
 
 export function invalidateCampaignCalendarWorkspaceCache(workspaceId: string) {

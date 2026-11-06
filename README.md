@@ -28,6 +28,11 @@ intentionally not present yet.
 
 ## Prerequisites
 
+For the local A&R YouTube MVP, use the [guarded startup and validation instructions](docs/development/youtube-mvp-validation.md).
+That workflow pins the recovered local development target, isolates every PostgreSQL
+test in a newly created disposable cluster, and reconciles the local WorkOS ports.
+Do not use the generic database/test setup below for that validation workflow.
+
 - Node.js 22.23.1
 - Corepack enabled for pnpm
 - Python 3.12 or newer

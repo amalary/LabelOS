@@ -15,6 +15,12 @@ export type WorkspaceNavigationState = {
 
 export const workspaceNavigationItems: readonly WorkspaceNavigationItem[] = [
   {
+    href: "/scouting",
+    label: "A&R Scouting",
+    requiredCapabilities: [capabilities.arScoutingView],
+    requiresActiveWorkspace: true,
+  },
+  {
     href: "/dashboard",
     label: "Dashboard",
     requiresActiveWorkspace: true,

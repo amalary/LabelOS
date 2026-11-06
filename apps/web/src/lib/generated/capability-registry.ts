@@ -4,6 +4,8 @@
 export const capabilityIdentifierPattern = /^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$/;
 
 export const capabilities = {
+  governanceView: "governance.view",
+  governanceManage: "governance.manage",
   workspaceView: "workspace.view",
   workspaceUpdate: "workspace.update",
   workspaceMemberView: "workspace.member.view",
@@ -71,6 +73,18 @@ export type CapabilityDefinition = {
 };
 
 export const capabilityRegistry: readonly CapabilityDefinition[] = [
+  {
+    key: capabilities.governanceView,
+    displayName: "View data governance",
+    description: "Read cross-department dataset documentation and lineage.",
+    systemCapability: true,
+  },
+  {
+    key: capabilities.governanceManage,
+    displayName: "Manage data governance",
+    description: "Register sources, document datasets and record collection provenance.",
+    systemCapability: true,
+  },
   {
     key: capabilities.workspaceView,
     displayName: "View workspace",

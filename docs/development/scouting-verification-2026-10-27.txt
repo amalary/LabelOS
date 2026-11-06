@@ -1,0 +1,122 @@
+Scouting checklist verification -- October 27, 2026 (America/Los_Angeles)
+
+Historical checkpoint. Superseded by scouting-checklist-closeout-2026-10-27.txt
+in this directory for current account, policy, test and browser evidence.
+
+Overall: automated implementation checks and live provider smoke checks pass.
+The full checklist cannot yet be signed off: authenticated browser workflow and
+policy prerequisites remain unresolved. Application code and configuration were
+not changed during this verification.
+
+Acceptance results
+
+1. PASS (automated): Ordinary A&R member without governance.manage can list runs,
+   search, fetch channel facts, save candidates, and edit reviews. Tests persist
+   ar.scouting.view/create and A&R department grants; revoked access is denied.
+   A manager must still prepare a governed running research collection.
+
+2. PASS (live adapter): Google for Developers channel lookup returned the expected
+   ID with expiry. Keyword search returned 3 results at limit=3; no pagination
+   followed. Existing Secret Manager reference and shared quota ledger were used.
+   This does not certify the authenticated workspace/run/browser path.
+
+3. PASS (API/component), BROWSER UNVERIFIED: Candidate save/reopen survives fresh
+   HTTP/SQL sessions on PostgreSQL; frontend remount is covered with mocked HTTP.
+   An actual authenticated browser reload was not performed.
+
+4. PASS (automated): Human notes and review status persist. Successive changes,
+   filters, invalid/null values, optimistic revision conflicts, and preservation
+   of notes after source deletion/expiry are covered.
+
+5. PASS (PostgreSQL): 12 concurrent SQL saves produce one candidate/source;
+   12 concurrent HTTP saves return one 201 and eleven 200 responses with one ID.
+   Scope: uniqueness is enforced while the (workspace, channel) reference exists.
+   After reference expiry/deletion, saving the same channel can create a new
+   candidate; the retained human review no longer has that deduplication key.
+
+6. PASS (automated): Unauthorized workspace access returns 403; a foreign
+   candidate ID inside an authorized workspace returns 404. The same channel
+   can be independently saved in different workspaces.
+
+7. PASS (covered paths): Missing/hidden/zero counters, stale display, expired
+   display/source data, unavailable/deleted channel via the combined channel
+   route, pending-fetch deletion, and preservation of human review pass.
+   Production retention-job uptime and backup deletion were not certified.
+
+8. PARTIAL: Atomic quota reservation, bounded retries, Pacific daily reset/DST,
+   cooldowns and deployment-shared limits pass. Limits are 80 searches/day and
+   8,000 channel requests/day. Current official docs list defaults of 100 search
+   calls/day and 10,000 units/day for other endpoints, with channels.list costing
+   one unit. Actual project allocation and other project consumers were not
+   inspected. UI is disabled; privacy/terms URLs are unset. Full policy compliance
+   and approval of the actual disclosures/use case are not verified.
+
+9. PASS WITH LIMITED SCOPE: Provider/proxy sanitized-error checks pass. Known
+   configured WorkOS secrets had zero matches in tracked diff and 25 existing
+   browser JS files. 52 local log/report files had no Google API-key patterns,
+   bearer-material patterns, or raw YouTube counter-field payload patterns.
+   This is not a guarantee about all secrets, untracked source, external logs,
+   crash dumps, production telemetry, or untested authenticated callback logs.
+
+10. PARTIAL: Backend, PostgreSQL, frontend component/proxy, typecheck, scoped lint,
+    local schema and HTTP checks pass. No connected browser was available
+    (computer-use inventory returned no apps/browsers). No authenticated browser
+    workflow was performed. Production build was not rerun during this review;
+    the existing report records a prior successful build.
+
+11. PASS (documentation): README links to youtube-mvp-validation.md, including
+    guarded local database checks, API/web startup, ports, test commands and
+    prerequisites. Startup-related health/login checks pass against running
+    services. Earlier historical account/database counts in that report are
+    superseded by the current observations below.
+
+Fresh execution results
+
+- Backend focused regression: 407 passed, 42 skipped, 131.70 seconds.
+  Skips include PostgreSQL-only tests in the synthetic runner and unsupported
+  provider combinations; the focused PostgreSQL suite below ran without skips.
+- Disposable PostgreSQL 17: 25 passed, zero skips, 23.26 seconds.
+  Includes full migration chain, concurrent SQL/HTTP saves and quota contention.
+  Initial sandbox initdb failed; host-execution retry succeeded. Runner verifies
+  its fresh cluster and removes only its temporary cluster on completion.
+- Frontend: 32 passed across 6 files, 8.13 seconds.
+- TypeScript typecheck: passed.
+- Scoped frontend ESLint and backend Ruff: passed.
+- Development PostgreSQL 18: 69 tables, migration 202610270200, no metadata drift.
+- Current development row counts: 1 user, 0 organizations, 0 collection runs,
+  0 scouting candidates, 0 scouting sources.
+- API /health and /health/database: 200. Unauthenticated /api/v1/me: 401.
+- Web /login: 200. /api/auth/login and /scouting: 307 to WorkOS with the correct
+  localhost:3000 callback. Hosted WorkOS login: 200 with form present.
+- YOUTUBE_RESEARCH_UI_ENABLED: false. Privacy and terms HTTPS URLs: not configured.
+- Live YouTube lookup and bounded search: passed. Only content-free quota usage
+  was persisted; no provider payload or synthetic workspace/run was inserted.
+
+Reproduction commands (PowerShell, repository root)
+
+& .\apps\api\.venv\Scripts\python.exe -B apps/api/scripts/youtube_reliability_tests.py tests/test_scouting.py tests/test_youtube_reliability.py tests/test_youtube_research_api.py tests/test_public_music_adapters.py tests/test_research_providers.py tests/test_governance_authorization.py tests/test_authorization_permission_matrix.py -q --tb=short --show-capture=no --junitxml=../../test-results/scouting-verification-api.xml
+
+& .\apps\api\.venv\Scripts\python.exe -B apps/api/scripts/invitation_postgres_tests.py 'C:/Program Files/PostgreSQL/17/bin' tests/test_scouting.py tests/test_youtube_reliability.py --junitxml=../../test-results/scouting-verification-postgres.xml
+
+pnpm.cmd --filter @label-os/web exec vitest run src/components/scouting-workspace.test.tsx src/components/youtube-research-panel.test.tsx src/app/api/workspaces/scouting-proxy.test.ts src/app/api/workspaces/youtube-research-proxy.test.ts src/lib/workspace-navigation.test.ts src/lib/server-logging.test.ts
+
+pnpm.cmd --filter @label-os/web typecheck
+
+& .\apps\api\.venv\Scripts\python.exe -B scripts/validate_local_workflow.py schema
+& .\apps\api\.venv\Scripts\python.exe -B scripts/validate_local_workflow.py http
+& .\apps\api\.venv\Scripts\python.exe -B scripts/validate_local_workflow.py youtube
+& .\apps\api\.venv\Scripts\python.exe -B scripts/validate_local_workflow.py secrets
+
+Current official policy references checked
+
+https://developers.google.com/youtube/data/determine_quota_cost
+https://developers.google.com/youtube/terms/developer-policies
+
+Remaining acceptance evidence
+
+- Completed workspace onboarding and a governed running YouTube collection.
+- An ordinary A&R account with scouting grants available in a connected browser.
+- Actual reviewed privacy/terms documents configured and discovery enabled.
+- Browser search/lookup -> save -> edit notes/status -> reload -> reopen workflow.
+- Actual Google project quota allocations/other consumers and operational
+  retention/logging/deletion review before broader deployment sign-off.

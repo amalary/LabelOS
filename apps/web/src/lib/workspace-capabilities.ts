@@ -1,6 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useSyncExternalStore } from "react";
+import { createResourceCache, useCachedResource } from "./resource-cache";
+
+import { useCallback, useMemo } from "react";
 
 import { type AuthorizationSubject, type Capability } from "./authorization";
 
@@ -109,17 +111,22 @@ export type EffectiveCapabilitiesState = WorkspaceCapabilityState<WorkspaceAutho
   hasCapability: (capability: Capability | string) => boolean;
 };
 
-type CacheEntry<T> = {
-  data: T | null;
-  error: WorkspaceCapabilityApiError | null;
-  fetcher: (() => Promise<T>) | null;
-  isLoading: boolean;
-  listeners: Set<() => void>;
-  promise: Promise<T> | null;
-  version: number;
-};
-
-const cache = new Map<string, CacheEntry<unknown>>();
+const cache = createResourceCache({
+  toError: (error: unknown) =>
+    error instanceof WorkspaceCapabilityApiError
+      ? error
+      : new WorkspaceCapabilityApiError(
+          "network_failure",
+          "Workspace capability data could not be loaded.",
+          undefined,
+          { cause: error },
+        ),
+  missingKeyError: () =>
+    new WorkspaceCapabilityApiError(
+      "not_found",
+      "A workspace capability resource key is required.",
+    ),
+});
 
 export const workspaceCapabilityQueryKeys = {
   all: "workspace-capabilities",
@@ -131,30 +138,6 @@ export const workspaceCapabilityQueryKeys = {
   memberRoleAssignments: (workspaceId: string) =>
     `workspace-capabilities:member-role-assignments:${workspaceId}`,
 };
-
-function entryFor<T>(key: string): CacheEntry<T> {
-  let entry = cache.get(key) as CacheEntry<T> | undefined;
-  if (!entry) {
-    entry = {
-      data: null,
-      error: null,
-      fetcher: null,
-      isLoading: false,
-      listeners: new Set(),
-      promise: null,
-      version: 0,
-    };
-    cache.set(key, entry as CacheEntry<unknown>);
-  }
-  return entry;
-}
-
-function emit(entry: CacheEntry<unknown>) {
-  entry.version += 1;
-  for (const listener of entry.listeners) {
-    listener();
-  }
-}
 
 function toWorkspaceCapabilityApiError(status: number): WorkspaceCapabilityApiError {
   if (status === 401) {
@@ -215,115 +198,15 @@ async function workspaceCapabilityJson<T>(path: string, init?: RequestInit): Pro
   return (await response.json()) as T;
 }
 
-async function loadResource<T>(key: string, fetcher: () => Promise<T>): Promise<T> {
-  const entry = entryFor<T>(key);
-  entry.fetcher = fetcher;
-  if (entry.promise) {
-    return entry.promise;
-  }
-
-  entry.error = null;
-  entry.isLoading = true;
-  emit(entry);
-
-  entry.promise = fetcher()
-    .then((data) => {
-      entry.data = data;
-      entry.error = null;
-      return data;
-    })
-    .catch((error) => {
-      entry.error =
-        error instanceof WorkspaceCapabilityApiError
-          ? error
-          : new WorkspaceCapabilityApiError(
-              "network_failure",
-              "Workspace capability data could not be loaded.",
-              undefined,
-              { cause: error },
-            );
-      throw entry.error;
-    })
-    .finally(() => {
-      entry.isLoading = false;
-      entry.promise = null;
-      emit(entry);
-    });
-
-  emit(entry);
-  return entry.promise;
-}
-
 function useWorkspaceCapabilityResource<T>(
   key: string | null,
   fetcher: (() => Promise<T>) | null,
 ): WorkspaceCapabilityState<T> {
-  const subscribe = useCallback(
-    (listener: () => void) => {
-      if (!key) {
-        return () => undefined;
-      }
-      const entry = entryFor<T>(key);
-      entry.listeners.add(listener);
-      return () => {
-        entry.listeners.delete(listener);
-      };
-    },
-    [key],
-  );
-
-  const getSnapshot = useCallback(() => {
-    if (!key) {
-      return 0;
-    }
-    return entryFor<T>(key).version;
-  }, [key]);
-
-  useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
-
-  useEffect(() => {
-    if (!key || !fetcher) {
-      return;
-    }
-    const entry = entryFor<T>(key);
-    entry.fetcher = fetcher;
-    if (entry.data === null && !entry.isLoading) {
-      void loadResource(key, fetcher).catch(() => undefined);
-    }
-  }, [fetcher, key]);
-
-  const reload = useCallback(async () => {
-    if (!key || !fetcher) {
-      throw new WorkspaceCapabilityApiError(
-        "not_found",
-        "A workspace capability resource key is required.",
-      );
-    }
-    return loadResource(key, fetcher);
-  }, [fetcher, key]);
-
-  const entry = key ? entryFor<T>(key) : null;
-  return {
-    data: entry?.data ?? null,
-    error: entry?.error ?? null,
-    isLoading: entry?.isLoading ?? false,
-    reload,
-  };
+  return { ...useCachedResource(cache, key, fetcher) };
 }
 
 export function invalidateWorkspaceCapabilityCache(predicate?: (key: string) => boolean) {
-  for (const [key, entry] of cache.entries()) {
-    if (predicate && !predicate(key)) {
-      continue;
-    }
-    entry.data = null;
-    entry.error = null;
-    if (entry.fetcher) {
-      void loadResource(key, entry.fetcher).catch(() => undefined);
-    } else {
-      emit(entry);
-    }
-  }
+  cache.invalidate(predicate);
 }
 
 export function clearWorkspaceCapabilityCache() {
@@ -373,12 +256,13 @@ export function replaceMemberWorkspaceRoles(
   workspaceId: string,
   memberId: string,
   roleIds: string[],
+  departmentAccess?: string[],
 ): Promise<WorkspaceRoleAssignmentsList> {
   return workspaceCapabilityJson<WorkspaceRoleAssignmentsList>(
     `/api/workspaces/${workspaceId}/members/${memberId}/roles`,
     {
       method: "PUT",
-      body: JSON.stringify({ role_ids: roleIds }),
+      body: JSON.stringify({ role_ids: roleIds, department_access: departmentAccess }),
     },
   ).then((result) => {
     invalidateWorkspaceCapabilityCache(

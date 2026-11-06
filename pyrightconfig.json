@@ -2,6 +2,7 @@
   "exclude": ["**/tests", "**/.venv", "**/node_modules"],
   "extraPaths": ["apps/api/src", "apps/agents/src", "packages/database/src"],
   "include": [
+    "apps/api/src/labelos_api/research",
     "apps/api/src/labelos_api/publishing",
     "apps/api/src/labelos_api/repositories/publishing.py",
     "apps/api/src/labelos_api/repositories/publication_leases.py",

@@ -13,21 +13,26 @@ from labelos_database.models import (
 from labelos_database.workspace_memberships import (
     ensure_workspace_membership_for_organization_membership,
 )
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from labelos_api.auth import CurrentUserContext, SessionDep, get_current_user_context
+from labelos_api.auth import (
+    CurrentUserContext,
+    SessionDep,
+    get_workspace_creation_context,
+)
+from labelos_api.authorization import authorization_service
 
 router = APIRouter(prefix="/onboarding", tags=["onboarding"])
 
 
 class WorkspaceSyncRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     workos_organization_id: str = Field(min_length=1, max_length=255)
     organization_name: str = Field(min_length=1, max_length=200)
-    workos_membership_id: str | None = Field(default=None, max_length=255)
-    membership_status: str = Field(default="active", min_length=1, max_length=60)
 
 
 class WorkspaceSyncResponse(BaseModel):
@@ -75,6 +80,14 @@ async def unique_organization_slug(
         candidate = f"{base_slug[: 120 - len(suffix_text)]}{suffix_text}"
 
 
+@router.get("/workspace/eligibility", status_code=status.HTTP_204_NO_CONTENT)
+async def check_workspace_creation_eligibility(
+    session: SessionDep,
+    context: Annotated[CurrentUserContext, Depends(get_workspace_creation_context)],
+) -> None:
+    await authorization_service.require_workspace_creation(session, context)
+
+
 @router.post(
     "/workspace",
     response_model=WorkspaceSyncResponse,
@@ -83,15 +96,15 @@ async def unique_organization_slug(
 async def sync_onboarded_workspace(
     payload: WorkspaceSyncRequest,
     session: SessionDep,
-    context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
+    context: Annotated[CurrentUserContext, Depends(get_workspace_creation_context)],
 ) -> WorkspaceSyncResponse:
     if (
-        context.principal.organization_id is not None
-        and context.principal.organization_id != payload.workos_organization_id
+        context.principal.organization_id != payload.workos_organization_id
+        or "owner" not in (context.principal.role, *context.principal.roles)
     ):
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Authenticated session already has a different active organization",
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="A verified owner session for this organization is required",
         )
 
     organization = await session.scalar(
@@ -101,6 +114,7 @@ async def sync_onboarded_workspace(
     )
 
     if organization is None:
+        await authorization_service.require_workspace_creation(session, context)
         base_slug = slugify_organization_name(payload.organization_name)
         organization = Organization(
             name=payload.organization_name,
@@ -114,9 +128,6 @@ async def sync_onboarded_workspace(
         )
         session.add(organization)
         await session.flush()
-    else:
-        organization.name = payload.organization_name
-        organization.owner_user_id = context.user.id
 
     membership = await session.scalar(
         select(OrganizationMembership)
@@ -124,23 +135,36 @@ async def sync_onboarded_workspace(
         .where(OrganizationMembership.user_id == context.user.id)
     )
 
+    if not await authorization_service.is_workspace_membership_active_or_absent(
+        session, context.user.id, organization.id
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Workspace membership is not active",
+        )
+
     if membership is None:
+        # organization.created may arrive before membership.created. A verified
+        # owner may finish bootstrap, but existing non-owners cannot use this gap.
+        await authorization_service.require_workspace_creation(session, context)
         membership = OrganizationMembership(
             organization_id=organization.id,
             user_id=context.user.id,
             role=MembershipRole.owner,
             workspace_permission=WorkspacePermission.owner,
-            workos_membership_id=payload.workos_membership_id,
-            status=payload.membership_status,
+            status="active",
         )
         session.add(membership)
     else:
-        membership.role = MembershipRole.owner
-        membership.workspace_permission = WorkspacePermission.owner
-        membership.workos_membership_id = (
-            payload.workos_membership_id or membership.workos_membership_id
-        )
-        membership.status = payload.membership_status
+        if (
+            membership.workspace_permission != WorkspacePermission.owner
+            or membership.status != "active"
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="An active local owner membership is required",
+            )
+    organization.name = payload.organization_name
     await session.flush()
     await ensure_workspace_membership_for_organization_membership(session, membership)
 

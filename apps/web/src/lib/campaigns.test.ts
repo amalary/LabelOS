@@ -1,15 +1,19 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { act, renderHook, waitFor } from "@testing-library/react";
 
 import {
   CampaignApiError,
+  clearCampaignCache,
   createCampaign,
   getCampaignMembers,
   getCampaignGoals,
   getCampaignMilestones,
   getCampaigns,
+  invalidateCampaignCache,
   removeCampaignMember,
   shouldInvalidateCampaignRealtimeCacheKey,
   upsertCampaignMember,
+  useCampaigns,
 } from "./campaigns";
 
 const member = {
@@ -51,7 +55,57 @@ const campaign = {
 
 describe("campaign data layer", () => {
   beforeEach(() => {
+    clearCampaignCache();
     vi.stubGlobal("fetch", vi.fn());
+  });
+
+  it.each([false, true])(
+    "refreshes an invalidation during a pending fetch (failure: %s)",
+    async (fail) => {
+      let settle!: (response: Response) => void;
+      vi.mocked(fetch)
+        .mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              settle = resolve;
+            }),
+        )
+        .mockResolvedValueOnce(
+          Response.json({ campaigns: [{ ...campaign, name: "Updated" }], total: 1 }),
+        );
+      const { result } = renderHook(() => useCampaigns("workspace_01"));
+      await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+      act(() => invalidateCampaignCache());
+      await act(async () => {
+        settle(
+          fail
+            ? Response.json({}, { status: 500 })
+            : Response.json({ campaigns: [campaign], total: 1 }),
+        );
+      });
+      await waitFor(() => expect(result.current.data?.campaigns[0]?.name).toBe("Updated"));
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(result.current.error).toBeNull();
+    },
+  );
+
+  it("does not resurrect a cleared cache after a pending invalidation", async () => {
+    let settle!: (response: Response) => void;
+    vi.mocked(fetch).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          settle = resolve;
+        }),
+    );
+    const { unmount } = renderHook(() => useCampaigns("workspace_01"));
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+    act(() => invalidateCampaignCache());
+    unmount();
+    clearCampaignCache();
+    await act(async () => {
+      settle(Response.json({ campaigns: [campaign], total: 1 }));
+    });
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 
   it("fetches campaigns through the workspace API proxy", async () => {

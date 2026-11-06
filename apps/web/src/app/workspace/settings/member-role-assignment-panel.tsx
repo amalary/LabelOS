@@ -80,12 +80,14 @@ export function MemberRoleAssignmentPanel() {
   const roles = useWorkspaceRoles(workspaceId);
   const assignments = useMemberRoleAssignments(workspaceId);
   const [drafts, setDrafts] = useState<Record<string, Set<string>>>({});
+  const [departmentDrafts, setDepartmentDrafts] = useState<Record<string, boolean>>({});
   const [savingMemberId, setSavingMemberId] = useState<string | null>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});
 
   const canModifyRoles =
     authorization.can(capabilities.workspaceMemberRolesManage) &&
     authorization.can(capabilities.roleAssign);
+  const canModifyDepartments = authorization.roles?.some((role) => role.key === "owner") ?? false;
 
   const roleDefinitions = useMemo(() => {
     const definitions = (roles.data?.roles ?? []).filter((role) =>
@@ -176,9 +178,29 @@ export function MemberRoleAssignmentPanel() {
       return nextErrors;
     });
     try {
-      await replaceMemberWorkspaceRoles(workspaceId, member.id, roleIds);
-      await assignments.reload();
+      const departmentDraft = departmentDrafts[member.id];
+      if (
+        canModifyDepartments &&
+        departmentDraft !== undefined &&
+        departmentDraft !== member.department_access.includes("a&r")
+      ) {
+        const departments = member.department_access.filter((department) => department !== "a&r");
+        if (departmentDraft) departments.push("a&r");
+        await replaceMemberWorkspaceRoles(workspaceId, member.id, roleIds, departments);
+      } else {
+        await replaceMemberWorkspaceRoles(workspaceId, member.id, roleIds);
+      }
+      await Promise.all([assignments.reload(), members.reload()]);
+      setDepartmentDrafts((current) => {
+        const next = { ...current };
+        delete next[member.id];
+        return next;
+      });
     } catch {
+      setDepartmentDrafts((current) => ({
+        ...current,
+        [member.id]: member.department_access.includes("a&r"),
+      }));
       setDrafts((currentDrafts) => ({
         ...currentDrafts,
         [member.id]: previousAssignableKeys,
@@ -261,7 +283,11 @@ export function MemberRoleAssignmentPanel() {
               const assignment = assignmentsByMemberId.get(member.id);
               const persistedKeys = roleKeysFor(assignment, assignableRoleKeys);
               const draftKeys = drafts[member.id] ?? persistedKeys;
-              const isDirty = !sameSet(draftKeys, persistedKeys);
+              const hasArAccess =
+                departmentDrafts[member.id] ?? member.department_access.includes("a&r");
+              const isDirty =
+                !sameSet(draftKeys, persistedKeys) ||
+                hasArAccess !== member.department_access.includes("a&r");
               const isSaving = savingMemberId === member.id;
               const canEditMember = canModifyRoles && member.status === "active";
               const statusText = assignmentStatus(errors[member.id], isSaving, isDirty);
@@ -318,6 +344,24 @@ export function MemberRoleAssignmentPanel() {
                       ))}
                     </div>
                   </fieldset>
+
+                  <label className="flex items-center gap-3 text-sm text-slate-700">
+                    <input
+                      aria-label={`${memberName(member)} A&R department access`}
+                      checked={hasArAccess}
+                      disabled={!canEditMember || !canModifyDepartments || isSaving}
+                      onChange={(event) => {
+                        const checked = event.target.checked;
+                        setDepartmentDrafts((current) => ({ ...current, [member.id]: checked }));
+                      }}
+                      type="checkbox"
+                    />
+                    A&R department access
+                  </label>
+                  <p className="text-xs text-slate-500">
+                    Scouting requires the A&R role and A&R department access. A workspace owner can
+                    approve department access here.
+                  </p>
 
                   <div className="flex justify-end">
                     <Button

@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse
 from starlette import status
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from labelos_api.logging import request_log_path
 from labelos_api.models import ErrorResponse
 from labelos_api.scheduling.timezones import ScheduleValidationError
 
@@ -22,7 +23,26 @@ class SchedulingAPIConflict(HTTPException):
         )
 
 
+class YouTubeResearchError(HTTPException):
+    """Provider error with an allowlisted code and optional retry hint."""
+
+
+class MusicBrainzResearchError(HTTPException):
+    """Public metadata failure with no upstream response or identifying headers."""
+
+
 def register_exception_handlers(app: FastAPI) -> None:
+    @app.exception_handler(MusicBrainzResearchError)
+    @app.exception_handler(YouTubeResearchError)
+    async def youtube_research_error_handler(
+        request: Request, exc: YouTubeResearchError | MusicBrainzResearchError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.detail},
+            headers=exc.headers,
+        )
+
     @app.exception_handler(SchedulingAPIConflict)
     async def scheduling_conflict_handler(
         request: Request, exc: SchedulingAPIConflict
@@ -44,7 +64,7 @@ def register_exception_handlers(app: FastAPI) -> None:
     ) -> JSONResponse:
         logger.info(
             "HTTP exception",
-            extra={"path": request.url.path, "status_code": exc.status_code},
+            extra={"path": request_log_path(request), "status_code": exc.status_code},
         )
         return JSONResponse(
             status_code=exc.status_code,
@@ -55,8 +75,10 @@ def register_exception_handlers(app: FastAPI) -> None:
     async def validation_exception_handler(
         request: Request, exc: RequestValidationError
     ) -> JSONResponse:
-        logger.info("Validation error", extra={"path": request.url.path})
-        if "scheduling" in getattr(request.scope.get("route"), "tags", []):
+        logger.info("Validation error", extra={"path": request_log_path(request)})
+        if {"scheduling", "YouTube research", "MusicBrainz research"}.intersection(
+            getattr(request.scope.get("route"), "tags", [])
+        ):
             # Never reflect caller input or Pydantic context (which may contain
             # exception objects, supplied account data, or arbitrary JSON).
             return JSONResponse(
@@ -90,7 +112,9 @@ def register_exception_handlers(app: FastAPI) -> None:
     async def unhandled_exception_handler(
         request: Request, exc: Exception
     ) -> JSONResponse:
-        logger.exception("Unhandled exception", extra={"path": request.url.path})
+        logger.exception(
+            "Unhandled exception", extra={"path": request_log_path(request)}
+        )
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content=ErrorResponse(detail="Internal server error").model_dump(),

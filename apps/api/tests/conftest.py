@@ -1,5 +1,6 @@
 import asyncio
 import os
+import sys
 from uuid import uuid4
 
 import pytest
@@ -8,8 +9,17 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool, StaticPool
 from sqlalchemy.schema import CreateSchema, DropSchema
 
-from labelos_api.config import get_settings
-from labelos_api.main import create_app
+# Only an in-process runner that created and verified a fresh cluster may opt in.
+# Never load saved test profiles or trust inherited DATABASE_URL / PG variables.
+for key in list(os.environ):
+    if key.startswith("PG") or key == "COMPOSE_DATABASE_URL":
+        os.environ.pop(key, None)
+os.environ["DATABASE_URL"] = "sqlite+aiosqlite://"
+os.environ["APP_ENV"] = "test"
+os.environ["TEST_POSTGRES_URL"] = getattr(sys, "_labelos_disposable_postgres_url", "")
+
+from labelos_api.config import get_settings  # noqa: E402
+from labelos_api.main import create_app  # noqa: E402
 
 
 @pytest.fixture(autouse=True)

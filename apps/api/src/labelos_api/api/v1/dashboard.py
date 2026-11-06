@@ -14,6 +14,7 @@ from labelos_api.auth import (
 from labelos_api.authorization import (
     Capability,
     Permission,
+    authorization_service,
     has_capability,
     require_capability,
     require_organization,
@@ -61,7 +62,7 @@ def _active_membership(context: CurrentUserContext) -> MembershipContext:
 
 
 def _has_permission(context: CurrentUserContext, permission: Permission) -> bool:
-    return permission.value in context.principal.permissions
+    return authorization_service.can_permission(context, permission)
 
 
 def _has_capability(context: CurrentUserContext, capability: Capability) -> bool:

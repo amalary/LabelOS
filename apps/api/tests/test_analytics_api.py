@@ -344,6 +344,66 @@ def _observation_payload(
     return payload
 
 
+@pytest.mark.parametrize(
+    ("value_type", "value"),
+    [
+        ("decimal", "Infinity"),
+        ("decimal", "-Infinity"),
+        ("decimal", "NaN"),
+        ("decimal", "1e100"),
+        ("decimal", "-1000000000000000000"),
+        ("decimal", "0.1234567"),
+        ("integer", "1.5"),
+    ],
+)
+def test_numeric_validation_returns_client_errors_without_writes(
+    analytics_client, value_type, value
+) -> None:
+    client, _sessions, seeded = analytics_client
+    _set_context(client, seeded)
+    base = f"/api/v1/workspaces/{seeded.workspace_id}/analytics"
+    metric = _create_metric(client, seeded.workspace_id, value_type=value_type)
+    invalid = _observation_payload(
+        metric["id"], target_type="workspace", value_numeric=value
+    )
+    assert client.post(f"{base}/observations", json=invalid).status_code == 400
+    bulk = client.post(
+        f"{base}/observations/bulk",
+        json={
+            "observations": [
+                _observation_payload(metric["id"], target_type="workspace"),
+                invalid,
+            ]
+        },
+    )
+    assert bulk.status_code == 400
+    assert bulk.json()["detail"]["errors"][0]["index"] == 1
+    assert client.get(f"{base}/observations").json()["total"] == 0
+
+
+@pytest.mark.parametrize(
+    ("value_type", "value", "stored"),
+    [("decimal", "1.234567", "1.234567"), ("integer", "10.000000", "10.000000")],
+)
+def test_numeric_validation_preserves_valid_values(
+    analytics_client, value_type, value, stored
+) -> None:
+    client, _sessions, seeded = analytics_client
+    _set_context(client, seeded)
+    base = f"/api/v1/workspaces/{seeded.workspace_id}/analytics"
+    metric = _create_metric(client, seeded.workspace_id, value_type=value_type)
+    payload = _observation_payload(
+        metric["id"],
+        target_type="workspace",
+        value_numeric=value,
+        idempotency_key="valid-numeric-value",
+    )
+    response = client.post(f"{base}/observations", json=payload)
+    assert response.status_code == 201
+    assert response.json()["value_numeric"] == stored
+    assert client.post(f"{base}/observations", json=payload).status_code == 200
+
+
 def test_analytics_routes_require_authentication(client: TestClient) -> None:
     workspace_id = uuid4()
 

@@ -39,7 +39,11 @@ from labelos_api.api.v1.onboarding import slugify_organization_name
 from labelos_api.auth import (
     CurrentUserContext,
     SessionDep,
+    SettingsDep,
     get_current_user_context,
+    get_invitation_acceptance_context,
+    get_workspace_creation_context,
+    load_membership_contexts,
 )
 from labelos_api.authorization import Capability, authorization_service
 from labelos_api.realtime import RealtimeEventType, RealtimePublisher
@@ -167,6 +171,12 @@ class WorkspaceRoleAssignmentCreateRequest(BaseModel):
 
 class WorkspaceRoleAssignmentsReplaceRequest(BaseModel):
     role_ids: list[UUID] = Field(default_factory=list, max_length=32)
+    department_access: list[str] | None = Field(default=None, max_length=32)
+
+    @field_validator("department_access")
+    @classmethod
+    def validate_departments(cls, value: list[str] | None) -> list[str] | None:
+        return None if value is None else _normalize_department_access(value)
 
     @field_validator("role_ids")
     @classmethod
@@ -269,16 +279,10 @@ class WorkspaceInviteCreateRequest(BaseModel):
             return None
         return _normalize_department_access(value)
 
-    @model_validator(mode="after")
-    def default_workspace_roles_from_professional_roles(
-        self,
-    ) -> "WorkspaceInviteCreateRequest":
-        if not self.workspace_roles and self.professional_roles:
-            self.workspace_roles = _normalize_workspace_roles(self.professional_roles)
-        return self
-
 
 class WorkspaceInviteAcceptRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
     professional_roles: list[str] = Field(default_factory=list, max_length=8)
 
     @field_validator("professional_roles")
@@ -616,6 +620,7 @@ async def _replace_membership_department_access(
     department_slugs: list[str],
     *,
     approved_by: UUID | None,
+    source: str = "invitation",
 ) -> None:
     await session.execute(
         delete(MembershipDepartmentAccess).where(
@@ -633,7 +638,7 @@ async def _replace_membership_department_access(
                 membership_id=membership.id,
                 department_id=department.id,
                 access_level="member",
-                source="invitation",
+                source=source,
                 approved_by=approved_by,
                 approved_at=approved_at,
             )
@@ -650,7 +655,15 @@ async def _assign_workspace_roles(
     if not role_keys:
         return []
 
-    roles = (await session.scalars(select(Role).where(Role.key.in_(role_keys)))).all()
+    roles = (
+        await session.scalars(
+            select(Role).where(
+                Role.key.in_(role_keys),
+                (Role.workspace_id.is_(None))
+                | (Role.workspace_id == workspace_membership.workspace_id),
+            )
+        )
+    ).all()
     roles_by_key = {role.key: role for role in roles}
     missing_roles = [role_key for role_key in role_keys if role_key not in roles_by_key]
     if missing_roles:
@@ -1070,8 +1083,10 @@ async def _slug_exists(
 async def _workspace_invite_by_token(
     session: AsyncSession,
     token: str,
+    *,
+    for_update: bool = False,
 ) -> WorkspaceInvite | None:
-    return await session.scalar(
+    statement = (
         select(WorkspaceInvite)
         .options(
             selectinload(WorkspaceInvite.organization),
@@ -1079,6 +1094,65 @@ async def _workspace_invite_by_token(
         )
         .where(WorkspaceInvite.token == token)
     )
+    if for_update:
+        statement = statement.with_for_update()
+    return await session.scalar(statement)
+
+
+async def _validate_invitation_grants(
+    session: AsyncSession,
+    context: CurrentUserContext,
+    organization_id: UUID,
+    role_keys: list[str],
+    departments: list[str],
+) -> None:
+    _require_capability(context, organization_id, Capability.workspace_member_invite)
+    if role_keys or departments:
+        _require_capability(
+            context, organization_id, Capability.workspace_member_roles_manage
+        )
+    if role_keys:
+        _require_capability(context, organization_id, Capability.role_assign)
+        roles = (
+            await session.scalars(
+                select(Role)
+                .options(
+                    selectinload(Role.capability_links).selectinload(
+                        RoleCapability.capability
+                    )
+                )
+                .where(Role.key.in_(role_keys))
+                .where(
+                    (Role.workspace_id.is_(None))
+                    | (Role.workspace_id == organization_id)
+                )
+            )
+        ).all()
+        if {role.key for role in roles} != set(role_keys):
+            raise _conflict("Invite references unavailable workspace roles")
+        for role in roles:
+            if any(
+                capability.key not in Capability._value2member_map_
+                for capability in role.capabilities
+            ):
+                raise _conflict("Invite references unsupported capabilities")
+            _require_role_capabilities_administerable(context, organization_id, role)
+    membership = next(
+        (
+            item
+            for item in context.memberships
+            if item.organization_id == organization_id and item.status == "active"
+        ),
+        None,
+    )
+    if departments and (
+        membership is None
+        or (
+            membership.workspace_permission != WorkspacePermission.owner
+            and not set(departments).issubset(membership.department_access)
+        )
+    ):
+        raise _forbidden("Cannot grant unauthorized department access")
 
 
 @router.get("", response_model=OrganizationsListResponse)
@@ -1158,6 +1232,7 @@ async def get_current_organization(
 async def activate_organization(
     organization_id: UUID,
     session: SessionDep,
+    settings: SettingsDep,
     context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
 ) -> OrganizationActivationResponse:
     row = await _active_membership_row(session, context, organization_id)
@@ -1167,6 +1242,18 @@ async def activate_organization(
     organization, membership = row
     if organization.workos_organization_id is None:
         raise _conflict("Organization is not connected to WorkOS")
+
+    from labelos_api.services.invited_workspace_activation import (
+        connect_accepted_invitation,
+    )
+
+    await connect_accepted_invitation(
+        session,
+        organization=organization,
+        membership=membership,
+        actor=context.user,
+        settings=settings,
+    )
 
     return OrganizationActivationResponse(
         organization=_organization_response(
@@ -1190,41 +1277,17 @@ async def create_workspace_invite(
     session: SessionDep,
     context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
 ) -> WorkspaceInviteResponse:
-    _require_capability(context, organization_id, Capability.workspace_member_invite)
-    if payload.workspace_roles:
-        _require_capability(
-            context,
-            organization_id,
-            Capability.workspace_member_roles_manage,
-        )
-        _require_capability(context, organization_id, Capability.role_assign)
+    await _validate_invitation_grants(
+        session,
+        context,
+        organization_id,
+        payload.workspace_roles,
+        payload.department_access or [],
+    )
 
     organization = await session.get(Organization, organization_id)
     if organization is None:
         raise _not_found()
-
-    if payload.workspace_roles:
-        roles = (
-            await session.scalars(
-                select(Role)
-                .options(
-                    selectinload(Role.capability_links).selectinload(
-                        RoleCapability.capability
-                    )
-                )
-                .where(Role.key.in_(payload.workspace_roles))
-            )
-        ).all()
-        roles_by_key = {role.key: role for role in roles}
-        for role_key in payload.workspace_roles:
-            role = roles_by_key.get(role_key)
-            if role is None:
-                raise _conflict("Invite references unavailable workspace roles")
-            _require_role_capabilities_administerable(
-                context,
-                organization_id,
-                role,
-            )
 
     if payload.email is not None:
         duplicate_invite = await session.scalar(
@@ -1238,11 +1301,7 @@ async def create_workspace_invite(
             raise _conflict("An active invite already exists for this email")
 
     for _attempt in range(5):
-        proposed_department_access = (
-            payload.department_access
-            if payload.department_access is not None
-            else _proposed_department_access_for_roles(payload.professional_roles)
-        )
+        proposed_department_access = payload.department_access or []
         invite = WorkspaceInvite(
             token=secrets.token_urlsafe(9),
             organization_id=organization_id,
@@ -1303,19 +1362,61 @@ async def get_workspace_invite(
 async def accept_workspace_invite(
     token: str,
     session: SessionDep,
-    context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
+    context: Annotated[CurrentUserContext, Depends(get_invitation_acceptance_context)],
     payload: Annotated[WorkspaceInviteAcceptRequest | None, Body()] = None,
 ) -> WorkspaceInviteAcceptResponse:
-    invite = await _workspace_invite_by_token(session, token)
+    # Serialize status/use-count checks and grants in the same transaction.
+    invite = await _workspace_invite_by_token(session, token, for_update=True)
     if invite is None:
         raise _not_found()
 
     _require_usable_invite(invite)
+    if (
+        invite.invitee_email
+        and invite.invitee_email.casefold() != context.user.email.casefold()
+    ):
+        raise _forbidden("Invitation belongs to another user")
+    if not await authorization_service.is_workspace_membership_active_or_absent(
+        session, context.user.id, invite.organization_id
+    ):
+        raise _forbidden("Workspace membership is not active")
 
     membership = await session.scalar(
         select(OrganizationMembership)
         .where(OrganizationMembership.organization_id == invite.organization_id)
         .where(OrganizationMembership.user_id == context.user.id)
+    )
+    if membership is not None:
+        if membership.status != "active":
+            raise _forbidden("Workspace membership is not active")
+        # Joining is idempotent. Existing members use authorized settings writes
+        # for access changes; a reused link must never restore revoked grants.
+        await ensure_workspace_membership_for_organization_membership(
+            session, membership
+        )
+        await session.commit()
+        return WorkspaceInviteAcceptResponse(
+            workspace=WorkspaceInviteWorkspaceResponse(
+                id=invite.organization.id,
+                name=invite.organization.name,
+                slug=invite.organization.slug,
+            ),
+            membership_id=membership.id,
+            status=membership.status,
+        )
+    if invite.inviter is None:
+        raise _forbidden("Invitation no longer has an authorized inviter")
+    inviter_context = CurrentUserContext(
+        user=invite.inviter,
+        principal=context.principal,
+        memberships=await load_membership_contexts(session, invite.inviter.id),
+    )
+    await _validate_invitation_grants(
+        session,
+        inviter_context,
+        invite.organization_id,
+        list(invite.workspace_roles),
+        list(invite.proposed_department_access),
     )
     membership_activated = False
     if membership is None:
@@ -1327,12 +1428,6 @@ async def accept_workspace_invite(
             status="active",
         )
         session.add(membership)
-        invite.use_count += 1
-        membership_activated = True
-    elif membership.status != "active":
-        membership.status = "active"
-        membership.role = MembershipRole.member
-        membership.workspace_permission = WorkspacePermission.member
         invite.use_count += 1
         membership_activated = True
     await session.flush()
@@ -1361,9 +1456,7 @@ async def accept_workspace_invite(
             membership,
             accepted_roles,
         )
-    workspace_role_keys = list(invite.workspace_roles) or _normalize_workspace_roles(
-        accepted_roles
-    )
+    workspace_role_keys = list(invite.workspace_roles)
     assigned_workspace_roles = await _assign_workspace_roles(
         session,
         workspace_membership=workspace_membership,
@@ -1502,8 +1595,9 @@ async def accept_workspace_invite(
 async def create_organization(
     payload: OrganizationCreateRequest,
     session: SessionDep,
-    context: Annotated[CurrentUserContext, Depends(get_current_user_context)],
+    context: Annotated[CurrentUserContext, Depends(get_workspace_creation_context)],
 ) -> OrganizationResponse:
+    await authorization_service.require_workspace_creation(session, context)
     slug = payload.slug or slugify_organization_name(payload.name)
     if await _slug_exists(session, slug):
         raise _conflict("Organization slug already exists")
@@ -1833,13 +1927,14 @@ async def list_member_workspace_roles(
         raise _not_found()
     _require_capability(context, organization_id, Capability.workspace_member_view)
 
-    _membership, workspace_membership = (
-        await _workspace_membership_for_organization_member(
-            session,
-            organization_id=organization_id,
-            member_id=member_id,
-            ensure=False,
-        )
+    (
+        _membership,
+        workspace_membership,
+    ) = await _workspace_membership_for_organization_member(
+        session,
+        organization_id=organization_id,
+        member_id=member_id,
+        ensure=False,
     )
     if workspace_membership is None:
         return WorkspaceRoleAssignmentsListResponse(roles=[])
@@ -1879,18 +1974,53 @@ async def replace_member_workspace_roles(
     )
     _require_capability(context, organization_id, Capability.role_assign)
 
-    membership, workspace_membership = (
-        await _workspace_membership_for_organization_member(
-            session,
-            organization_id=organization_id,
-            member_id=member_id,
-            active_only=True,
-        )
+    (
+        membership,
+        workspace_membership,
+    ) = await _workspace_membership_for_organization_member(
+        session,
+        organization_id=organization_id,
+        member_id=member_id,
+        active_only=True,
     )
     if workspace_membership is None:
         raise _not_found()
     if membership.user_id == context.user.id:
         raise _forbidden("Cannot replace workspace roles for yourself")
+
+    if payload.department_access is not None:
+        actor_membership = next(
+            (
+                item
+                for item in context.memberships
+                if item.organization_id == organization_id and item.status == "active"
+            ),
+            None,
+        )
+        if (
+            actor_membership is None
+            or actor_membership.workspace_permission != WorkspacePermission.owner
+        ):
+            raise _forbidden("Only workspace owners can change department access")
+    membership = await session.scalar(
+        select(OrganizationMembership)
+        .options(
+            selectinload(OrganizationMembership.user),
+            selectinload(OrganizationMembership.department_access_grants).selectinload(
+                MembershipDepartmentAccess.department
+            ),
+            selectinload(OrganizationMembership.professional_role_links).selectinload(
+                MembershipProfessionalRole.professional_role
+            ),
+        )
+        .where(OrganizationMembership.id == membership.id)
+        .execution_options(populate_existing=True)
+        .with_for_update()
+    )
+    previous_departments = list(membership.approved_department_access)
+    departments_changed = payload.department_access is not None and set(
+        payload.department_access
+    ) != set(previous_departments)
 
     existing_assignments = list(
         (
@@ -1955,6 +2085,14 @@ async def replace_member_workspace_roles(
     ]
 
     try:
+        if departments_changed:
+            await _replace_membership_department_access(
+                session,
+                membership,
+                payload.department_access,
+                approved_by=context.user.id,
+                source="workspace_settings",
+            )
         for assignment in assignments_to_remove:
             await session.delete(assignment)
         for role in roles_to_add:
@@ -2050,23 +2188,31 @@ async def replace_member_workspace_roles(
                     role=role,
                 ),
             )
-        if assignments_to_remove or roles_to_add:
+        if assignments_to_remove or roles_to_add or departments_changed:
             await RealtimePublisher(session).publish(
                 organization_id=organization_id,
                 event_type=RealtimeEventType.membership_roles_updated,
                 actor=context.user,
                 entity_type="workspace_membership",
                 entity_id=workspace_membership.id,
-                payload=_authorization_roles_updated_audit_payload(
-                    workspace_id=organization_id,
-                    membership=membership,
-                    workspace_membership=workspace_membership,
-                    action="replaced",
-                    assigned_roles=roles_to_add,
-                    removed_roles=[
-                        assignment.role for assignment in assignments_to_remove
-                    ],
-                ),
+                payload={
+                    **_authorization_roles_updated_audit_payload(
+                        workspace_id=organization_id,
+                        membership=membership,
+                        workspace_membership=workspace_membership,
+                        action="replaced",
+                        assigned_roles=roles_to_add,
+                        removed_roles=[
+                            assignment.role for assignment in assignments_to_remove
+                        ],
+                    ),
+                    "previousDepartmentAccess": previous_departments,
+                    "departmentAccess": (
+                        list(payload.department_access)
+                        if payload.department_access is not None
+                        else previous_departments
+                    ),
+                },
             )
             await RealtimePublisher(session).publish(
                 organization_id=organization_id,
@@ -2123,13 +2269,14 @@ async def assign_member_workspace_role(
     )
     _require_capability(context, organization_id, Capability.role_assign)
 
-    membership, workspace_membership = (
-        await _workspace_membership_for_organization_member(
-            session,
-            organization_id=organization_id,
-            member_id=member_id,
-            active_only=True,
-        )
+    (
+        membership,
+        workspace_membership,
+    ) = await _workspace_membership_for_organization_member(
+        session,
+        organization_id=organization_id,
+        member_id=member_id,
+        active_only=True,
     )
     if workspace_membership is None:
         raise _not_found()
@@ -2260,13 +2407,14 @@ async def remove_member_workspace_role(
     )
     _require_capability(context, organization_id, Capability.role_assign)
 
-    membership, workspace_membership = (
-        await _workspace_membership_for_organization_member(
-            session,
-            organization_id=organization_id,
-            member_id=member_id,
-            active_only=True,
-        )
+    (
+        membership,
+        workspace_membership,
+    ) = await _workspace_membership_for_organization_member(
+        session,
+        organization_id=organization_id,
+        member_id=member_id,
+        active_only=True,
     )
     if workspace_membership is None:
         raise _not_found()
@@ -2372,13 +2520,14 @@ async def remove_organization_member(
         raise _not_found()
     _require_capability(context, organization_id, Capability.workspace_member_remove)
 
-    membership, workspace_membership = (
-        await _workspace_membership_for_organization_member(
-            session,
-            organization_id=organization_id,
-            member_id=member_id,
-            active_only=True,
-        )
+    (
+        membership,
+        workspace_membership,
+    ) = await _workspace_membership_for_organization_member(
+        session,
+        organization_id=organization_id,
+        member_id=member_id,
+        active_only=True,
     )
     if workspace_membership is None:
         raise _not_found()

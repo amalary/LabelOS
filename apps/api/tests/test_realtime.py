@@ -1,8 +1,10 @@
 import asyncio
+import os
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
 from uuid import UUID
 
+import anyio
 import pytest
 from fastapi.testclient import TestClient
 from labelos_database.base import Base
@@ -16,10 +18,12 @@ from labelos_database.models import (
     User,
     WorkspaceMembership,
 )
-from sqlalchemy import select
+from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.pool import AsyncAdaptedQueuePool
+from starlette.requests import ClientDisconnect
 
+from labelos_api.api.v1 import realtime
 from labelos_api.auth import (
     AuthenticatedPrincipal,
     CurrentUserContext,
@@ -42,16 +46,33 @@ class RealtimeSeed:
     profile_id: UUID
 
 
+@pytest.fixture(
+    params=["sqlite"] + (["postgresql"] if os.environ.get("TEST_POSTGRES_URL") else [])
+)
+def realtime_engine(request, tmp_path):
+    if request.param == "postgresql":
+        yield request.getfixturevalue("postgres_test_engine")
+        return
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path / 'realtime.db'}",
+        connect_args={"check_same_thread": False},
+        poolclass=AsyncAdaptedQueuePool,
+        pool_size=1,
+        max_overflow=0,
+        pool_timeout=0.1,
+    )
+    try:
+        yield engine
+    finally:
+        asyncio.run(engine.dispose())
+
+
 @pytest.fixture
 def realtime_client(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, realtime_engine
 ) -> Iterator[tuple[TestClient, async_sessionmaker[AsyncSession], RealtimeSeed]]:
     monkeypatch.setenv("APP_ENV", "test")
-    engine = create_async_engine(
-        "sqlite+aiosqlite://",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
+    engine = realtime_engine
     sessionmaker = async_sessionmaker(bind=engine, expire_on_commit=False)
 
     async def prepare_database() -> RealtimeSeed:
@@ -129,8 +150,6 @@ def realtime_client(
 
     with TestClient(app) as client:
         yield client, sessionmaker, seeded
-
-    asyncio.run(engine.dispose())
 
 
 def _set_context(
@@ -329,3 +348,150 @@ def test_realtime_event_cursor_is_organization_scoped(
             return [event.type.value for event in events]
 
     assert asyncio.run(publish_and_read()) == [RealtimeEventType.release_updated.value]
+
+
+@pytest.mark.parametrize("revoke_membership", [False, True])
+def test_stream_releases_connection_before_yielding_and_sleeping(
+    realtime_client,
+    monkeypatch: pytest.MonkeyPatch,
+    revoke_membership: bool,
+) -> None:
+    client, sessions, seeded = realtime_client
+    _set_context(client, seeded)
+    if revoke_membership:
+        monkeypatch.setattr(realtime, "MEMBERSHIP_RECHECK_SECONDS", 0)
+
+    async def verify():
+        context = await client.app.dependency_overrides[get_current_user_context]()
+        async with sessions() as session:
+            # Match production, where auth loads the actor in the request session.
+            context = CurrentUserContext(
+                user=await session.get(User, seeded.user_id),
+                principal=context.principal,
+                memberships=context.memberships,
+            )
+            response = await realtime.organization_events(
+                seeded.organization_id, session, context
+            )
+            stream = response.body_iterator
+            assert "event: connected" in await anext(stream)
+
+            async def assert_connection_available():
+                assert not session.in_transaction()
+                # The one-slot pool must be usable by an ordinary request.
+                async with sessions() as other:
+                    assert await other.scalar(text("SELECT 1")) == 1
+
+            await assert_connection_available()
+            async with sessions() as other:
+                if revoke_membership:
+                    await other.execute(
+                        update(OrganizationMembership)
+                        .where(OrganizationMembership.user_id == seeded.user_id)
+                        .values(status="inactive")
+                    )
+                await RealtimePublisher(other).publish(
+                    organization_id=seeded.organization_id,
+                    event_type=RealtimeEventType.artist_updated,
+                    actor=None,
+                )
+                await other.commit()
+
+            event = await anext(stream)
+            await assert_connection_available()
+            if revoke_membership:
+                assert "event: membership_revoked" in event
+                with pytest.raises(StopAsyncIteration):
+                    await anext(stream)
+            else:
+                assert "artist.updated" in event
+
+                async def stop_at_idle(_seconds):
+                    await assert_connection_available()
+                    raise asyncio.CancelledError
+
+                monkeypatch.setattr(realtime.asyncio, "sleep", stop_at_idle)
+                with pytest.raises(asyncio.CancelledError):
+                    await anext(stream)
+            await assert_connection_available()
+
+    asyncio.run(verify())
+    events = asyncio.run(_realtime_events(sessions, seeded.organization_id))
+    assert events[-1].event_type == RealtimeEventType.presence_left.value
+
+
+@pytest.mark.parametrize(
+    "disconnect", ["send_error", "cancel_scope", "receive_disconnect", "poll_cancel"]
+)
+def test_disconnect_finishes_stream_before_request_session_closes(
+    realtime_client, disconnect, monkeypatch, caplog
+):
+    client, sessions, seeded = realtime_client
+    _set_context(client, seeded)
+
+    async def verify():
+        context = await client.app.dependency_overrides[get_current_user_context]()
+        async with sessions() as session:
+            context = CurrentUserContext(
+                user=await session.get(User, seeded.user_id),
+                principal=context.principal,
+                memberships=context.memberships,
+            )
+            response = await realtime.organization_events(
+                seeded.organization_id, session, context
+            )
+
+            sent = anyio.Event()
+
+            async def receive():
+                await sent.wait()
+                return {"type": "http.disconnect"}
+
+            with anyio.CancelScope() as cancellation:
+
+                async def send(message):
+                    if message["type"] == "http.response.body":
+                        if disconnect == "send_error":
+                            raise OSError("client disconnected")
+                        if disconnect == "cancel_scope":
+                            cancellation.cancel()
+                            await anyio.sleep(0)
+                        sent.set()
+
+                if disconnect == "poll_cancel":
+                    original_poll = realtime.list_events_after
+
+                    async def cancel_poll(*args, **kwargs):
+                        cancellation.cancel()
+                        return await original_poll(*args, **kwargs)
+
+                    monkeypatch.setattr(realtime, "list_events_after", cancel_poll)
+
+                try:
+                    await response(
+                        {
+                            "type": "http",
+                            "asgi": {
+                                "spec_version": (
+                                    "2.3"
+                                    if disconnect == "receive_disconnect"
+                                    else "2.4"
+                                )
+                            },
+                        },
+                        receive,
+                        send,
+                    )
+                except ClientDisconnect:
+                    assert disconnect == "send_error"
+            # Presence cleanup must finish before FastAPI closes its dependency.
+            # Otherwise a later generator finalizer can reopen a closed session.
+            events = await _realtime_events(sessions, seeded.organization_id)
+            assert events[-1].event_type == RealtimeEventType.presence_left.value, [
+                getattr(record, "error_type", None) for record in caplog.records
+            ]
+            assert not session.in_transaction()
+            with pytest.raises(StopAsyncIteration):
+                await anext(response.body_iterator)
+
+    anyio.run(verify)

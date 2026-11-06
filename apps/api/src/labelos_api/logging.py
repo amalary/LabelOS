@@ -246,14 +246,21 @@ async def request_logging_middleware(
         _traceparent_header.reset(traceparent_token)
 
 
+def request_log_path(request: Request) -> str:
+    route = getattr(request.scope.get("route"), "path", request.url.path)
+    # Use route templates so invitation tokens and other path parameters cannot
+    # enter structured request logs. Also scrub unmatched invitation paths.
+    return re.sub(r"(/invites/)[^/]+", r"\1{token}", route)
+
+
 def _request_log_fields(
     request: Request, status_code: int, duration_ms: float
 ) -> dict[str, Any]:
-    route = request.url.path
+    route = request_log_path(request)
     return {
         "httpRequest": {
             "requestMethod": request.method,
-            "requestUrl": str(request.url.replace(query=None)),
+            "requestUrl": str(request.url.replace(path=route, query=None)),
             "status": status_code,
             "latency": f"{duration_ms / 1000:.3f}s",
             "userAgent": request.headers.get("user-agent"),

@@ -55,6 +55,38 @@ approval/edit races, and constraint rollback. Each PostgreSQL test creates and
 drops its own randomly named schema; the test user needs permission to create
 schemas. CI provisions PostgreSQL 16 and always sets this URL.
 
+For persistent local configuration, put only your test database URL in the
+repository-root `.env.test.local` file (ignored by Git):
+
+```dotenv
+TEST_POSTGRES_URL=postgresql+asyncpg://labelos_test:YOUR_PASSWORD@127.0.0.1:55438/labelos_test
+```
+
+Pytest reads this value before selecting database test variants. An existing
+`TEST_POSTGRES_URL` environment variable takes precedence, so CI and explicit
+shell overrides remain unchanged. To return to SQLite-only local tests, comment
+out the file's URL and remove any shell override.
+Only `TEST_POSTGRES_URL` is loaded from this file; application settings are not
+changed. The database must already be running; configuring the URL does not
+start PostgreSQL. URL-encode special characters in the username or password.
+
+For the native PostgreSQL 17 test cluster initialized in
+`.tmp/ar-datasheet-postgres/data` on this Windows checkout, start it after a reboot
+with these commands from the repository root:
+
+```powershell
+& "C:/Program Files/PostgreSQL/17/bin/pg_ctl.exe" -D ".tmp/ar-datasheet-postgres/data" -l ".tmp/ar-datasheet-postgres/server.log" -o "-h 127.0.0.1 -p 55438" -w start
+```
+
+To stop that isolated test cluster:
+
+```powershell
+& "C:/Program Files/PostgreSQL/17/bin/pg_ctl.exe" -D ".tmp/ar-datasheet-postgres/data" -m fast -w stop
+```
+
+These commands assume the cluster has already been initialized. Its data and
+local credentials are ignored by Git; they are not supplied by cloning the repo.
+
 Content writers acquire a parent row lock before reading channels or revisions.
 Approval mutations use the same parent-first lock order. Reconciliation plans
 must be built and applied within that locked transaction; commit or rollback
@@ -104,3 +136,10 @@ pnpm db:migrate
 pnpm db:migration -- -m "describe change"
 pnpm db:rollback
 ```
+
+## Public music research adapters
+
+See the [A&R provider suite, capability matrix and configuration guide](../../docs/development/public-music-providers.md)
+for the explicitly composed MusicBrainz, YouTube, SoundCloud, Last.fm, Songkick,
+Wikidata and policy-blocked Spotify adapters. Importing them does not enable live
+collection.
